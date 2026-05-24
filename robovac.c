@@ -746,12 +746,6 @@ static void DrawPlayerBolt(void)
                 WritePixel(&renderRP, sx + y, sy + (ROBOT_W - 1 - x));
             }
         }
-    } else if (robotMaskBM && robotMaskBM->Planes[0]) {
-        BltMaskBitMapRastPort(robotCacheBM, srcBaseX, 0,
-                              &renderRP, sx, sy,
-                              ROBOT_W, ROBOT_H,
-                              (ABC | ABNC | ANBC),
-                              robotMaskBM->Planes[0]);
     } else {
         BltBitMapRastPort(robotCacheBM, srcBaseX, 0, &renderRP, sx, sy, ROBOT_W, ROBOT_H, 0xC0);
     }
