@@ -459,10 +459,71 @@ static void BlitTileTo(struct RastPort *rp, UBYTE tileType, WORD tx, WORD ty)
                       0xC0);
 }
 
+static BOOL IsWallTileAt(WORD tx, WORD ty)
+{
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
+    return map[ty][tx] == TILE_WALL;
+}
+
+static UBYTE GetWallRotation(WORD tx, WORD ty)
+{
+    if (!IsWallTileAt(tx - 1, ty)) return 1; /* 90 degrees */
+    if (!IsWallTileAt(tx, ty - 1)) return 2; /* 180 degrees */
+    if (!IsWallTileAt(tx + 1, ty)) return 3; /* 270 degrees */
+    return 0; /* default: bottom edge */
+}
+
+static void BlitWallRotatedTo(struct RastPort *rp, WORD tx, WORD ty)
+{
+    WORD srcX = TILE_WALL * TILE_SIZE;
+    WORD dstX = MAP_X + tx * TILE_SIZE;
+    WORD dstY = MAP_Y + ty * TILE_SIZE;
+    UBYTE rot = GetWallRotation(tx, ty);
+    WORD x;
+    WORD y;
+
+    if (rot == 0) {
+        BltBitMapRastPort(tileCacheBM, srcX, 0,
+                          rp, dstX, dstY,
+                          TILE_SIZE, TILE_SIZE,
+                          0xC0);
+        return;
+    }
+
+    for (y = 0; y < TILE_SIZE; y++) {
+        for (x = 0; x < TILE_SIZE; x++) {
+            WORD sx = x;
+            WORD sy = y;
+            WORD px;
+
+            if (rot == 1) {
+                /* 90 degrees clockwise */
+                sx = TILE_SIZE - 1 - y;
+                sy = x;
+            } else if (rot == 2) {
+                sx = TILE_SIZE - 1 - x;
+                sy = TILE_SIZE - 1 - y;
+            } else {
+                /* 270 degrees clockwise */
+                sx = y;
+                sy = TILE_SIZE - 1 - x;
+            }
+
+            px = ReadPixel(&tileRP, srcX + sx, sy);
+            SetAPen(rp, (UBYTE)px);
+            WritePixel(rp, dstX + x, dstY + y);
+        }
+    }
+}
+
 static void UpdateRoomTile(WORD tx, WORD ty)
 {
     if (!roomBM || tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return;
-    BlitTileTo(&roomRP, map[ty][tx], tx, ty);
+    if (map[ty][tx] == TILE_WALL) {
+        BlitWallRotatedTo(&roomRP, tx, ty);
+    } else {
+        BlitTileTo(&roomRP, map[ty][tx], tx, ty);
+    }
 }
 
 static void BuildRoomBuffer(void)
