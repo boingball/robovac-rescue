@@ -374,7 +374,7 @@ static BOOL LoadTileSheetIntoCache(void)
         return FALSE;
     }
 
-    if (!DoMethod(dto, DTM_PROCLAYOUT, NULL, TRUE)) {
+    if (!DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE)) {
         DisposeDTObject(dto);
         return FALSE;
     }
