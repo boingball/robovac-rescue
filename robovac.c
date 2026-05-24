@@ -572,7 +572,7 @@ static BOOL LoadRobotSheetIntoCache(void)
                       TAG_DONE);
     if (!dto) return FALSE;
 
-    if (DoMethod(dto, DTM_PROCLAYOUT, NULL, TRUE) != 0) {
+    if (DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE) != 0) {
         GetDTAttrs(dto,
                    PDTA_BitMapHeader, (ULONG)&bmhd,
                    PDTA_DestBitMap, (ULONG)&srcBM,
