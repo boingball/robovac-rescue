@@ -60,6 +60,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define FP_TO_INT(x) ((x) >> FP_SHIFT)
 
 #define MOVE_SPEED  (3 * FP_ONE)
+#define EMERGENCY_MOVE_SPEED  (2 * FP_ONE)
+#define EMERGENCY_DOCK_MOVES  5
+#define DOCK_CHARGE_TICKS     250
 
 #define ROBOT_W     16
 #define ROBOT_H     16
@@ -109,6 +112,8 @@ struct Robot {
     WORD battery;
     WORD score;
     WORD stunTicks;
+    WORD emergencyMovesLeft;
+    WORD chargeTicks;
     BOOL ai;
     BOOL moving;
     UBYTE spriteIndex;
@@ -789,6 +794,8 @@ static void InitRobots(void)
         robots[i].battery = maxBattery;
         robots[i].score = 0;
         robots[i].stunTicks = 0;
+        robots[i].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
+        robots[i].chargeTicks = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
     }
@@ -858,16 +865,27 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
 {
     WORD nx;
     WORD ny;
+    WORD dockDistNow;
+    WORD dockDistNext;
 
     if (id < 0 || id >= robotCount) return FALSE;
     if (robots[id].moving) return FALSE;
-    if (robots[id].battery < batteryCostPerMove) return FALSE;
+    if (robots[id].battery < batteryCostPerMove) {
+        if (robots[id].battery > 0) return FALSE;
+        if (robots[id].emergencyMovesLeft <= 0) return FALSE;
+    }
 
     nx = robots[id].tileX + dx;
     ny = robots[id].tileY + dy;
 
     if (IsBlocked(nx, ny)) return FALSE;
     if (RobotAtTile(nx, ny, id)) return FALSE;
+
+    if (robots[id].battery < batteryCostPerMove) {
+        dockDistNow = AbsW(robots[id].tileX - robotDockX[id]) + AbsW(robots[id].tileY - robotDockY[id]);
+        dockDistNext = AbsW(nx - robotDockX[id]) + AbsW(ny - robotDockY[id]);
+        if (dockDistNext >= dockDistNow) return FALSE;
+    }
 
     robots[id].targetX = nx;
     robots[id].targetY = ny;
@@ -880,8 +898,12 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         playerFacingX = dx;
         playerFacingY = dy;
     }
-    robots[id].battery -= batteryCostPerMove;
-    if (robots[id].battery < 0) robots[id].battery = 0;
+    if (robots[id].battery >= batteryCostPerMove) {
+        robots[id].battery -= batteryCostPerMove;
+    } else {
+        robots[id].battery = 0;
+        robots[id].emergencyMovesLeft--;
+    }
 
     if (id == 0) {
         moves++;
@@ -918,7 +940,13 @@ static void FinishRobotTileMove(WORD id)
     }
 
     if (map[ty][tx] == TILE_DOCK) {
-        robots[id].battery = maxBattery;
+        if (robots[id].battery <= 0) {
+            robots[id].chargeTicks = DOCK_CHARGE_TICKS;
+        } else {
+            robots[id].battery = maxBattery;
+            robots[id].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
+            robots[id].chargeTicks = 0;
+        }
         if (id == 0) robots[id].spriteIndex = SPR_CHARGING;
     }
 }
@@ -938,16 +966,20 @@ static void StepRobotMovement(WORD id)
     dx = targetPx - robots[id].px;
     dy = targetPy - robots[id].py;
 
+    {
+        LONG stepSpeed = (robots[id].battery <= 0) ? EMERGENCY_MOVE_SPEED : MOVE_SPEED;
+
     if (dx > 0) {
-        robots[id].px += (dx < MOVE_SPEED) ? dx : MOVE_SPEED;
+        robots[id].px += (dx < stepSpeed) ? dx : stepSpeed;
     } else if (dx < 0) {
-        robots[id].px -= ((-dx) < MOVE_SPEED) ? (-dx) : MOVE_SPEED;
+        robots[id].px -= ((-dx) < stepSpeed) ? (-dx) : stepSpeed;
     }
 
     if (dy > 0) {
-        robots[id].py += (dy < MOVE_SPEED) ? dy : MOVE_SPEED;
+        robots[id].py += (dy < stepSpeed) ? dy : stepSpeed;
     } else if (dy < 0) {
-        robots[id].py -= ((-dy) < MOVE_SPEED) ? (-dy) : MOVE_SPEED;
+        robots[id].py -= ((-dy) < stepSpeed) ? (-dy) : stepSpeed;
+    }
     }
 
     if (robots[id].px == targetPx && robots[id].py == targetPy) {
@@ -1101,6 +1133,13 @@ static void StepGame(void)
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
         if (robots[i].stunTicks > 0) robots[i].stunTicks--;
+        if (!robots[i].moving && map[robots[i].tileY][robots[i].tileX] == TILE_DOCK && robots[i].chargeTicks > 0) {
+            robots[i].chargeTicks--;
+            if (robots[i].chargeTicks <= 0) {
+                robots[i].battery = maxBattery;
+                robots[i].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
+            }
+        }
     }
     StepPlayerBolt();
 
