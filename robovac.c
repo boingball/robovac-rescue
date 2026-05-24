@@ -18,15 +18,15 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define WIN_W       768
 #define WIN_H       600
 
-#define TILE_SIZE   16
+#define TILE_SIZE   8
 #define MAP_W       40
 #define MAP_H       30
 
-#define MAP_X       64
-#define MAP_Y       84
+#define MAP_X       16
+#define MAP_Y       34
 
-#define ROBOT_W     14
-#define ROBOT_H     14
+#define ROBOT_W     6
+#define ROBOT_H     6
 
 #define MAX_ROBOTS  4
 #define MAX_ROUNDS  5
@@ -183,38 +183,11 @@ static void DrawTile(WORD tx, WORD ty)
     WORD sx = MAP_X + tx * TILE_SIZE;
     WORD sy = MAP_Y + ty * TILE_SIZE;
     UBYTE t = map[ty][tx];
-
     SetAPen(rp, 0);
     RectFill(rp, sx, sy, sx + TILE_SIZE - 1, sy + TILE_SIZE - 1);
-
-    if (t == TILE_FLOOR || t == TILE_DIRT) {
-        SetAPen(rp, 8);
-        Move(rp, sx + 8, sy);
-        Draw(rp, sx + 8, sy + TILE_SIZE - 1);
-        Move(rp, sx, sy + 8);
-        Draw(rp, sx + TILE_SIZE - 1, sy + 8);
-    }
-
-    if (t == TILE_WALL) {
-        SetAPen(rp, 1);
-        RectFill(rp, sx, sy, sx + TILE_SIZE - 1, sy + TILE_SIZE - 1);
-        SetAPen(rp, 7);
-        Move(rp, sx, sy + 1);
-        Draw(rp, sx + TILE_SIZE - 1, sy + 1);
-        SetAPen(rp, 5);
-        Move(rp, sx, sy + TILE_SIZE - 2);
-        Draw(rp, sx + TILE_SIZE - 1, sy + TILE_SIZE - 2);
-    }
-
-    if (t == TILE_DIRT) {
-        SetAPen(rp, 3);
-        RectFill(rp, sx + 5, sy + 5, sx + 10, sy + 10);
-        SetAPen(rp, 2);
-        WritePixel(rp, sx + 4, sy + 7);
-        WritePixel(rp, sx + 11, sy + 9);
-        WritePixel(rp, sx + 8, sy + 4);
-        WritePixel(rp, sx + 7, sy + 11);
-    }
+    if (t == TILE_WALL) { SetAPen(rp, 1); RectFill(rp, sx, sy, sx + TILE_SIZE - 1, sy + TILE_SIZE - 1); }
+    else { SetAPen(rp, 8); WritePixel(rp, sx + 3, sy + 3); }
+    if (t == TILE_DIRT) { SetAPen(rp, 3); RectFill(rp, sx + 2, sy + 2, sx + 5, sy + 5); }
 }
 
 static void DrawMap(void)
@@ -229,22 +202,8 @@ static void DrawRobots(void)
     for (i = 0; i < robotCount; i++) {
         WORD sx = MAP_X + robots[i].x * TILE_SIZE + 1;
         WORD sy = MAP_Y + robots[i].y * TILE_SIZE + 1;
-        UBYTE bodyColor = robots[i].color;
-
-        SetAPen(rp, bodyColor);
+        SetAPen(rp, robots[i].color);
         RectFill(rp, sx, sy, sx + ROBOT_W, sy + ROBOT_H);
-
-        SetAPen(rp, 1);
-        Move(rp, sx + 3, sy + ROBOT_H - 2);
-        Draw(rp, sx + ROBOT_W - 3, sy + ROBOT_H - 2);
-
-        SetAPen(rp, 2);
-        WritePixel(rp, sx + 4, sy + 4);
-        WritePixel(rp, sx + 9, sy + 4);
-
-        SetAPen(rp, 4);
-        Move(rp, sx + 3, sy + 10);
-        Draw(rp, sx + 11, sy + 10);
     }
 }
 
@@ -298,13 +257,13 @@ static void FinishRoundOrMatch(void)
 static void DrawStatus(void)
 {
     char b[256];
-    SetAPen(rp, 0); RectFill(rp, 0, 0, WIN_W - 1, 68);
-    SetAPen(rp, 7); Move(rp, 8, 14);
+    SetAPen(rp, 0); RectFill(rp, 0, 0, WIN_W - 1, 30);
+    SetAPen(rp, 7); Move(rp, 4, 10);
     if (gameState == GAME_TITLE) {
         Text(rp, (STRPTR)"ROBOVAC RESCUE", 14); return;
     }
     if (gameState == GAME_SELECT) {
-        Text(rp, (STRPTR)"Choose AI rivals: 1, 2 or 3 (Esc quits)", 39); return;
+        Text(rp, (STRPTR)"Choose AI rivals: 1,2,3 (Esc quits)", 36); return;
     }
     if (gameState == GAME_MATCH_END) {
         snprintf(b, sizeof(b), "Match over! Winner: R%d score:%d  R=restart Esc=quit", winner + 1, robots[winner].score);
@@ -316,7 +275,7 @@ static void DrawStatus(void)
     }
     snprintf(b, sizeof(b), "Round:%d/5 Room:%s Dirt:%d", roundIndex + 1, roomNames[roomType], dirtLeft);
     Text(rp, (STRPTR)b, strlen(b));
-    Move(rp, 8, 30);
+    Move(rp, 4, 22);
     snprintf(b, sizeof(b), "You:%d B:%d  A1:%d B:%d  A2:%d B:%d  A3:%d B:%d", robots[0].score, robots[0].battery,
         (robotCount>1)?robots[1].score:0, (robotCount>1)?robots[1].battery:0,
         (robotCount>2)?robots[2].score:0, (robotCount>2)?robots[2].battery:0,
@@ -329,21 +288,9 @@ static void RedrawAll(void)
     SetAPen(rp, 0); RectFill(rp, 0, 0, WIN_W - 1, WIN_H - 1);
     DrawStatus();
     if (gameState == GAME_TITLE) {
-        SetAPen(rp, 7); Move(rp, 268, 140); Text(rp, (STRPTR)"ROBOVAC RESCUE", 14);
-        SetAPen(rp, 6); Move(rp, 186, 184); Text(rp, (STRPTR)"Compete with AI vacuums over 5 rounds.", 38);
-        Move(rp, 186, 206); Text(rp, (STRPTR)"Collect more dirt than rivals to win.", 35);
-        SetAPen(rp, 5); Move(rp, 186, 242); Text(rp, (STRPTR)"Arrow keys: Move", 16);
-        Move(rp, 186, 262); Text(rp, (STRPTR)"R: Start / Continue", 19);
-        Move(rp, 186, 282); Text(rp, (STRPTR)"Esc: Quit", 9);
-        SetAPen(rp, 3); Move(rp, 186, 326); Text(rp, (STRPTR)"Press R to continue", 19);
-        return;
+        SetAPen(rp, 6); Move(rp, 36, 100); Text(rp, (STRPTR)"Press R to start competitive cleanup", 35); return;
     }
-    if (gameState == GAME_SELECT) {
-        SetAPen(rp, 7); Move(rp, 188, 160); Text(rp, (STRPTR)"Choose number of AI rivals", 26);
-        SetAPen(rp, 6); Move(rp, 188, 194); Text(rp, (STRPTR)"1 = one rival   2 = two rivals   3 = three rivals", 49);
-        SetAPen(rp, 3); Move(rp, 188, 230); Text(rp, (STRPTR)"First to most dirt after 5 rounds wins.", 38);
-        return;
-    }
+    if (gameState == GAME_SELECT) return;
     DrawMap(); DrawRobots();
 }
 
