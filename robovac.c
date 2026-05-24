@@ -128,6 +128,8 @@ static struct BitMap *robotMaskBM = NULL;
 static UBYTE map[MAP_H][MAP_W];
 
 static struct Robot robots[MAX_ROBOTS];
+static WORD aiPrevTileX[MAX_ROBOTS];
+static WORD aiPrevTileY[MAX_ROBOTS];
 static WORD robotCount = 2;
 static WORD aiRivals = 1;
 
@@ -730,6 +732,8 @@ static void InitRobots(void)
 
     for (i = 0; i < robotCount; i++) {
         SetRobotTile(i, robotStartX[i], robotStartY[i]);
+        aiPrevTileX[i] = robotStartX[i];
+        aiPrevTileY[i] = robotStartY[i];
         robots[i].battery = 110;
         robots[i].score = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
@@ -837,6 +841,11 @@ static void FinishRobotTileMove(WORD id)
     tx = robots[id].targetX;
     ty = robots[id].targetY;
 
+    if (robots[id].ai) {
+        aiPrevTileX[id] = robots[id].tileX;
+        aiPrevTileY[id] = robots[id].tileY;
+    }
+
     robots[id].tileX = tx;
     robots[id].tileY = ty;
     robots[id].px = TO_FP(tx * TILE_SIZE);
@@ -898,9 +907,12 @@ static void ChooseAiMove(WORD id)
     WORD bestDist = 9999;
     WORD curX;
     WORD curY;
-    WORD dx = 0;
-    WORD dy = 0;
-    WORD tryDir;
+    WORD bestMoveDx = 0;
+    WORD bestMoveDy = 0;
+    WORD bestMoveScore = 32767;
+    static const WORD dirX[4] = {1, 0, -1, 0};   /* right, down, left, up */
+    static const WORD dirY[4] = {0, 1, 0, -1};
+    WORD dir;
 
     if (id <= 0 || id >= robotCount) return;
     if (robots[id].moving) return;
@@ -928,30 +940,32 @@ static void ChooseAiMove(WORD id)
     }
 
     if (bestX >= 0) {
-        if (AbsW(bestX - curX) > AbsW(bestY - curY)) {
-            dx = (bestX > curX) ? 1 : -1;
-        } else if (bestY != curY) {
-            dy = (bestY > curY) ? 1 : -1;
-        } else if (bestX != curX) {
-            dx = (bestX > curX) ? 1 : -1;
+        for (dir = 0; dir < 4; dir++) {
+            WORD nx = curX + dirX[dir];
+            WORD ny = curY + dirY[dir];
+            WORD score;
+            BOOL backtrack;
+
+            if (IsBlocked(nx, ny)) continue;
+            if (RobotAtTile(nx, ny, id)) continue;
+            score = AbsW(bestX - nx) + AbsW(bestY - ny);
+            backtrack = (nx == aiPrevTileX[id] && ny == aiPrevTileY[id]) ? TRUE : FALSE;
+            if (backtrack) score += 6; /* prefer forward progress over ping-ponging */
+
+            if (score < bestMoveScore) {
+                bestMoveScore = score;
+                bestMoveDx = dirX[dir];
+                bestMoveDy = dirY[dir];
+            }
         }
 
-        if (StartRobotMove(id, dx, dy)) return;
-
-        /* Try alternate axis if blocked */
-        if (dx != 0 && bestY != curY) {
-            dx = 0;
-            dy = (bestY > curY) ? 1 : -1;
-            if (StartRobotMove(id, dx, dy)) return;
-        } else if (dy != 0 && bestX != curX) {
-            dy = 0;
-            dx = (bestX > curX) ? 1 : -1;
-            if (StartRobotMove(id, dx, dy)) return;
+        if (bestMoveScore < 32767) {
+            if (StartRobotMove(id, bestMoveDx, bestMoveDy)) return;
         }
     }
 
-    /* Fallback random movement */
-    for (tryDir = 0; tryDir < 4; tryDir++) {
+    /* Final fallback random movement if no directional move is available */
+    for (dir = 0; dir < 4; dir++) {
         UWORD r = RandRange(4);
         if (r == 0 && StartRobotMove(id, -1, 0)) return;
         if (r == 1 && StartRobotMove(id, 1, 0)) return;
