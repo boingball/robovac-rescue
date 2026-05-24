@@ -15,8 +15,8 @@
 
 static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
-#define WIN_W       384
-#define WIN_H       300
+#define WIN_W       768
+#define WIN_H       600
 
 #define TILE_SIZE   8
 #define MAP_W       40
