@@ -67,6 +67,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROBOT_W     16
 #define ROBOT_H     16
 #define MAX_ROBOTS  10
+#define ROBOT_VARIANTS 2
 
 #define START_X     1
 #define START_Y     1
@@ -117,6 +118,7 @@ struct Robot {
     BOOL ai;
     BOOL moving;
     UBYTE spriteIndex;
+    UBYTE spriteVariant;
 };
 
 static struct Screen *scr = NULL;
@@ -638,9 +640,43 @@ static void BlitRobotFrameRotated(struct RastPort *srcRP, struct RastPort *dstRP
     }
 }
 
+static void BlitRobotVariant(Object *dto, struct RastPort *dstRP, struct RastPort *maskRP,
+                             WORD variantIndex, WORD baseRotation)
+{
+    struct BitMapHeader *bmhd = NULL;
+    struct BitMap *srcBM = NULL;
+    struct RastPort srcRP;
+    WORD variantBaseX = variantIndex * SPR_STATE_COUNT * ROBOT_W;
+    LONG layoutResult;
+
+    if (!dto) return;
+    layoutResult = DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE);
+    if (layoutResult == 0) return;
+
+    GetDTAttrs(dto,
+               PDTA_BitMapHeader, (ULONG)&bmhd,
+               PDTA_BitMap, (ULONG)&srcBM,
+               TAG_DONE);
+    if (!bmhd || !srcBM || bmhd->bmh_Width < ROBOT_W || bmhd->bmh_Height < ROBOT_H) return;
+
+    InitRastPort(&srcRP);
+    srcRP.BitMap = srcBM;
+
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_UP * ROBOT_W), (baseRotation + 0) % 360);
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_RIGHT * ROBOT_W), (baseRotation + 90) % 360);
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_DOWN * ROBOT_W), (baseRotation + 180) % 360);
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_LEFT * ROBOT_W), (baseRotation + 270) % 360);
+
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_READY * ROBOT_W), baseRotation % 360);
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_CHARGING * ROBOT_W), baseRotation % 360);
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_LOW_BATTERY * ROBOT_W), baseRotation % 360);
+    BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_ENERGY_BOLT * ROBOT_W), baseRotation % 360);
+}
+
 static BOOL LoadRobotSheetIntoCache(void)
 {
     Object *dto = NULL;
+    Object *dto2 = NULL;
     Object *boltDto = NULL;
     struct BitMapHeader *bmhd = NULL;
     struct BitMapHeader *boltBmhd = NULL;
@@ -648,7 +684,6 @@ static BOOL LoadRobotSheetIntoCache(void)
     struct BitMap *boltSrcBM = NULL;
     ULONG *cRegs = NULL;
     LONG numCols = 0;
-    LONG layoutResult = 0;
     LONG boltLayoutResult = 0;
     LONG i;
     struct RastPort srcRP;
@@ -661,25 +696,28 @@ static BOOL LoadRobotSheetIntoCache(void)
                       DTA_GroupID, GID_PICTURE,
                       PDTA_Remap, FALSE,
                       TAG_DONE);
-    if (!dto) {
+    dto2 = NewDTObject("PROGDIR:tiles/airobot2.iff",
+                       DTA_GroupID, GID_PICTURE,
+                       PDTA_Remap, FALSE,
+                       TAG_DONE);
+    if (!dto || !dto2) {
         printf("LoadRobotSheetIntoCache: NewDTObject failed\n");
+        if (dto) DisposeDTObject(dto);
+        if (dto2) DisposeDTObject(dto2);
         return FALSE;
     }
 
-    layoutResult = DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE);
-    if (layoutResult != 0) {
-        GetDTAttrs(dto,
-                   PDTA_BitMapHeader, (ULONG)&bmhd,
-                   PDTA_BitMap, (ULONG)&srcBM,
-                   PDTA_CRegs, (ULONG)&cRegs,
-                   PDTA_NumColors, (ULONG)&numCols,
-                   TAG_DONE);
-    } else {
-        printf("LoadRobotSheetIntoCache: DoDTMethod(DTM_PROCLAYOUT) failed\n");
-    }
+    DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE);
+    GetDTAttrs(dto,
+               PDTA_BitMapHeader, (ULONG)&bmhd,
+               PDTA_BitMap, (ULONG)&srcBM,
+               PDTA_CRegs, (ULONG)&cRegs,
+               PDTA_NumColors, (ULONG)&numCols,
+               TAG_DONE);
 
     if (!bmhd || !srcBM || bmhd->bmh_Width < ROBOT_W || bmhd->bmh_Height < ROBOT_H) {
         DisposeDTObject(dto);
+        DisposeDTObject(dto2);
         return FALSE;
     }
 
@@ -692,17 +730,10 @@ static BOOL LoadRobotSheetIntoCache(void)
     InitRastPort(&maskRP);
     maskRP.BitMap = robotMaskBM;
 
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_UP * ROBOT_W, 0);
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_RIGHT * ROBOT_W, 90);
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_DOWN * ROBOT_W, 180);
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_LEFT * ROBOT_W, 270);
-
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_READY * ROBOT_W, 0);
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_CHARGING * ROBOT_W, 0);
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_LOW_BATTERY * ROBOT_W, 0);
+    BlitRobotVariant(dto, &dstRP, &maskRP, 0, 0);
+    /* airobot2 source art faces down, so rotate 180 first to map to "up". */
+    BlitRobotVariant(dto2, &dstRP, &maskRP, 1, 180);
     boltDstX = SPR_ENERGY_BOLT * ROBOT_W;
-    /* Default/fallback bolt frame from robot sheet. */
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, boltDstX, 0);
 
     boltDto = NewDTObject("PROGDIR:tiles/robotvac-tiles.iff",
                           DTA_GroupID, GID_PICTURE,
@@ -740,15 +771,16 @@ static BOOL LoadRobotSheetIntoCache(void)
     }
 
     DisposeDTObject(dto);
+    DisposeDTObject(dto2);
     return TRUE;
 }
 
 static BOOL InitRobotBobs(void)
 {
 
-    robotCacheBM = AllocBitMap(ROBOT_W * SPR_STATE_COUNT, ROBOT_H, DEPTH,
+    robotCacheBM = AllocBitMap(ROBOT_W * SPR_STATE_COUNT * ROBOT_VARIANTS, ROBOT_H, DEPTH,
                                BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
-    robotMaskBM = AllocBitMap(ROBOT_W * SPR_STATE_COUNT, ROBOT_H, 1,
+    robotMaskBM = AllocBitMap(ROBOT_W * SPR_STATE_COUNT * ROBOT_VARIANTS, ROBOT_H, 1,
                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
 
     if (!robotCacheBM || !robotMaskBM) {
@@ -779,7 +811,7 @@ static void DrawRobotBob(WORD id)
 
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py);
-    srcX = robots[id].spriteIndex * ROBOT_W;
+    srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].spriteIndex) * ROBOT_W;
 
     SetAPen(&renderRP, 6);
     RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
@@ -842,6 +874,7 @@ static void SetRobotTile(WORD id, WORD tx, WORD ty)
     robots[id].py = TO_FP(ty * TILE_SIZE);
     robots[id].moving = FALSE;
     robots[id].spriteIndex = SPR_READY;
+    robots[id].spriteVariant = 0;
 }
 
 static void InitRobots(void)
@@ -863,6 +896,7 @@ static void InitRobots(void)
         robots[i].chargeTicks = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
+        robots[i].spriteVariant = (i == 0) ? 0 : (UBYTE)RandRange(ROBOT_VARIANTS);
     }
 
     moves = 0;
