@@ -622,7 +622,7 @@ static BOOL InitRobotBobs(void)
     robotRP.BitMap = robotCacheBM;
 
     if (!LoadRobotSheetIntoCache()) {
-        printf("Could not load PROGDIR:tiles/robovac-tiles.iff (need 16x128, 16 colours)\n");
+        printf("Could not load PROGDIR:tiles/robovac-tiles.iff (need 128x16, 16 colours)\n");
         return FALSE;
     }
 
