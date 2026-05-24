@@ -497,16 +497,14 @@ static void BlitWallRotatedTo(struct RastPort *rp, WORD tx, WORD ty)
             WORD px;
 
             if (rot == 1) {
-                /* 90 degrees clockwise */
-                sx = TILE_SIZE - 1 - y;
-                sy = x;
+                sx = y;
+                sy = TILE_SIZE - 1 - x;
             } else if (rot == 2) {
                 sx = TILE_SIZE - 1 - x;
                 sy = TILE_SIZE - 1 - y;
             } else {
-                /* 270 degrees clockwise */
-                sx = y;
-                sy = TILE_SIZE - 1 - x;
+                sx = TILE_SIZE - 1 - y;
+                sy = x;
             }
 
             px = ReadPixel(&tileRP, srcX + sx, sy);
