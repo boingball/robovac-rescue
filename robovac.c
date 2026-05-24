@@ -921,11 +921,11 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     robots[id].targetX = nx;
     robots[id].targetY = ny;
     robots[id].moving = TRUE;
+    if (dx < 0) robots[id].spriteIndex = SPR_LEFT;
+    else if (dx > 0) robots[id].spriteIndex = SPR_RIGHT;
+    else if (dy < 0) robots[id].spriteIndex = SPR_UP;
+    else if (dy > 0) robots[id].spriteIndex = SPR_DOWN;
     if (id == 0) {
-        if (dx < 0) robots[id].spriteIndex = SPR_LEFT;
-        else if (dx > 0) robots[id].spriteIndex = SPR_RIGHT;
-        else if (dy < 0) robots[id].spriteIndex = SPR_UP;
-        else if (dy > 0) robots[id].spriteIndex = SPR_DOWN;
         playerFacingX = dx;
         playerFacingY = dy;
     }
@@ -1184,8 +1184,6 @@ static void StepGame(void)
         robots[0].spriteIndex = SPR_LOW_BATTERY;
     } else if (map[robots[0].tileY][robots[0].tileX] == TILE_DOCK && !robots[0].moving) {
         robots[0].spriteIndex = SPR_CHARGING;
-    } else if (!robots[0].moving) {
-        robots[0].spriteIndex = SPR_READY;
     }
 
     CheckEndState();
