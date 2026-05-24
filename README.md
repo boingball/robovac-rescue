@@ -37,3 +37,20 @@ Built as a father-and-son Amiga game project.
 ```bash
 m68k-amigaos-gcc -s -Os -o robovac robovac.c
 ```
+
+
+## Alternate engine prototype (optimized custom-screen runner)
+
+An additional experiment is included as `geodash_opt.c` to show how the game loop can be structured around classic Amiga hardware-friendly rendering techniques:
+
+- Pre-rendered tile cache in CHIP RAM
+- Blitter tile/sprite copies (including mask blits)
+- Dirty redraw gating on tile-column scroll changes
+- Prepared copper gradient list (safe to integrate with custom display control)
+- Offscreen render bitmap + fast frame blit to display
+
+Build it with:
+
+```bash
+make geodash_opt
+```
