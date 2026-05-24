@@ -15,15 +15,18 @@
 
 static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
-#define WIN_W       768
-#define WIN_H       600
+#define PAL_MAX_W   320
+#define PAL_MAX_H   256
+#define WIN_W       384
+#define WIN_H       300
 
 #define TILE_SIZE   16
-#define MAP_W       40
-#define MAP_H       30
+#define MAP_W       (PAL_MAX_W / TILE_SIZE)
+#define MAP_H       15
 
+#define HUD_H       30
 #define MAP_X       ((WIN_W - (MAP_W * TILE_SIZE)) / 2)
-#define MAP_Y       48
+#define MAP_Y       (HUD_H + 8)
 
 #define ROBOT_W     (TILE_SIZE - 6)
 #define ROBOT_H     (TILE_SIZE - 6)
@@ -106,24 +109,43 @@ static void ClearMap(void)
 static void BuildRoomObstacles(void)
 {
     WORD x, y;
+    WORD left = 2;
+    WORD right = MAP_W - 3;
+    WORD top = 2;
+    WORD bottom = MAP_H - 3;
+    WORD midX = MAP_W / 2;
+    WORD midY = MAP_H / 2;
+
     ClearMap();
 
     if (roomType == 0) {
-        for (x = 8; x < 32; x++) map[12][x] = TILE_WALL;
-        for (y = 14; y < 24; y++) map[y][20] = TILE_WALL;
+        for (x = left + 2; x <= right - 2; x++) map[midY][x] = TILE_WALL;
+        for (y = midY + 1; y <= bottom; y++) map[y][midX] = TILE_WALL;
     } else if (roomType == 1) {
-        for (y = 4; y < 25; y += 4) for (x = 6; x < 35; x++) if ((x % 7) < 5) map[y][x] = TILE_WALL;
-    } else if (roomType == 2) {
-        for (y = 6; y < 24; y++) { map[y][10] = TILE_WALL; map[y][30] = TILE_WALL; }
-    } else if (roomType == 3) {
-        for (x = 6; x < 34; x++) { map[8][x] = TILE_WALL; map[21][x] = TILE_WALL; }
-        for (y = 8; y < 22; y++) { map[y][6] = TILE_WALL; map[y][33] = TILE_WALL; }
-    } else {
-        for (y = 5; y < 25; y++) {
-            map[y][13] = TILE_WALL;
-            map[y][26] = TILE_WALL;
+        for (y = top; y <= bottom; y += 3) {
+            for (x = left; x <= right; x++) {
+                if ((x % 5) < 3) map[y][x] = TILE_WALL;
+            }
         }
-        for (x = 13; x <= 26; x++) map[15][x] = TILE_WALL;
+    } else if (roomType == 2) {
+        WORD colA = MAP_W / 3;
+        WORD colB = (MAP_W * 2) / 3;
+        for (y = top; y <= bottom; y++) { map[y][colA] = TILE_WALL; map[y][colB] = TILE_WALL; }
+    } else if (roomType == 3) {
+        WORD boxL = left + 1;
+        WORD boxR = right - 1;
+        WORD boxT = top + 1;
+        WORD boxB = bottom - 1;
+        for (x = boxL; x <= boxR; x++) { map[boxT][x] = TILE_WALL; map[boxB][x] = TILE_WALL; }
+        for (y = boxT; y <= boxB; y++) { map[y][boxL] = TILE_WALL; map[y][boxR] = TILE_WALL; }
+    } else {
+        WORD colA = MAP_W / 3;
+        WORD colB = (MAP_W * 2) / 3;
+        for (y = top; y <= bottom; y++) {
+            map[y][colA] = TILE_WALL;
+            map[y][colB] = TILE_WALL;
+        }
+        for (x = colA; x <= colB; x++) map[midY][x] = TILE_WALL;
     }
 }
 
@@ -290,7 +312,7 @@ static void FinishRoundOrMatch(void)
 static void DrawStatus(void)
 {
     char b[256];
-    SetAPen(rp, 0); RectFill(rp, 0, 0, WIN_W - 1, 30);
+    SetAPen(rp, 0); RectFill(rp, 0, 0, WIN_W - 1, HUD_H);
     SetAPen(rp, 7); Move(rp, 4, 10);
     if (gameState == GAME_TITLE) {
         Text(rp, (STRPTR)"ROBOVAC RESCUE", 14); return;
@@ -321,7 +343,7 @@ static void RedrawAll(void)
     SetAPen(rp, 0); RectFill(rp, 0, 0, WIN_W - 1, WIN_H - 1);
     DrawStatus();
     if (gameState == GAME_TITLE) {
-        SetAPen(rp, 6); Move(rp, 36, 100); Text(rp, (STRPTR)"Press R to start competitive cleanup", 35); return;
+        SetAPen(rp, 6); Move(rp, 20, MAP_Y + (MAP_H * TILE_SIZE) / 2); Text(rp, (STRPTR)"Press R to start competitive cleanup", 35); return;
     }
     if (gameState == GAME_SELECT) return;
     DrawMap(); DrawRobots();
