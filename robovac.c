@@ -730,6 +730,27 @@ static BOOL LoadRobotSheetIntoCache(void)
         DisposeDTObject(boltDto);
     }
 
+    boltDto = NewDTObject("PROGDIR:tiles/robotvac-tiles.iff",
+                          DTA_GroupID, GID_PICTURE,
+                          PDTA_Remap, FALSE,
+                          TAG_DONE);
+    if (boltDto) {
+        boltLayoutResult = DoDTMethod(boltDto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE);
+        if (boltLayoutResult != 0) {
+            GetDTAttrs(boltDto,
+                       PDTA_BitMapHeader, (ULONG)&boltBmhd,
+                       PDTA_BitMap, (ULONG)&boltSrcBM,
+                       TAG_DONE);
+            if (boltBmhd && boltSrcBM && boltBmhd->bmh_Width >= (8 * ROBOT_W) && boltBmhd->bmh_Height >= ROBOT_H) {
+                InitRastPort(&boltSrcRP);
+                boltSrcRP.BitMap = boltSrcBM;
+                /* Override with bolt artwork from sprite 7 in robotvac-tiles.iff. */
+                BlitRobotFrameRotated(&boltSrcRP, &dstRP, &maskRP, 7 * ROBOT_W, SPR_ENERGY_BOLT * ROBOT_W, 0);
+            }
+        }
+        DisposeDTObject(boltDto);
+    }
+
     if (cRegs && numCols > 0) {
         LONG maxCols = (numCols > 16) ? 16 : numCols;
         for (i = 0; i < maxCols; i++) {
