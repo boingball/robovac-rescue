@@ -94,6 +94,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_2       0x02
 #define RAW_3       0x03
 #define RAW_O       0x18
+#define RAW_B       0x35
+#define RAW_E       0x12
+#define RAW_S       0x21
+#define RAW_H       0x25
 
 struct Robot {
     WORD tileX;
@@ -104,6 +108,7 @@ struct Robot {
     LONG py;
     WORD battery;
     WORD score;
+    WORD stunTicks;
     BOOL ai;
     BOOL moving;
     UBYTE spriteIndex;
@@ -135,6 +140,8 @@ static WORD aiRivals = 1;
 
 static WORD dirtLeft = 0;
 static WORD moves = 0;
+static WORD maxBattery = 110;
+static WORD batteryCostPerMove = 1;
 static WORD gameState = GAME_TITLE;
 
 static WORD roundIndex = 0;
@@ -734,8 +741,9 @@ static void InitRobots(void)
         SetRobotTile(i, robotStartX[i], robotStartY[i]);
         aiPrevTileX[i] = robotStartX[i];
         aiPrevTileY[i] = robotStartY[i];
-        robots[i].battery = 110;
+        robots[i].battery = maxBattery;
         robots[i].score = 0;
+        robots[i].stunTicks = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
     }
@@ -807,7 +815,7 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
 
     if (id < 0 || id >= robotCount) return FALSE;
     if (robots[id].moving) return FALSE;
-    if (robots[id].battery <= 0) return FALSE;
+    if (robots[id].battery < batteryCostPerMove) return FALSE;
 
     nx = robots[id].tileX + dx;
     ny = robots[id].tileY + dy;
@@ -824,7 +832,8 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         else if (dy < 0) robots[id].spriteIndex = SPR_UP;
         else if (dy > 0) robots[id].spriteIndex = SPR_DOWN;
     }
-    robots[id].battery--;
+    robots[id].battery -= batteryCostPerMove;
+    if (robots[id].battery < 0) robots[id].battery = 0;
 
     if (id == 0) {
         moves++;
@@ -861,7 +870,7 @@ static void FinishRobotTileMove(WORD id)
     }
 
     if (map[ty][tx] == TILE_DOCK && IsRobotDock(id, tx, ty)) {
-        robots[id].battery = 110;
+        robots[id].battery = maxBattery;
         if (id == 0) robots[id].spriteIndex = SPR_FULLY_CHARGED;
     }
 }
@@ -916,15 +925,17 @@ static void ChooseAiMove(WORD id)
 
     if (id <= 0 || id >= robotCount) return;
     if (robots[id].moving) return;
-    if (robots[id].battery <= 0) return;
+    if (robots[id].stunTicks > 0) return;
+
+    if (robots[id].battery <= 25 || (robots[id].battery <= 0 && (AbsW(robots[id].tileX - robotDockX[id]) + AbsW(robots[id].tileY - robotDockY[id]) <= 4))) {
+        bestX = robotDockX[id];
+        bestY = robotDockY[id];
+    } else if (robots[id].battery < batteryCostPerMove) return;
 
     curX = robots[id].tileX;
     curY = robots[id].tileY;
 
-    if (robots[id].battery <= 25) {
-        bestX = (id == 1 || id == 3) ? (MAP_W - 2) : 1;
-        bestY = (id >= 2) ? (MAP_H - 2) : 1;
-    } else {
+    if (bestX < 0) {
         for (y = 0; y < MAP_H; y++) {
             for (x = 0; x < MAP_W; x++) {
                 if (map[y][x] == TILE_DIRT) {
@@ -1041,6 +1052,7 @@ static void StepGame(void)
 
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
+        if (robots[i].stunTicks > 0) robots[i].stunTicks--;
     }
 
     ChoosePlayerMove();
@@ -1052,7 +1064,7 @@ static void StepGame(void)
     if (robots[0].battery <= 25) {
         robots[0].spriteIndex = SPR_LOW_BATTERY;
     } else if (map[robots[0].tileY][robots[0].tileX] == TILE_DOCK && !robots[0].moving) {
-        robots[0].spriteIndex = (robots[0].battery >= 110) ? SPR_FULLY_CHARGED : SPR_CHARGING;
+        robots[0].spriteIndex = (robots[0].battery >= maxBattery) ? SPR_FULLY_CHARGED : SPR_CHARGING;
     } else if (!robots[0].moving) {
         robots[0].spriteIndex = SPR_READY;
     }
@@ -1075,6 +1087,7 @@ static void DrawHud(void)
         PutText(&renderRP, 72, 10, "ROBOVAC RESCUE", 7);
         PutText(&renderRP, 20, 22, "1/2/3: AI rivals  SPACE/R: start", 13);
         PutText(&renderRP, 20, 30, "Hidden mode: O = 9-rival battle", 14);
+        PutText(&renderRP, 20, 38, "E/S/H difficulty, B fires bolt", 13);
         return;
     }
 
@@ -1099,17 +1112,18 @@ static void DrawHud(void)
         return;
     }
 
-    snprintf(b, sizeof(b), "R%d %s Dirt:%d P:%d(%d) A1:%d(%d)",
+    snprintf(b, sizeof(b), "R%d %s Dirt:%d P:%d(%d) A1:%d(%d) M:%d",
              roundIndex + 1, roomNames[roomType], dirtLeft, robots[0].score, robots[0].battery,
              (robotCount > 1) ? robots[1].score : 0,
-             (robotCount > 1) ? robots[1].battery : 0);
+             (robotCount > 1) ? robots[1].battery : 0,
+             batteryCostPerMove);
     PutText(&renderRP, 4, 12, b, 7);
 
     SetAPen(&renderRP, 1);
     RectFill(&renderRP, 222, 20, 312, 26);
 
     SetAPen(&renderRP, robots[0].battery > 25 ? 13 : 12);
-    RectFill(&renderRP, 224, 22, 224 + (robots[0].battery * 86 / 110), 24);
+    RectFill(&renderRP, 224, 22, 224 + (robots[0].battery * 86 / maxBattery), 24);
 }
 
 static void DrawFrame(void)
@@ -1167,6 +1181,40 @@ static void StartWithRivals(WORD rivals)
     ResetLevel();
 }
 
+
+static void FirePlayerBolt(void)
+{
+    WORD dirX = 0, dirY = 0;
+    WORD x, y, i;
+
+    if (gameState != GAME_PLAYING) return;
+    if (robots[0].moving) return;
+    if (robots[0].battery < 2) return;
+
+    if (keyLeft) dirX = -1;
+    else if (keyRight) dirX = 1;
+    else if (keyUp) dirY = -1;
+    else if (keyDown) dirY = 1;
+    else dirY = -1;
+
+    robots[0].battery -= 2;
+    x = robots[0].tileX + dirX;
+    y = robots[0].tileY + dirY;
+
+    while (!IsBlocked(x, y)) {
+        for (i = 1; i < robotCount; i++) {
+            if (robots[i].tileX == x && robots[i].tileY == y) {
+                robots[i].stunTicks = 250;
+                robots[i].battery -= 5;
+                if (robots[i].battery < 0) robots[i].battery = 0;
+                return;
+            }
+        }
+        x += dirX;
+        y += dirY;
+    }
+}
+
 static void HandleRawKey(UWORD rawCode)
 {
     BOOL keyUpEvent = (rawCode & 0x80) ? TRUE : FALSE;
@@ -1182,7 +1230,12 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_2) { StartWithRivals(2); return; }
         if (code == RAW_3) { StartWithRivals(3); return; }
         if (code == RAW_O) { StartWithRivals(9); return; }
+        if (code == RAW_E) { maxBattery = 110; batteryCostPerMove = 1; return; }
+        if (code == RAW_S) { maxBattery = 55; batteryCostPerMove = 2; return; }
+        if (code == RAW_H) { maxBattery = 36; batteryCostPerMove = 3; return; }
     }
+
+    if (!keyUpEvent && code == RAW_B) { FirePlayerBolt(); return; }
 
     if (!keyUpEvent && (code == RAW_R || code == RAW_SPACE)) {
         if (gameState == GAME_PLAYING) { ResetLevel(); }
