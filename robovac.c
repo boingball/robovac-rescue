@@ -747,7 +747,14 @@ static void DrawPlayerBolt(void)
             }
         }
     } else {
-        BltBitMapRastPort(robotCacheBM, srcBaseX, 0, &renderRP, sx, sy, ROBOT_W, ROBOT_H, 0xC0);
+        for (y = 0; y < ROBOT_H; y++) {
+            for (x = 0; x < ROBOT_W; x++) {
+                LONG p = ReadPixel(&robotRP, srcBaseX + x, y);
+                if (p <= 0) continue;
+                SetAPen(&renderRP, (UBYTE)p);
+                WritePixel(&renderRP, sx + x, sy + y);
+            }
+        }
     }
 }
 
