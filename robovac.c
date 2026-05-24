@@ -562,26 +562,41 @@ static BOOL LoadRobotSheetIntoCache(void)
     Object *dto = NULL;
     struct BitMapHeader *bmhd = NULL;
     struct BitMap *srcBM = NULL;
-    UBYTE *cRegs = NULL;
+    ULONG *cRegs = NULL;
     LONG numCols = 0;
+    LONG layoutResult = 0;
     LONG i;
 
     dto = NewDTObject("PROGDIR:tiles/robovac-tiles.iff",
                       DTA_GroupID, GID_PICTURE,
                       PDTA_Remap, FALSE,
                       TAG_DONE);
-    if (!dto) return FALSE;
+    if (!dto) {
+        printf("LoadRobotSheetIntoCache: NewDTObject failed\n");
+        return FALSE;
+    }
 
-    if (DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE) != 0) {
+    layoutResult = DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE);
+    if (layoutResult != 0) {
         GetDTAttrs(dto,
                    PDTA_BitMapHeader, (ULONG)&bmhd,
-                   PDTA_DestBitMap, (ULONG)&srcBM,
+                   PDTA_BitMap, (ULONG)&srcBM,
                    PDTA_CRegs, (ULONG)&cRegs,
                    PDTA_NumColors, (ULONG)&numCols,
                    TAG_DONE);
+    } else {
+        printf("LoadRobotSheetIntoCache: DoDTMethod(DTM_PROCLAYOUT) failed\n");
     }
 
-    if (!bmhd || !srcBM || bmhd->bmh_Width < 128 || bmhd->bmh_Height != 16) {
+    if (bmhd) {
+        printf("LoadRobotSheetIntoCache: bitmap %ldx%ld depth %ld\n",
+               (LONG)bmhd->bmh_Width,
+               (LONG)bmhd->bmh_Height,
+               (LONG)bmhd->bmh_Depth);
+    }
+    printf("LoadRobotSheetIntoCache: srcBM %s\n", srcBM ? "set" : "NULL");
+
+    if (!bmhd || !srcBM || bmhd->bmh_Width < 128 || bmhd->bmh_Height < 16) {
         DisposeDTObject(dto);
         return FALSE;
     }
