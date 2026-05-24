@@ -12,7 +12,7 @@
  * - WaitTOF() frame loop
  *
  * Build:
- *   m68k-amigaos-gcc -s -Os -o robovac robovac_opt_ai_smooth.c
+ *   m68k-amigaos-gcc -s -Os -o robovac robovac.c
  *
  * Controls:
  *   Arrow keys - move player robot
@@ -72,9 +72,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define GAME_TITLE      0
 #define GAME_PLAYING    1
-#define GAME_WON        2
-#define GAME_BATTERY    3
-#define GAME_MATCH_END  4
+#define GAME_ROUND_END  2
+#define GAME_MATCH_END  3
 
 #define RAW_ESC     0x45
 #define RAW_LEFT    0x4F
@@ -124,10 +123,16 @@ static WORD robotCount = 2;
 static WORD aiRivals = 1;
 
 static WORD dirtLeft = 0;
-static WORD battery = 100;
 static WORD moves = 0;
 static WORD gameState = GAME_TITLE;
-static WORD winner = -1;
+
+static WORD roundIndex = 0;
+static WORD roundWins[MAX_ROBOTS] = {0,0,0,0};
+static WORD totalScores[MAX_ROBOTS] = {0,0,0,0};
+static WORD roundScores[MAX_ROBOTS] = {0,0,0,0};
+static WORD roundWinner = -1;
+static WORD finalWinner = -1;
+static WORD roomType = 0;
 static BOOL running = TRUE;
 
 static BOOL keyLeft = FALSE;
@@ -148,21 +153,93 @@ static const UBYTE robotPens[MAX_ROBOTS] = {
     10, 13, 12, 15
 };
 
-static const char *levelData[MAP_H] = {
-    "####################",
-    "#D....*......*.....#",
-    "#..TTT.......TTT...#",
-    "#..T.....*.....T...#",
-    "#..T...........T...#",
-    "#......######......#",
-    "#.*....#....#....*.#",
-    "#......#....#......#",
-    "#..T...######..T...#",
-    "#..T.....*.....T...#",
-    "#..TTT.......TTT...#",
-    "#.....*......*.....#",
-    "#..................#",
-    "####################"
+static const char *roomNames[5] = {
+    "Living Room", "Dining Room", "Kitchen", "Bathroom", "Bedroom"
+};
+
+static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
+
+static const char *roomLayouts[5][MAP_H] = {
+    {
+        "####################",
+        "#D...............D.#",
+        "#..TTT.......TTT...#",
+        "#..T...........T...#",
+        "#..T...######..T...#",
+        "#......#....#......#",
+        "#......#....#......#",
+        "#......#....#......#",
+        "#..T...######..T...#",
+        "#..T...........T...#",
+        "#..TTT.......TTT...#",
+        "#D...............D.#",
+        "#..................#",
+        "####################"
+    },
+    {
+        "####################",
+        "#D....TT......TT..D#",
+        "#.....TT......TT...#",
+        "#..####........###.#",
+        "#..#..#..TTTT..#...#",
+        "#..#..#........#...#",
+        "#..####........###.#",
+        "#..................#",
+        "#..TT..######..TT..#",
+        "#......#....#......#",
+        "#......#....#......#",
+        "#D.....######.....D#",
+        "#..................#",
+        "####################"
+    },
+    {
+        "####################",
+        "#D....######......D#",
+        "#.....#TTTT#.......#",
+        "#.....#....#..TTT..#",
+        "#..####....####....#",
+        "#..#..........#....#",
+        "#..#..######..#....#",
+        "#..#..#....#..#....#",
+        "#..#..######..#....#",
+        "#..#..........#....#",
+        "#..####....####....#",
+        "#D....#....#.....D.#",
+        "#.....######.......#",
+        "####################"
+    },
+    {
+        "####################",
+        "#D....TT..##.....D.#",
+        "#.....TT..##.......#",
+        "#..######....TTT...#",
+        "#..#....#....T.....#",
+        "#..#....#....T.....#",
+        "#..#....######.....#",
+        "#..#...............#",
+        "#..######....####..#",
+        "#.....TT.....#..#..#",
+        "#.....TT.....#..#..#",
+        "#D...........####.D#",
+        "#..................#",
+        "####################"
+    },
+    {
+        "####################",
+        "#D....TT......TT..D#",
+        "#.....TT......TT...#",
+        "#..................#",
+        "#..######....#######",
+        "#..#....#....#....##",
+        "#..#....#....#....##",
+        "#..#....#....#....##",
+        "#..######....#######",
+        "#..................#",
+        "#...TT..........TT.#",
+        "#D..TT..........TTD#",
+        "#..................#",
+        "####################"
+    }
 };
 
 static UWORD RandRange(UWORD n)
@@ -191,7 +268,11 @@ static void CountDirt(void)
 
     dirtLeft = 0;
 
-    for (y = 0; y < MAP_H; y++) {
+    if (robots[id].battery <= 25) {
+        bestX = (id == 1 || id == 3) ? (MAP_W - 2) : 1;
+        bestY = (id >= 2) ? (MAP_H - 2) : 1;
+        bestDist = 0;
+    } else for (y = 0; y < MAP_H; y++) {
         for (x = 0; x < MAP_W; x++) {
             if (map[y][x] == TILE_DIRT) dirtLeft++;
         }
@@ -454,22 +535,49 @@ static void InitRobots(void)
         robots[i].spriteIndex = i;
     }
 
-    battery = robots[0].battery;
     moves = 0;
+}
+
+
+static BOOL IsRobotDock(WORD id, WORD tx, WORD ty)
+{
+    static const WORD sx[MAX_ROBOTS] = {1, MAP_W - 2, 1, MAP_W - 2};
+    static const WORD sy[MAX_ROBOTS] = {1, 1, MAP_H - 2, MAP_H - 2};
+    if (id < 0 || id >= MAX_ROBOTS) return FALSE;
+    return (tx == sx[id] && ty == sy[id]) ? TRUE : FALSE;
+}
+
+static BOOL ValidDirtTile(WORD tx, WORD ty)
+{
+    if (map[ty][tx] != TILE_FLOOR) return FALSE;
+    if (IsRobotDock(0, tx, ty) || IsRobotDock(1, tx, ty) || IsRobotDock(2, tx, ty) || IsRobotDock(3, tx, ty)) return FALSE;
+    return TRUE;
+}
+
+static void SpawnRoundDirt(WORD count)
+{
+    WORD placed = 0, tries = 0;
+    while (placed < count && tries < 2000) {
+        WORD x = 1 + RandRange(MAP_W - 2);
+        WORD y = 1 + RandRange(MAP_H - 2);
+        if (ValidDirtTile(x, y)) { map[y][x] = TILE_DIRT; placed++; }
+        tries++;
+    }
 }
 
 static void ResetLevel(void)
 {
-    WORD x;
-    WORD y;
+    WORD x, y;
+    const char **layout;
+
+    roomType = RandRange(5);
+    layout = roomLayouts[roomType];
 
     for (y = 0; y < MAP_H; y++) {
         for (x = 0; x < MAP_W; x++) {
-            char c = levelData[y][x];
-
+            char c = layout[y][x];
             switch (c) {
                 case '#': map[y][x] = TILE_WALL; break;
-                case '*': map[y][x] = TILE_DIRT; break;
                 case 'D': map[y][x] = TILE_DOCK; break;
                 case 'T': map[y][x] = TILE_TABLE; break;
                 default:  map[y][x] = TILE_FLOOR; break;
@@ -477,13 +585,13 @@ static void ResetLevel(void)
         }
     }
 
+    SpawnRoundDirt(roundDirtTargets[roundIndex]);
     keyLeft = keyRight = keyUp = keyDown = FALSE;
-    winner = -1;
     gameState = GAME_PLAYING;
 
+    InitRobots();
     CountDirt();
     BuildRoomBuffer();
-    InitRobots();
 }
 
 static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
@@ -508,7 +616,6 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
 
     if (id == 0) {
         moves++;
-        battery = robots[id].battery;
     }
 
     return TRUE;
@@ -536,9 +643,8 @@ static void FinishRobotTileMove(WORD id)
         UpdateRoomTile(tx, ty);
     }
 
-    if (map[ty][tx] == TILE_DOCK) {
+    if (map[ty][tx] == TILE_DOCK && IsRobotDock(id, tx, ty)) {
         robots[id].battery = 110;
-        if (id == 0) battery = robots[id].battery;
     }
 }
 
@@ -594,14 +700,19 @@ static void ChooseAiMove(WORD id)
     curX = robots[id].tileX;
     curY = robots[id].tileY;
 
-    for (y = 0; y < MAP_H; y++) {
-        for (x = 0; x < MAP_W; x++) {
-            if (map[y][x] == TILE_DIRT) {
-                WORD d = AbsW(x - curX) + AbsW(y - curY);
-                if (d < bestDist) {
-                    bestDist = d;
-                    bestX = x;
-                    bestY = y;
+    if (robots[id].battery <= 25) {
+        bestX = (id == 1 || id == 3) ? (MAP_W - 2) : 1;
+        bestY = (id >= 2) ? (MAP_H - 2) : 1;
+    } else {
+        for (y = 0; y < MAP_H; y++) {
+            for (x = 0; x < MAP_W; x++) {
+                if (map[y][x] == TILE_DIRT) {
+                    WORD d = AbsW(x - curX) + AbsW(y - curY);
+                    if (d < bestDist) {
+                        bestDist = d;
+                        bestX = x;
+                        bestY = y;
+                    }
                 }
             }
         }
@@ -670,26 +781,32 @@ static BOOL AnyRobotCanMove(void)
 static void CheckEndState(void)
 {
     WORD i;
-    WORD bestScore = -1;
+    WORD best = -1;
 
     if (gameState != GAME_PLAYING) return;
-
     if (dirtLeft > 0 && AnyRobotCanMove()) return;
 
-    winner = 0;
     for (i = 0; i < robotCount; i++) {
-        if (robots[i].score > bestScore) {
-            bestScore = robots[i].score;
-            winner = i;
+        roundScores[i] = robots[i].score;
+        totalScores[i] += robots[i].score;
+        if (robots[i].score > best) {
+            best = robots[i].score;
+            roundWinner = i;
         }
     }
+    roundWins[roundWinner]++;
 
-    if (winner == 0 && dirtLeft == 0) {
-        gameState = GAME_WON;
-    } else if (winner == 0) {
-        gameState = GAME_WON;
-    } else {
+    if (roundIndex >= 4) {
+        finalWinner = 0;
+        for (i = 1; i < robotCount; i++) {
+            if (roundWins[i] > roundWins[finalWinner] ||
+                (roundWins[i] == roundWins[finalWinner] && totalScores[i] > totalScores[finalWinner])) {
+                finalWinner = i;
+            }
+        }
         gameState = GAME_MATCH_END;
+    } else {
+        gameState = GAME_ROUND_END;
     }
 }
 
@@ -709,11 +826,6 @@ static void StepGame(void)
         ChooseAiMove(i);
     }
 
-    battery = robots[0].battery;
-
-    if (battery <= 0 && dirtLeft > 0 && !AnyRobotCanMove()) {
-        gameState = GAME_BATTERY;
-    }
 
     CheckEndState();
 }
@@ -735,18 +847,18 @@ static void DrawHud(void)
         return;
     }
 
-    if (gameState == GAME_WON) {
-        snprintf(b, sizeof(b), "YOU WIN! You:%d  A1:%d A2:%d A3:%d", robots[0].score,
+    if (gameState == GAME_ROUND_END) {
+        snprintf(b, sizeof(b), "ROUND OVER You:%d  A1:%d A2:%d A3:%d", robots[0].score,
                  (robotCount > 1) ? robots[1].score : 0,
                  (robotCount > 2) ? robots[2].score : 0,
                  (robotCount > 3) ? robots[3].score : 0);
         PutText(&renderRP, 14, 12, b, 13);
-        PutText(&renderRP, 76, 24, "Press R to restart", 7);
+        PutText(&renderRP, 76, 24, "Press R/Space for next round", 7);
         return;
     }
 
     if (gameState == GAME_MATCH_END) {
-        snprintf(b, sizeof(b), "AI ROBOT %d WINS! Press R", winner);
+        snprintf(b, sizeof(b), "MATCH WINNER: Robot %d  Press R/Space", finalWinner);
         PutText(&renderRP, 42, 12, b, 12);
         snprintf(b, sizeof(b), "You:%d A1:%d A2:%d A3:%d", robots[0].score,
                  (robotCount > 1) ? robots[1].score : 0,
@@ -756,18 +868,10 @@ static void DrawHud(void)
         return;
     }
 
-    if (gameState == GAME_BATTERY) {
-        PutText(&renderRP, 46, 12, "BATTERY FLAT! Press R", 12);
-        snprintf(b, sizeof(b), "Dirt:%d  You:%d", dirtLeft, robots[0].score);
-        PutText(&renderRP, 86, 24, b, 7);
-        return;
-    }
-
-    snprintf(b, sizeof(b), "Dirt:%d  You:%d B:%d  A1:%d A2:%d A3:%d",
-             dirtLeft, robots[0].score, robots[0].battery,
+    snprintf(b, sizeof(b), "R%d %s Dirt:%d P:%d(%d) A1:%d(%d)",
+             roundIndex + 1, roomNames[roomType], dirtLeft, robots[0].score, robots[0].battery,
              (robotCount > 1) ? robots[1].score : 0,
-             (robotCount > 2) ? robots[2].score : 0,
-             (robotCount > 3) ? robots[3].score : 0);
+             (robotCount > 1) ? robots[1].battery : 0);
     PutText(&renderRP, 4, 12, b, 7);
 
     SetAPen(&renderRP, 1);
@@ -823,9 +927,12 @@ static void PresentFrame(void)
 
 static void StartWithRivals(WORD rivals)
 {
+    WORD i;
     aiRivals = rivals;
     if (aiRivals < 1) aiRivals = 1;
     if (aiRivals > 3) aiRivals = 3;
+    roundIndex = 0;
+    for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
     ResetLevel();
 }
 
@@ -846,7 +953,9 @@ static void HandleRawKey(UWORD rawCode)
     }
 
     if (!keyUpEvent && (code == RAW_R || code == RAW_SPACE)) {
-        ResetLevel();
+        if (gameState == GAME_PLAYING) { ResetLevel(); }
+        else if (gameState == GAME_ROUND_END) { roundIndex++; ResetLevel(); }
+        else { WORD i; roundIndex = 0; for (i=0;i<MAX_ROBOTS;i++){roundWins[i]=0; totalScores[i]=0;} ResetLevel(); }
         return;
     }
 
