@@ -157,6 +157,18 @@ static BOOL keyLeft = FALSE;
 static BOOL keyRight = FALSE;
 static BOOL keyUp = FALSE;
 static BOOL keyDown = FALSE;
+static WORD playerFacingX = 0;
+static WORD playerFacingY = -1;
+
+struct Bolt {
+    BOOL active;
+    WORD dirX;
+    WORD dirY;
+    LONG px;
+    LONG py;
+    WORD ttl;
+};
+static struct Bolt playerBolt = {FALSE, 0, -1, 0, 0, 0};
 
 static ULONG rng = 0x1234ABCD;
 
@@ -184,7 +196,7 @@ enum RobotSpriteState {
     SPR_RIGHT = 4,
     SPR_CHARGING = 5,
     SPR_LOW_BATTERY = 6,
-    SPR_FULLY_CHARGED = 7,
+    SPR_ENERGY_BOLT = 7,
     SPR_STATE_COUNT = 8
 };
 
@@ -193,6 +205,7 @@ static const char *roomNames[5] = {
 };
 
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
+static void StepPlayerBolt(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -713,6 +726,37 @@ static void DrawRobotBob(WORD id)
     }
 }
 
+static void DrawPlayerBolt(void)
+{
+    WORD sx, sy, x, y;
+    WORD srcBaseX;
+
+    if (!playerBolt.active || !robotCacheBM) return;
+
+    sx = MAP_X + FP_TO_INT(playerBolt.px);
+    sy = MAP_Y + FP_TO_INT(playerBolt.py);
+    srcBaseX = SPR_ENERGY_BOLT * ROBOT_W;
+
+    if (playerBolt.dirY != 0) {
+        for (y = 0; y < ROBOT_H; y++) {
+            for (x = 0; x < ROBOT_W; x++) {
+                LONG p = ReadPixel(&robotRP, srcBaseX + x, y);
+                if (p <= 0) continue;
+                SetAPen(&renderRP, (UBYTE)p);
+                WritePixel(&renderRP, sx + y, sy + (ROBOT_W - 1 - x));
+            }
+        }
+    } else if (robotMaskBM && robotMaskBM->Planes[0]) {
+        BltMaskBitMapRastPort(robotCacheBM, srcBaseX, 0,
+                              &renderRP, sx, sy,
+                              ROBOT_W, ROBOT_H,
+                              (ABC | ABNC | ANBC),
+                              robotMaskBM->Planes[0]);
+    } else {
+        BltBitMapRastPort(robotCacheBM, srcBaseX, 0, &renderRP, sx, sy, ROBOT_W, ROBOT_H, 0xC0);
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Gameplay
  * ------------------------------------------------------------------------- */
@@ -801,6 +845,7 @@ static void ResetLevel(void)
 
     SpawnRoundDirt(roundDirtTargets[roundIndex]);
     keyLeft = keyRight = keyUp = keyDown = FALSE;
+    playerBolt.active = FALSE;
     gameState = GAME_PLAYING;
 
     InitRobots();
@@ -831,6 +876,8 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         else if (dx > 0) robots[id].spriteIndex = SPR_RIGHT;
         else if (dy < 0) robots[id].spriteIndex = SPR_UP;
         else if (dy > 0) robots[id].spriteIndex = SPR_DOWN;
+        playerFacingX = dx;
+        playerFacingY = dy;
     }
     robots[id].battery -= batteryCostPerMove;
     if (robots[id].battery < 0) robots[id].battery = 0;
@@ -869,9 +916,9 @@ static void FinishRobotTileMove(WORD id)
         UpdateRoomTile(tx, ty);
     }
 
-    if (map[ty][tx] == TILE_DOCK && IsRobotDock(id, tx, ty)) {
+    if (map[ty][tx] == TILE_DOCK) {
         robots[id].battery = maxBattery;
-        if (id == 0) robots[id].spriteIndex = SPR_FULLY_CHARGED;
+        if (id == 0) robots[id].spriteIndex = SPR_CHARGING;
     }
 }
 
@@ -1054,6 +1101,7 @@ static void StepGame(void)
         StepRobotMovement(i);
         if (robots[i].stunTicks > 0) robots[i].stunTicks--;
     }
+    StepPlayerBolt();
 
     ChoosePlayerMove();
 
@@ -1064,7 +1112,7 @@ static void StepGame(void)
     if (robots[0].battery <= 25) {
         robots[0].spriteIndex = SPR_LOW_BATTERY;
     } else if (map[robots[0].tileY][robots[0].tileX] == TILE_DOCK && !robots[0].moving) {
-        robots[0].spriteIndex = (robots[0].battery >= maxBattery) ? SPR_FULLY_CHARGED : SPR_CHARGING;
+        robots[0].spriteIndex = SPR_CHARGING;
     } else if (!robots[0].moving) {
         robots[0].spriteIndex = SPR_READY;
     }
@@ -1156,6 +1204,7 @@ static void DrawFrame(void)
         DrawRobotBob(i);
     }
     DrawRobotBob(0);
+    DrawPlayerBolt();
 }
 
 static void PresentFrame(void)
@@ -1185,33 +1234,54 @@ static void StartWithRivals(WORD rivals)
 static void FirePlayerBolt(void)
 {
     WORD dirX = 0, dirY = 0;
-    WORD x, y, i;
 
     if (gameState != GAME_PLAYING) return;
-    if (robots[0].moving) return;
     if (robots[0].battery < 2) return;
+    if (playerBolt.active) return;
 
-    if (keyLeft) dirX = -1;
+    if (robots[0].moving) {
+        dirX = robots[0].targetX - robots[0].tileX;
+        dirY = robots[0].targetY - robots[0].tileY;
+    } else if (keyLeft) dirX = -1;
     else if (keyRight) dirX = 1;
     else if (keyUp) dirY = -1;
     else if (keyDown) dirY = 1;
-    else dirY = -1;
+    else { dirX = playerFacingX; dirY = playerFacingY; }
+    if (dirX == 0 && dirY == 0) dirY = -1;
 
     robots[0].battery -= 2;
-    x = robots[0].tileX + dirX;
-    y = robots[0].tileY + dirY;
+    playerFacingX = dirX;
+    playerFacingY = dirY;
+    playerBolt.active = TRUE;
+    playerBolt.dirX = dirX;
+    playerBolt.dirY = dirY;
+    playerBolt.px = TO_FP(robots[0].tileX * TILE_SIZE);
+    playerBolt.py = TO_FP(robots[0].tileY * TILE_SIZE);
+    playerBolt.ttl = 24;
+}
 
-    while (!IsBlocked(x, y)) {
-        for (i = 1; i < robotCount; i++) {
-            if (robots[i].tileX == x && robots[i].tileY == y) {
-                robots[i].stunTicks = 250;
-                robots[i].battery -= 5;
-                if (robots[i].battery < 0) robots[i].battery = 0;
-                return;
-            }
+static void StepPlayerBolt(void)
+{
+    WORD tx, ty, i;
+
+    if (!playerBolt.active) return;
+    if (playerBolt.ttl-- <= 0) { playerBolt.active = FALSE; return; }
+
+    playerBolt.px += playerBolt.dirX * (5 * FP_ONE);
+    playerBolt.py += playerBolt.dirY * (5 * FP_ONE);
+    tx = FP_TO_INT(playerBolt.px) / TILE_SIZE;
+    ty = FP_TO_INT(playerBolt.py) / TILE_SIZE;
+
+    if (IsBlocked(tx, ty)) { playerBolt.active = FALSE; return; }
+
+    for (i = 1; i < robotCount; i++) {
+        if (robots[i].tileX == tx && robots[i].tileY == ty) {
+            robots[i].stunTicks = 250;
+            robots[i].battery -= 5;
+            if (robots[i].battery < 0) robots[i].battery = 0;
+            playerBolt.active = FALSE;
+            return;
         }
-        x += dirX;
-        y += dirY;
     }
 }
 
