@@ -364,9 +364,11 @@ static BOOL LoadTileSheetIntoCache(void)
     Object *dto;
     struct BitMapHeader *bmhd = NULL;
     struct BitMap *srcBM = NULL;
+    struct ColorRegister *cRegs = NULL;
+    ULONG numColors = 0;
     WORD i;
 
-    dto = NewDTObject("PROGDIR:tiles/world-tile.iff",
+    dto = NewDTObject("PROGDIR:tiles/world-till.iff",
                       DTA_GroupID, GID_PICTURE,
                       PDTA_Remap, FALSE,
                       TAG_DONE);
@@ -399,6 +401,18 @@ static BOOL LoadTileSheetIntoCache(void)
                   0xC0, 0xFF, NULL);
     }
 
+    if (GetDTAttrs(dto,
+                   PDTA_CRegs, (ULONG)&cRegs,
+                   PDTA_NumColors, (ULONG)&numColors,
+                   TAG_DONE) && cRegs && numColors) {
+        ULONG maxCols = (numColors > 16) ? 16 : numColors;
+        for (i = 0; i < (WORD)maxCols; i++) {
+            palette[i] = (UWORD)(((cRegs[i].red >> 4) << 8) |
+                                 ((cRegs[i].green >> 4) << 4) |
+                                 (cRegs[i].blue >> 4));
+        }
+    }
+
     DisposeDTObject(dto);
     return TRUE;
 }
@@ -406,7 +420,6 @@ static BOOL LoadTileSheetIntoCache(void)
 static BOOL InitTileCache(void)
 {
     UBYTE i;
-
     tileCacheBM = AllocBitMap(TILE_SIZE * TILE_COUNT, TILE_SIZE, DEPTH,
                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
     if (!tileCacheBM) {
