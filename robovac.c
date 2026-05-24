@@ -364,11 +364,11 @@ static BOOL LoadTileSheetIntoCache(void)
     Object *dto;
     struct BitMapHeader *bmhd = NULL;
     struct BitMap *srcBM = NULL;
-    struct ColorRegister *cRegs = NULL;
+    ULONG *cRegs = NULL;
     ULONG numColors = 0;
     WORD i;
 
-    dto = NewDTObject("PROGDIR:tiles/world-till.iff",
+    dto = NewDTObject("PROGDIR:tiles/world-tile.iff",
                       DTA_GroupID, GID_PICTURE,
                       PDTA_Remap, FALSE,
                       TAG_DONE);
@@ -407,10 +407,11 @@ static BOOL LoadTileSheetIntoCache(void)
                    TAG_DONE) && cRegs && numColors) {
         ULONG maxCols = (numColors > 16) ? 16 : numColors;
         for (i = 0; i < (WORD)maxCols; i++) {
-            palette[i] = (UWORD)(((cRegs[i].red >> 4) << 8) |
-                                 ((cRegs[i].green >> 4) << 4) |
-                                 (cRegs[i].blue >> 4));
+            palette[i] = (UWORD)(((cRegs[i * 3 + 0] >> 28) << 8) |
+                                 ((cRegs[i * 3 + 1] >> 28) << 4) |
+                                 (cRegs[i * 3 + 2] >> 28));
         }
+        LoadRGB4(&scr->ViewPort, palette, maxCols);
     }
 
     DisposeDTObject(dto);
