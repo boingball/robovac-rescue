@@ -423,7 +423,6 @@ static BOOL LoadTileSheetIntoCache(void)
                                  ((cRegs[i * 3 + 1] >> 28) << 4) |
                                  (cRegs[i * 3 + 2] >> 28));
         }
-        LoadRGB4(&scr->ViewPort, palette, maxCols);
     }
 
     DisposeDTObject(dto);
@@ -566,6 +565,12 @@ static BOOL LoadRobotSheetIntoCache(void)
     LONG numCols = 0;
     LONG layoutResult = 0;
     LONG i;
+    WORD frame;
+    WORD x;
+    WORD y;
+    struct RastPort srcRP;
+    struct RastPort dstRP;
+    struct RastPort maskRP;
 
     dto = NewDTObject("PROGDIR:tiles/robovac-tiles.iff",
                       DTA_GroupID, GID_PICTURE,
@@ -588,21 +593,42 @@ static BOOL LoadRobotSheetIntoCache(void)
         printf("LoadRobotSheetIntoCache: DoDTMethod(DTM_PROCLAYOUT) failed\n");
     }
 
-    if (bmhd) {
-        printf("LoadRobotSheetIntoCache: bitmap %ldx%ld depth %ld\n",
-               (LONG)bmhd->bmh_Width,
-               (LONG)bmhd->bmh_Height,
-               (LONG)bmhd->bmh_Depth);
-    }
-    printf("LoadRobotSheetIntoCache: srcBM %s\n", srcBM ? "set" : "NULL");
-
     if (!bmhd || !srcBM || bmhd->bmh_Width < 128 || bmhd->bmh_Height < 16) {
         DisposeDTObject(dto);
         return FALSE;
     }
 
-    for (i = 0; i < SPR_STATE_COUNT; i++) {
-        BltBitMap(srcBM, i * ROBOT_W, 0, robotCacheBM, i * ROBOT_W, 0, ROBOT_W, ROBOT_H, 0xC0, 0xFF, NULL);
+    InitRastPort(&srcRP);
+    srcRP.BitMap = srcBM;
+
+    InitRastPort(&dstRP);
+    dstRP.BitMap = robotCacheBM;
+
+    InitRastPort(&maskRP);
+    maskRP.BitMap = robotMaskBM;
+
+    for (frame = 0; frame < SPR_STATE_COUNT; frame++) {
+        WORD srcBaseX = frame * ROBOT_W;
+
+        for (y = 0; y < ROBOT_H; y++) {
+            for (x = 0; x < ROBOT_W; x++) {
+                LONG srcPen = ReadPixel(&srcRP, srcBaseX + x, y);
+
+                if (srcPen <= 0) {
+                    SetAPen(&maskRP, 0);
+                    WritePixel(&maskRP, srcBaseX + x, y);
+                    continue;
+                }
+
+                if (srcPen > 15) srcPen = 15;
+
+                SetAPen(&dstRP, (UBYTE)(srcPen + 16));
+                WritePixel(&dstRP, srcBaseX + x, y);
+
+                SetAPen(&maskRP, 1);
+                WritePixel(&maskRP, srcBaseX + x, y);
+            }
+        }
     }
 
     if (cRegs && numCols > 0) {
@@ -612,7 +638,6 @@ static BOOL LoadRobotSheetIntoCache(void)
                                       ((cRegs[i * 3 + 1] >> 28) << 4) |
                                        (cRegs[i * 3 + 2] >> 28));
         }
-        LoadRGB4(&scr->ViewPort, palette, 32);
     }
 
     DisposeDTObject(dto);
@@ -621,11 +646,10 @@ static BOOL LoadRobotSheetIntoCache(void)
 
 static BOOL InitRobotBobs(void)
 {
-    struct RastPort maskRP;
 
     robotCacheBM = AllocBitMap(ROBOT_W * SPR_STATE_COUNT, ROBOT_H, DEPTH,
                                BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
-    robotMaskBM = AllocBitMap(ROBOT_W, ROBOT_H, 1,
+    robotMaskBM = AllocBitMap(ROBOT_W * SPR_STATE_COUNT, ROBOT_H, 1,
                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
 
     if (!robotCacheBM || !robotMaskBM) {
@@ -641,11 +665,7 @@ static BOOL InitRobotBobs(void)
         return FALSE;
     }
 
-    InitRastPort(&maskRP);
-    maskRP.BitMap = robotMaskBM;
-
-    SetAPen(&maskRP, 1);
-    RectFill(&maskRP, 0, 0, ROBOT_W - 1, ROBOT_H - 1);
+    LoadRGB4(&scr->ViewPort, palette, 32);
 
     return TRUE;
 }
