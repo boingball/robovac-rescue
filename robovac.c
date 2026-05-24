@@ -641,13 +641,18 @@ static void BlitRobotFrameRotated(struct RastPort *srcRP, struct RastPort *dstRP
 static BOOL LoadRobotSheetIntoCache(void)
 {
     Object *dto = NULL;
+    Object *boltDto = NULL;
     struct BitMapHeader *bmhd = NULL;
+    struct BitMapHeader *boltBmhd = NULL;
     struct BitMap *srcBM = NULL;
+    struct BitMap *boltSrcBM = NULL;
     ULONG *cRegs = NULL;
     LONG numCols = 0;
     LONG layoutResult = 0;
+    LONG boltLayoutResult = 0;
     LONG i;
     struct RastPort srcRP;
+    struct RastPort boltSrcRP;
     struct RastPort dstRP;
     struct RastPort maskRP;
 
@@ -694,7 +699,29 @@ static BOOL LoadRobotSheetIntoCache(void)
     BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_READY * ROBOT_W, 0);
     BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_CHARGING * ROBOT_W, 0);
     BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_LOW_BATTERY * ROBOT_W, 0);
+    /* Default/fallback bolt frame from robot sheet. */
     BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_ENERGY_BOLT * ROBOT_W, 0);
+
+    boltDto = NewDTObject("PROGDIR:tiles/robotvac-tiles.iff",
+                          DTA_GroupID, GID_PICTURE,
+                          PDTA_Remap, FALSE,
+                          TAG_DONE);
+    if (boltDto) {
+        boltLayoutResult = DoDTMethod(boltDto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE);
+        if (boltLayoutResult != 0) {
+            GetDTAttrs(boltDto,
+                       PDTA_BitMapHeader, (ULONG)&boltBmhd,
+                       PDTA_BitMap, (ULONG)&boltSrcBM,
+                       TAG_DONE);
+            if (boltBmhd && boltSrcBM && boltBmhd->bmh_Width >= (8 * ROBOT_W) && boltBmhd->bmh_Height >= ROBOT_H) {
+                InitRastPort(&boltSrcRP);
+                boltSrcRP.BitMap = boltSrcBM;
+                /* Override with bolt artwork from sprite 7 in robotvac-tiles.iff. */
+                BlitRobotFrameRotated(&boltSrcRP, &dstRP, &maskRP, 7 * ROBOT_W, SPR_ENERGY_BOLT * ROBOT_W, 0);
+            }
+        }
+        DisposeDTObject(boltDto);
+    }
 
     if (cRegs && numCols > 0) {
         LONG maxCols = (numCols > 16) ? 16 : numCols;
