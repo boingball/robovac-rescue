@@ -43,7 +43,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define SCREEN_W    320
 #define SCREEN_H    256
-#define DEPTH       4
+#define DEPTH       5
 
 #define TILE_SIZE   16
 #define MAP_W       20
@@ -149,15 +149,27 @@ static BOOL keyDown = FALSE;
 
 static ULONG rng = 0x1234ABCD;
 
-static UWORD palette[16] = {
+static UWORD palette[32] = {
     0x000, 0x222, 0xA52, 0xE84,
     0x28F, 0x742, 0x888, 0xFFF,
     0x444, 0x6A6, 0x0F8, 0x0AA,
-    0xF22, 0xFD0, 0x7DF, 0xB0F
+    0xF22, 0xFD0, 0x7DF, 0xB0F,
+    0x000, 0x111, 0x222, 0x333,
+    0x444, 0x555, 0x666, 0x777,
+    0x888, 0x999, 0xAAA, 0xBBB,
+    0xCCC, 0xDDD, 0xEEE, 0xFFF
 };
 
-static const UBYTE robotPens[MAX_ROBOTS] = {
-    10, 13, 12, 15
+enum RobotSpriteState {
+    SPR_READY = 0,
+    SPR_UP = 1,
+    SPR_DOWN = 2,
+    SPR_LEFT = 3,
+    SPR_RIGHT = 4,
+    SPR_CHARGING = 5,
+    SPR_LOW_BATTERY = 6,
+    SPR_FULLY_CHARGED = 7,
+    SPR_STATE_COUNT = 8
 };
 
 static const char *roomNames[5] = {
@@ -545,35 +557,58 @@ static void BuildRoomBuffer(void)
  * Robot BOB cache
  * ------------------------------------------------------------------------- */
 
-static void DrawRobotSpriteIntoCache(WORD idx, UBYTE bodyPen)
+static BOOL LoadRobotSheetIntoCache(void)
 {
-    WORD sx = idx * ROBOT_W;
-    WORD ex = sx + ROBOT_W - 1;
+    Object *dto = NULL;
+    struct BitMapHeader *bmhd = NULL;
+    struct BitMap *srcBM = NULL;
+    UBYTE *cRegs = NULL;
+    LONG numCols = 0;
+    LONG i;
 
-    SetAPen(&robotRP, bodyPen);
-    RectFill(&robotRP, sx + 2, 2, sx + 13, 13);
+    dto = NewDTObject("PROGDIR:tiles/robovac-tiles.iff",
+                      DTA_GroupID, GID_PICTURE,
+                      PDTA_Remap, FALSE,
+                      TAG_DONE);
+    if (!dto) return FALSE;
 
-    SetAPen(&robotRP, 14);
-    RectFill(&robotRP, sx + 4, 4, sx + 11, 5);
+    if (DoMethod(dto, DTM_PROCLAYOUT, NULL, TRUE) != 0) {
+        GetDTAttrs(dto,
+                   PDTA_BitMapHeader, (ULONG)&bmhd,
+                   PDTA_DestBitMap, (ULONG)&srcBM,
+                   PDTA_CRegs, (ULONG)&cRegs,
+                   PDTA_NumColors, (ULONG)&numCols,
+                   TAG_DONE);
+    }
 
-    SetAPen(&robotRP, 0);
-    WritePixel(&robotRP, sx + 6, 8);
-    WritePixel(&robotRP, sx + 10, 8);
+    if (!bmhd || !srcBM || bmhd->bmh_Width != 16 || bmhd->bmh_Height < 128) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
 
-    SetAPen(&robotRP, 11);
-    Move(&robotRP, sx + 5, 12);
-    Draw(&robotRP, sx + 11, 12);
+    for (i = 0; i < SPR_STATE_COUNT; i++) {
+        BltBitMap(srcBM, 0, i * ROBOT_H, robotCacheBM, i * ROBOT_W, 0, ROBOT_W, ROBOT_H, 0xC0, 0xFF, NULL);
+    }
 
-    SetAPen(&robotRP, 6);
-    WritePixel(&robotRP, ex - 2, 13);
+    if (cRegs && numCols > 0) {
+        LONG maxCols = (numCols > 16) ? 16 : numCols;
+        for (i = 0; i < maxCols; i++) {
+            palette[16 + i] = (UWORD)(((cRegs[i * 3 + 0] >> 28) << 8) |
+                                      ((cRegs[i * 3 + 1] >> 28) << 4) |
+                                       (cRegs[i * 3 + 2] >> 28));
+        }
+        LoadRGB4(&scr->ViewPort, palette, 32);
+    }
+
+    DisposeDTObject(dto);
+    return TRUE;
 }
 
 static BOOL InitRobotBobs(void)
 {
-    WORD i;
     struct RastPort maskRP;
 
-    robotCacheBM = AllocBitMap(ROBOT_W * MAX_ROBOTS, ROBOT_H, DEPTH,
+    robotCacheBM = AllocBitMap(ROBOT_W * SPR_STATE_COUNT, ROBOT_H, DEPTH,
                                BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
     robotMaskBM = AllocBitMap(ROBOT_W, ROBOT_H, 1,
                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
@@ -586,15 +621,16 @@ static BOOL InitRobotBobs(void)
     InitRastPort(&robotRP);
     robotRP.BitMap = robotCacheBM;
 
-    for (i = 0; i < MAX_ROBOTS; i++) {
-        DrawRobotSpriteIntoCache(i, robotPens[i]);
+    if (!LoadRobotSheetIntoCache()) {
+        printf("Could not load PROGDIR:tiles/robovac-tiles.iff (need 16x128, 16 colours)\n");
+        return FALSE;
     }
 
     InitRastPort(&maskRP);
     maskRP.BitMap = robotMaskBM;
 
     SetAPen(&maskRP, 1);
-    RectFill(&maskRP, 2, 2, 13, 13);
+    RectFill(&maskRP, 0, 0, ROBOT_W - 1, ROBOT_H - 1);
 
     return TRUE;
 }
@@ -621,7 +657,7 @@ static void DrawRobotBob(WORD id)
                               (ABC | ABNC | ANBC),
                               robotMaskBM->Planes[0]);
     } else {
-        SetAPen(&renderRP, robotPens[id]);
+        SetAPen(&renderRP, 16 + 1);
         RectFill(&renderRP, sx + 2, sy + 2, sx + 13, sy + 13);
     }
 }
@@ -639,6 +675,7 @@ static void SetRobotTile(WORD id, WORD tx, WORD ty)
     robots[id].px = TO_FP(tx * TILE_SIZE);
     robots[id].py = TO_FP(ty * TILE_SIZE);
     robots[id].moving = FALSE;
+    robots[id].spriteIndex = SPR_READY;
 }
 
 static void InitRobots(void)
@@ -656,7 +693,7 @@ static void InitRobots(void)
         robots[i].battery = 110;
         robots[i].score = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
-        robots[i].spriteIndex = i;
+        robots[i].spriteIndex = SPR_READY;
     }
 
     moves = 0;
@@ -736,6 +773,12 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     robots[id].targetX = nx;
     robots[id].targetY = ny;
     robots[id].moving = TRUE;
+    if (id == 0) {
+        if (dx < 0) robots[id].spriteIndex = SPR_LEFT;
+        else if (dx > 0) robots[id].spriteIndex = SPR_RIGHT;
+        else if (dy < 0) robots[id].spriteIndex = SPR_UP;
+        else if (dy > 0) robots[id].spriteIndex = SPR_DOWN;
+    }
     robots[id].battery--;
 
     if (id == 0) {
@@ -769,6 +812,7 @@ static void FinishRobotTileMove(WORD id)
 
     if (map[ty][tx] == TILE_DOCK && IsRobotDock(id, tx, ty)) {
         robots[id].battery = 110;
+        if (id == 0) robots[id].spriteIndex = SPR_FULLY_CHARGED;
     }
 }
 
@@ -950,6 +994,13 @@ static void StepGame(void)
         ChooseAiMove(i);
     }
 
+    if (robots[0].battery <= 25) {
+        robots[0].spriteIndex = SPR_LOW_BATTERY;
+    } else if (map[robots[0].tileY][robots[0].tileX] == TILE_DOCK && !robots[0].moving) {
+        robots[0].spriteIndex = (robots[0].battery >= 110) ? SPR_FULLY_CHARGED : SPR_CHARGING;
+    } else if (!robots[0].moving) {
+        robots[0].spriteIndex = SPR_READY;
+    }
 
     CheckEndState();
 }
@@ -1130,7 +1181,7 @@ static BOOL OpenGameScreen(void)
         return FALSE;
     }
 
-    LoadRGB4(&scr->ViewPort, palette, 16);
+    LoadRGB4(&scr->ViewPort, palette, 32);
 
     renderBM = AllocBitMap(SCREEN_W, SCREEN_H, DEPTH,
                            BMF_CLEAR | BMF_DISPLAYABLE,
