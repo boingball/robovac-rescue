@@ -572,7 +572,7 @@ static BOOL LoadRobotSheetIntoCache(void)
                       TAG_DONE);
     if (!dto) return FALSE;
 
-    if (DoMethod(dto, DTM_PROCLAYOUT, NULL, TRUE) != 0) {
+    if (DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE) != 0) {
         GetDTAttrs(dto,
                    PDTA_BitMapHeader, (ULONG)&bmhd,
                    PDTA_DestBitMap, (ULONG)&srcBM,
@@ -581,13 +581,13 @@ static BOOL LoadRobotSheetIntoCache(void)
                    TAG_DONE);
     }
 
-    if (!bmhd || !srcBM || bmhd->bmh_Width != 16 || bmhd->bmh_Height < 128) {
+    if (!bmhd || !srcBM || bmhd->bmh_Width < 128 || bmhd->bmh_Height != 16) {
         DisposeDTObject(dto);
         return FALSE;
     }
 
     for (i = 0; i < SPR_STATE_COUNT; i++) {
-        BltBitMap(srcBM, 0, i * ROBOT_H, robotCacheBM, i * ROBOT_W, 0, ROBOT_W, ROBOT_H, 0xC0, 0xFF, NULL);
+        BltBitMap(srcBM, i * ROBOT_W, 0, robotCacheBM, i * ROBOT_W, 0, ROBOT_W, ROBOT_H, 0xC0, 0xFF, NULL);
     }
 
     if (cRegs && numCols > 0) {
