@@ -590,6 +590,54 @@ static void BuildRoomBuffer(void)
  * Robot BOB cache
  * ------------------------------------------------------------------------- */
 
+static void CopyRobotPixel(struct RastPort *srcRP, struct RastPort *dstRP, struct RastPort *maskRP,
+                           WORD srcX, WORD srcY, WORD dstX, WORD dstY)
+{
+    LONG srcPen = ReadPixel(srcRP, srcX, srcY);
+
+    if (srcPen <= 0) {
+        SetAPen(maskRP, 0);
+        WritePixel(maskRP, dstX, dstY);
+        return;
+    }
+
+    if (srcPen > 15) srcPen = 15;
+
+    SetAPen(dstRP, (UBYTE)(srcPen + 16));
+    WritePixel(dstRP, dstX, dstY);
+
+    SetAPen(maskRP, 1);
+    WritePixel(maskRP, dstX, dstY);
+}
+
+static void BlitRobotFrameRotated(struct RastPort *srcRP, struct RastPort *dstRP, struct RastPort *maskRP,
+                                  WORD srcBaseX, WORD dstBaseX, WORD rotation)
+{
+    WORD x, y;
+
+    for (y = 0; y < ROBOT_H; y++) {
+        for (x = 0; x < ROBOT_W; x++) {
+            WORD dx = x;
+            WORD dy = y;
+
+            if (rotation == 90) {
+                dx = ROBOT_W - 1 - y;
+                dy = x;
+            } else if (rotation == 180) {
+                dx = ROBOT_W - 1 - x;
+                dy = ROBOT_H - 1 - y;
+            } else if (rotation == 270) {
+                dx = y;
+                dy = ROBOT_H - 1 - x;
+            }
+
+            CopyRobotPixel(srcRP, dstRP, maskRP,
+                           srcBaseX + x, y,
+                           dstBaseX + dx, dy);
+        }
+    }
+}
+
 static BOOL LoadRobotSheetIntoCache(void)
 {
     Object *dto = NULL;
@@ -599,14 +647,11 @@ static BOOL LoadRobotSheetIntoCache(void)
     LONG numCols = 0;
     LONG layoutResult = 0;
     LONG i;
-    WORD frame;
-    WORD x;
-    WORD y;
     struct RastPort srcRP;
     struct RastPort dstRP;
     struct RastPort maskRP;
 
-    dto = NewDTObject("PROGDIR:tiles/robovac-tiles.iff",
+    dto = NewDTObject("PROGDIR:tiles/airobot1.iff",
                       DTA_GroupID, GID_PICTURE,
                       PDTA_Remap, FALSE,
                       TAG_DONE);
@@ -627,7 +672,7 @@ static BOOL LoadRobotSheetIntoCache(void)
         printf("LoadRobotSheetIntoCache: DoDTMethod(DTM_PROCLAYOUT) failed\n");
     }
 
-    if (!bmhd || !srcBM || bmhd->bmh_Width < 128 || bmhd->bmh_Height < 16) {
+    if (!bmhd || !srcBM || bmhd->bmh_Width < ROBOT_W || bmhd->bmh_Height < ROBOT_H) {
         DisposeDTObject(dto);
         return FALSE;
     }
@@ -641,29 +686,15 @@ static BOOL LoadRobotSheetIntoCache(void)
     InitRastPort(&maskRP);
     maskRP.BitMap = robotMaskBM;
 
-    for (frame = 0; frame < SPR_STATE_COUNT; frame++) {
-        WORD srcBaseX = frame * ROBOT_W;
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_UP * ROBOT_W, 0);
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_RIGHT * ROBOT_W, 90);
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_DOWN * ROBOT_W, 180);
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_LEFT * ROBOT_W, 270);
 
-        for (y = 0; y < ROBOT_H; y++) {
-            for (x = 0; x < ROBOT_W; x++) {
-                LONG srcPen = ReadPixel(&srcRP, srcBaseX + x, y);
-
-                if (srcPen <= 0) {
-                    SetAPen(&maskRP, 0);
-                    WritePixel(&maskRP, srcBaseX + x, y);
-                    continue;
-                }
-
-                if (srcPen > 15) srcPen = 15;
-
-                SetAPen(&dstRP, (UBYTE)(srcPen + 16));
-                WritePixel(&dstRP, srcBaseX + x, y);
-
-                SetAPen(&maskRP, 1);
-                WritePixel(&maskRP, srcBaseX + x, y);
-            }
-        }
-    }
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_READY * ROBOT_W, 0);
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_CHARGING * ROBOT_W, 0);
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_LOW_BATTERY * ROBOT_W, 0);
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_ENERGY_BOLT * ROBOT_W, 0);
 
     if (cRegs && numCols > 0) {
         LONG maxCols = (numCols > 16) ? 16 : numCols;
@@ -695,7 +726,7 @@ static BOOL InitRobotBobs(void)
     robotRP.BitMap = robotCacheBM;
 
     if (!LoadRobotSheetIntoCache()) {
-        printf("Could not load PROGDIR:tiles/robovac-tiles.iff (need 128x16, 16 colours)\n");
+        printf("Could not load PROGDIR:tiles/airobot1.iff (need at least 16x16, 16 colours)\n");
         return FALSE;
     }
 
