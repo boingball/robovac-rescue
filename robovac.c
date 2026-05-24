@@ -3,7 +3,7 @@
  *
  * Adds:
  * - Smooth pixel movement between tiles using fixed-point positions
- * - Up to 4 robots
+ * - Up to 10 robots
  * - AI rival robots that compete to clean dirt
  * - Per-robot coloured cached BOB sprites
  * - Pre-rendered tile cache
@@ -18,6 +18,7 @@
  *   Arrow keys - move player robot
  *   R/Space    - start/reset
  *   1/2/3      - start with 1/2/3 AI rivals from title screen
+ *   O          - hidden 9-rival mode (battle mode)
  *   Esc/RMB    - quit
  */
 
@@ -62,7 +63,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define ROBOT_W     16
 #define ROBOT_H     16
-#define MAX_ROBOTS  4
+#define MAX_ROBOTS  10
 
 #define START_X     1
 #define START_Y     1
@@ -92,6 +93,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_1       0x01
 #define RAW_2       0x02
 #define RAW_3       0x03
+#define RAW_O       0x18
 
 struct Robot {
     WORD tileX;
@@ -148,6 +150,11 @@ static BOOL keyUp = FALSE;
 static BOOL keyDown = FALSE;
 
 static ULONG rng = 0x1234ABCD;
+
+static const WORD robotStartX[MAX_ROBOTS] = {1, 18, 17, 18, 1, 2, 1, 18, 17, 18};
+static const WORD robotStartY[MAX_ROBOTS] = {1, 1, 1, 2, 12, 12, 11, 12, 12, 11};
+static const WORD robotDockX[MAX_ROBOTS]  = {1, 18, 18, 18, 1, 1, 1, 18, 18, 18};
+static const WORD robotDockY[MAX_ROBOTS]  = {1, 1, 1, 1, 12, 12, 12, 12, 12, 12};
 
 static UWORD palette[32] = {
     0x000, 0x222, 0xA52, 0xE84,
@@ -716,15 +723,13 @@ static void SetRobotTile(WORD id, WORD tx, WORD ty)
 static void InitRobots(void)
 {
     WORD i;
-    static const WORD sx[MAX_ROBOTS] = {1, MAP_W - 2, 1, MAP_W - 2};
-    static const WORD sy[MAX_ROBOTS] = {1, 1, MAP_H - 2, MAP_H - 2};
 
     robotCount = 1 + aiRivals;
     if (robotCount < 1) robotCount = 1;
     if (robotCount > MAX_ROBOTS) robotCount = MAX_ROBOTS;
 
     for (i = 0; i < robotCount; i++) {
-        SetRobotTile(i, sx[i], sy[i]);
+        SetRobotTile(i, robotStartX[i], robotStartY[i]);
         robots[i].battery = 110;
         robots[i].score = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
@@ -737,16 +742,17 @@ static void InitRobots(void)
 
 static BOOL IsRobotDock(WORD id, WORD tx, WORD ty)
 {
-    static const WORD sx[MAX_ROBOTS] = {1, MAP_W - 2, 1, MAP_W - 2};
-    static const WORD sy[MAX_ROBOTS] = {1, 1, MAP_H - 2, MAP_H - 2};
     if (id < 0 || id >= MAX_ROBOTS) return FALSE;
-    return (tx == sx[id] && ty == sy[id]) ? TRUE : FALSE;
+    return (tx == robotDockX[id] && ty == robotDockY[id]) ? TRUE : FALSE;
 }
 
 static BOOL ValidDirtTile(WORD tx, WORD ty)
 {
+    WORD i;
     if (map[ty][tx] != TILE_FLOOR) return FALSE;
-    if (IsRobotDock(0, tx, ty) || IsRobotDock(1, tx, ty) || IsRobotDock(2, tx, ty) || IsRobotDock(3, tx, ty)) return FALSE;
+    for (i = 0; i < MAX_ROBOTS; i++) {
+        if (IsRobotDock(i, tx, ty)) return FALSE;
+    }
     return TRUE;
 }
 
@@ -1054,6 +1060,7 @@ static void DrawHud(void)
     if (gameState == GAME_TITLE) {
         PutText(&renderRP, 72, 10, "ROBOVAC RESCUE", 7);
         PutText(&renderRP, 20, 22, "1/2/3: AI rivals  SPACE/R: start", 13);
+        PutText(&renderRP, 20, 30, "Hidden mode: O = 9-rival battle", 14);
         return;
     }
 
@@ -1140,7 +1147,7 @@ static void StartWithRivals(WORD rivals)
     WORD i;
     aiRivals = rivals;
     if (aiRivals < 1) aiRivals = 1;
-    if (aiRivals > 3) aiRivals = 3;
+    if (aiRivals > 9) aiRivals = 9;
     roundIndex = 0;
     for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
     ResetLevel();
@@ -1160,6 +1167,7 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
         if (code == RAW_3) { StartWithRivals(3); return; }
+        if (code == RAW_O) { StartWithRivals(9); return; }
     }
 
     if (!keyUpEvent && (code == RAW_R || code == RAW_SPACE)) {
