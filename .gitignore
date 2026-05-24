@@ -1,0 +1,6 @@
+robovac
+robovc
+*.o
+*.bak
+*.info
+*:Zone.Identifier
