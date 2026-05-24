@@ -59,6 +59,25 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
   - AI 2: near bottom-left
   - AI 3: near bottom-right
 
+## Tilesheet (ILBM)
+
+The engine now attempts to load a 16-colour ILBM tilesheet from:
+
+- `PROGDIR:tiles/world-tile.iff`
+
+Expected layout is a horizontal `128x16` strip containing eight `16x16` tiles in this exact order:
+
+0. floor
+1. wall
+2. dirt
+3. dock
+4. furniture/table
+5. obstacle variant
+6. cleaned sparkle / bonus
+7. spare/marker
+
+If loading fails (missing file, wrong format, or too small), RoboVac Rescue falls back to its built-in generated tiles so gameplay still works.
+
 ## Build
 
 ```bash

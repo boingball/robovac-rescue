@@ -31,6 +31,10 @@
 #include <proto/intuition.h>
 #include <proto/graphics.h>
 #include <proto/dos.h>
+#include <proto/datatypes.h>
+
+#include <datatypes/pictureclass.h>
+#include <datatypes/datatypes.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -67,8 +71,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TILE_WALL   1
 #define TILE_DIRT   2
 #define TILE_DOCK   3
-#define TILE_TABLE  4
-#define TILE_COUNT  5
+#define TILE_TABLE     4
+#define TILE_OBSTACLE  5
+#define TILE_CLEAN     6
+#define TILE_MARKER    7
+#define TILE_COUNT     8
 
 #define GAME_TITLE      0
 #define GAME_PLAYING    1
@@ -352,6 +359,50 @@ static void DrawTileIntoCache(UBYTE tileType)
     }
 }
 
+static BOOL LoadTileSheetIntoCache(void)
+{
+    Object *dto;
+    struct BitMapHeader *bmhd = NULL;
+    struct BitMap *srcBM = NULL;
+    WORD i;
+
+    dto = NewDTObject("PROGDIR:tiles/world-tile.iff",
+                      DTA_GroupID, GID_PICTURE,
+                      PDTA_Remap, FALSE,
+                      TAG_DONE);
+    if (!dto) {
+        return FALSE;
+    }
+
+    if (!DoMethod(dto, DTM_PROCLAYOUT, NULL, TRUE)) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
+
+    if (!GetDTAttrs(dto,
+                    PDTA_BitMapHeader, (ULONG)&bmhd,
+                    PDTA_DestBitMap, (ULONG)&srcBM,
+                    TAG_DONE) || !bmhd || !srcBM) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
+
+    if (bmhd->bmh_Width < (TILE_SIZE * TILE_COUNT) || bmhd->bmh_Height < TILE_SIZE) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
+
+    for (i = 0; i < TILE_COUNT; i++) {
+        BltBitMap(srcBM, i * TILE_SIZE, 0,
+                  tileCacheBM, i * TILE_SIZE, 0,
+                  TILE_SIZE, TILE_SIZE,
+                  0xC0, 0xFF, NULL);
+    }
+
+    DisposeDTObject(dto);
+    return TRUE;
+}
+
 static BOOL InitTileCache(void)
 {
     UBYTE i;
@@ -366,8 +417,10 @@ static BOOL InitTileCache(void)
     InitRastPort(&tileRP);
     tileRP.BitMap = tileCacheBM;
 
-    for (i = 0; i < TILE_COUNT; i++) {
-        DrawTileIntoCache(i);
+    if (!LoadTileSheetIntoCache()) {
+        for (i = 0; i < TILE_COUNT; i++) {
+            DrawTileIntoCache(i);
+        }
     }
 
     return TRUE;
