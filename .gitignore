@@ -1,6 +1,8 @@
 robovac
 robovc
+robovac_screen
 *.o
 *.bak
 *.info
 *:Zone.Identifier
+experiments/
