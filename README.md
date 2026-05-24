@@ -1,56 +1,66 @@
 # RoboVac Rescue
 
-A tiny top-down AmigaOS game prototype where you control a robot hoover cleaning a house.
-
-Built as a father-and-son Amiga game project.
-
-## Current Features
-
-- Opens in an Amiga Workbench window using Intuition (no custom screen yet)
-- Single-file C codebase (`robovac.c`) targeting AmigaOS 3.x style APIs
-- Simple game state flow:
-  - Title / instructions screen
-  - Playing
-  - Won (all dirt cleaned)
-  - Battery flat (ran out before finishing)
-- House-like room drawing with:
-  - Floor tile pattern
-  - Wall blocks with simple shading
-  - Furniture/table obstacles
-  - Dirt spots to clean
-  - Dock/charging station tile
-- Arrow-key movement with simple smooth tile-to-tile animation
-- Collision against walls and furniture
-- Battery drain per move, recharge when stepping onto dock
-- Move counter and dirt counter in status line
-- Reset and quit handling
+RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256 screen, cached tile blits, masked robot BOBs, an offscreen render bitmap, a room bitmap, WaitTOF frame pacing, and smooth fixed-point movement.
 
 ## Controls
 
-- Arrow keys: Move robot (or start game from title screen)
-- R: Reset level/start playing
-- Esc: Quit
-- Close gadget: Quit
+- Arrow keys: move your robot
+- `R` / `Space`:
+  - On title: start match
+  - During match: reset current round
+  - End of round: continue to next round
+  - End of match: start new best-of-5 match
+- `1` / `2` / `3`: choose AI rival count from title screen
+- `Esc` or RMB: quit
+
+## Match Structure (Best of 5)
+
+- A match is 5 rounds.
+- Each round picks a random room type.
+- Round winner = robot with most dirt cleaned that round.
+- After round 5, final winner is decided by:
+  1. Most round wins
+  2. Tie-breaker: highest total dirt cleaned across all rounds
+
+## Room Types
+
+Randomly selected each round:
+
+1. Living Room
+2. Dining Room
+3. Kitchen
+4. Bathroom
+5. Bedroom
+
+Each room has a different obstacle/furniture layout on the same 20x14 grid.
+
+## Dirt Scaling Per Round
+
+Dirt increases each round:
+
+- Round 1: 14
+- Round 2: 20
+- Round 3: 26
+- Round 4: 32
+- Round 5: 38
+
+Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spawn/dock tiles).
+
+## Robot, Battery, and Dock Rules
+
+- Supports player + up to 3 AI rivals.
+- Every robot has its own battery.
+- Player battery is managed manually by movement.
+- AI robots monitor their own battery and return to their own dock when low (<= 25), then resume cleaning after recharge.
+- Recharging only occurs on each robot's own dock.
+- Dock positions:
+  - Player: near top-left
+  - AI 1: near top-right
+  - AI 2: near bottom-left
+  - AI 3: near bottom-right
 
 ## Build
 
 ```bash
 m68k-amigaos-gcc -s -Os -o robovac robovac.c
-```
-
-
-## Alternate engine prototype (optimized custom-screen runner)
-
-An additional experiment is included as `geodash_opt.c` to show how the game loop can be structured around classic Amiga hardware-friendly rendering techniques:
-
-- Pre-rendered tile cache in CHIP RAM
-- Blitter tile/sprite copies (including mask blits)
-- Dirty redraw gating on tile-column scroll changes
-- Prepared copper gradient list (safe to integrate with custom display control)
-- Offscreen render bitmap + fast frame blit to display
-
-Build it with:
-
-```bash
-make geodash_opt
 ```
