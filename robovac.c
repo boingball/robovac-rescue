@@ -18,15 +18,15 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define WIN_W       768
 #define WIN_H       600
 
-#define TILE_SIZE   8
+#define TILE_SIZE   16
 #define MAP_W       40
 #define MAP_H       30
 
-#define MAP_X       16
-#define MAP_Y       34
+#define MAP_X       ((WIN_W - (MAP_W * TILE_SIZE)) / 2)
+#define MAP_Y       48
 
-#define ROBOT_W     6
-#define ROBOT_H     6
+#define ROBOT_W     (TILE_SIZE - 6)
+#define ROBOT_H     (TILE_SIZE - 6)
 
 #define MAX_ROBOTS  4
 #define MAX_ROUNDS  5
@@ -182,26 +182,59 @@ static void DrawTile(WORD tx, WORD ty)
 {
     WORD sx = MAP_X + tx * TILE_SIZE;
     WORD sy = MAP_Y + ty * TILE_SIZE;
+    WORD ex = sx + TILE_SIZE - 1;
+    WORD ey = sy + TILE_SIZE - 1;
+    WORD cx = sx + TILE_SIZE / 2;
+    WORD cy = sy + TILE_SIZE / 2;
     UBYTE t = map[ty][tx];
-    SetAPen(rp, 0);
-    RectFill(rp, sx, sy, sx + TILE_SIZE - 1, sy + TILE_SIZE - 1);
-    if (t == TILE_WALL) { SetAPen(rp, 1); RectFill(rp, sx, sy, sx + TILE_SIZE - 1, sy + TILE_SIZE - 1); }
-    else { SetAPen(rp, 8); WritePixel(rp, sx + 3, sy + 3); }
-    if (t == TILE_DIRT) { SetAPen(rp, 3); RectFill(rp, sx + 2, sy + 2, sx + 5, sy + 5); }
+
+    if (t == TILE_WALL) {
+        SetAPen(rp, 1);
+        RectFill(rp, sx, sy, ex, ey);
+        SetAPen(rp, 6);
+        RectFill(rp, sx, sy, ex, sy + 1);
+        RectFill(rp, sx, sy, sx + 1, ey);
+        SetAPen(rp, 0);
+        RectFill(rp, ex - 1, sy, ex, ey);
+        RectFill(rp, sx, ey - 1, ex, ey);
+    } else {
+        SetAPen(rp, 8);
+        RectFill(rp, sx, sy, ex, ey);
+        SetAPen(rp, 7);
+        WritePixel(rp, sx + 2, sy + 2);
+        WritePixel(rp, ex - 2, sy + 2);
+        WritePixel(rp, sx + 2, ey - 2);
+        WritePixel(rp, ex - 2, ey - 2);
+    }
+
+    if (t == TILE_DIRT) {
+        SetAPen(rp, 3);
+        RectFill(rp, cx - 2, cy - 2, cx + 2, cy + 2);
+        SetAPen(rp, 2);
+        WritePixel(rp, cx - 3, cy);
+        WritePixel(rp, cx + 3, cy);
+        WritePixel(rp, cx, cy - 3);
+        WritePixel(rp, cx, cy + 3);
+    }
 }
 
 static void DrawMap(void)
 {
     WORD x, y;
     for (y = 0; y < MAP_H; y++) for (x = 0; x < MAP_W; x++) DrawTile(x, y);
+    SetAPen(rp, 6);
+    RectFill(rp, MAP_X - 2, MAP_Y - 2, MAP_X + MAP_W * TILE_SIZE + 1, MAP_Y - 1);
+    RectFill(rp, MAP_X - 2, MAP_Y + MAP_H * TILE_SIZE, MAP_X + MAP_W * TILE_SIZE + 1, MAP_Y + MAP_H * TILE_SIZE + 1);
+    RectFill(rp, MAP_X - 2, MAP_Y - 2, MAP_X - 1, MAP_Y + MAP_H * TILE_SIZE + 1);
+    RectFill(rp, MAP_X + MAP_W * TILE_SIZE, MAP_Y - 2, MAP_X + MAP_W * TILE_SIZE + 1, MAP_Y + MAP_H * TILE_SIZE + 1);
 }
 
 static void DrawRobots(void)
 {
     WORD i;
     for (i = 0; i < robotCount; i++) {
-        WORD sx = MAP_X + robots[i].x * TILE_SIZE + 1;
-        WORD sy = MAP_Y + robots[i].y * TILE_SIZE + 1;
+        WORD sx = MAP_X + robots[i].x * TILE_SIZE + 3;
+        WORD sy = MAP_Y + robots[i].y * TILE_SIZE + 3;
         SetAPen(rp, robots[i].color);
         RectFill(rp, sx, sy, sx + ROBOT_W, sy + ROBOT_H);
     }
