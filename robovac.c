@@ -655,6 +655,7 @@ static BOOL LoadRobotSheetIntoCache(void)
     struct RastPort boltSrcRP;
     struct RastPort dstRP;
     struct RastPort maskRP;
+    WORD boltDstX;
 
     dto = NewDTObject("PROGDIR:tiles/airobot1.iff",
                       DTA_GroupID, GID_PICTURE,
@@ -699,8 +700,35 @@ static BOOL LoadRobotSheetIntoCache(void)
     BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_READY * ROBOT_W, 0);
     BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_CHARGING * ROBOT_W, 0);
     BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_LOW_BATTERY * ROBOT_W, 0);
+    boltDstX = SPR_ENERGY_BOLT * ROBOT_W;
     /* Default/fallback bolt frame from robot sheet. */
-    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, SPR_ENERGY_BOLT * ROBOT_W, 0);
+    BlitRobotFrameRotated(&srcRP, &dstRP, &maskRP, 0, boltDstX, 0);
+
+    boltDto = NewDTObject("PROGDIR:tiles/robotvac-tiles.iff",
+                          DTA_GroupID, GID_PICTURE,
+                          PDTA_Remap, FALSE,
+                          TAG_DONE);
+    if (boltDto) {
+        boltLayoutResult = DoDTMethod(boltDto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE);
+        if (boltLayoutResult != 0) {
+            GetDTAttrs(boltDto,
+                       PDTA_BitMapHeader, (ULONG)&boltBmhd,
+                       PDTA_BitMap, (ULONG)&boltSrcBM,
+                       TAG_DONE);
+            if (boltBmhd && boltSrcBM && boltBmhd->bmh_Width >= (8 * ROBOT_W) && boltBmhd->bmh_Height >= ROBOT_H) {
+                InitRastPort(&boltSrcRP);
+                boltSrcRP.BitMap = boltSrcBM;
+                /* Clear destination frame first so old robot pixels don't remain under transparent bolt areas. */
+                SetAPen(&dstRP, 0);
+                RectFill(&dstRP, boltDstX, 0, boltDstX + ROBOT_W - 1, ROBOT_H - 1);
+                SetAPen(&maskRP, 0);
+                RectFill(&maskRP, boltDstX, 0, boltDstX + ROBOT_W - 1, ROBOT_H - 1);
+                /* Override with bolt artwork from sprite 7 in robotvac-tiles.iff. */
+                BlitRobotFrameRotated(&boltSrcRP, &dstRP, &maskRP, 7 * ROBOT_W, boltDstX, 0);
+            }
+        }
+        DisposeDTObject(boltDto);
+    }
 
     boltDto = NewDTObject("PROGDIR:tiles/robotvac-tiles.iff",
                           DTA_GroupID, GID_PICTURE,
