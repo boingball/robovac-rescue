@@ -67,7 +67,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROBOT_W     16
 #define ROBOT_H     16
 #define MAX_ROBOTS  10
-#define ROBOT_VARIANTS 4
+#define ROBOT_VARIANTS 5
 
 #define START_X     1
 #define START_Y     1
@@ -679,6 +679,7 @@ static BOOL LoadRobotSheetIntoCache(void)
     Object *dto2 = NULL;
     Object *dto3 = NULL;
     Object *dto4 = NULL;
+    Object *dto5 = NULL;
     Object *boltDto = NULL;
     struct BitMapHeader *bmhd = NULL;
     struct BitMapHeader *boltBmhd = NULL;
@@ -710,12 +711,17 @@ static BOOL LoadRobotSheetIntoCache(void)
                        DTA_GroupID, GID_PICTURE,
                        PDTA_Remap, FALSE,
                        TAG_DONE);
-    if (!dto || !dto2 || !dto3 || !dto4) {
+    dto5 = NewDTObject("PROGDIR:tiles/airobot5.iff",
+                       DTA_GroupID, GID_PICTURE,
+                       PDTA_Remap, FALSE,
+                       TAG_DONE);
+    if (!dto || !dto2 || !dto3 || !dto4 || !dto5) {
         printf("LoadRobotSheetIntoCache: NewDTObject failed\n");
         if (dto) DisposeDTObject(dto);
         if (dto2) DisposeDTObject(dto2);
         if (dto3) DisposeDTObject(dto3);
         if (dto4) DisposeDTObject(dto4);
+        if (dto5) DisposeDTObject(dto5);
         return FALSE;
     }
 
@@ -732,6 +738,7 @@ static BOOL LoadRobotSheetIntoCache(void)
         DisposeDTObject(dto2);
         DisposeDTObject(dto3);
         DisposeDTObject(dto4);
+        DisposeDTObject(dto5);
         return FALSE;
     }
 
@@ -751,6 +758,8 @@ static BOOL LoadRobotSheetIntoCache(void)
     BlitRobotVariant(dto3, &dstRP, &maskRP, 2, 0);
     /* airobot4 source art faces up. */
     BlitRobotVariant(dto4, &dstRP, &maskRP, 3, 0);
+    /* airobot5 source art faces up (90=right,180=down,270=left). */
+    BlitRobotVariant(dto5, &dstRP, &maskRP, 4, 0);
     boltDstX = SPR_ENERGY_BOLT * ROBOT_W;
 
     boltDto = NewDTObject("PROGDIR:tiles/robotvac-tiles.iff",
@@ -792,6 +801,7 @@ static BOOL LoadRobotSheetIntoCache(void)
     DisposeDTObject(dto2);
     DisposeDTObject(dto3);
     DisposeDTObject(dto4);
+    DisposeDTObject(dto5);
     return TRUE;
 }
 
