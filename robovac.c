@@ -106,6 +106,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_CAROUSEL_Y 172
 #define TITLE_ROBOT_SCALE 2
 #define TITLE_SPIN_STEPS 32
+#define TITLE_SPIN_STEPS_FALLBACK 16
+#define TITLE_ROT_W (ROBOT_W * TITLE_ROBOT_SCALE)
+#define TITLE_ROT_H (ROBOT_H * TITLE_ROBOT_SCALE)
 
 struct Robot {
     WORD tileX;
@@ -140,6 +143,10 @@ static struct BitMap *tileCacheBM = NULL;
 static struct RastPort robotRP;
 static struct BitMap *robotCacheBM = NULL;
 static struct BitMap *robotMaskBM = NULL;
+static struct RastPort titleCarouselRP;
+static struct BitMap *titleCarouselBM = NULL;
+static struct BitMap *titleCarouselMaskBM = NULL;
+static WORD titleCarouselFrameCount = 0;
 
 static UBYTE map[MAP_H][MAP_W];
 
@@ -949,6 +956,124 @@ static BOOL LoadRobotSheetIntoCache(void)
     return TRUE;
 }
 
+
+static void FreeTitleCarouselCache(void)
+{
+    if (titleCarouselBM) {
+        FreeBitMap(titleCarouselBM);
+        titleCarouselBM = NULL;
+    }
+
+    if (titleCarouselMaskBM) {
+        FreeBitMap(titleCarouselMaskBM);
+        titleCarouselMaskBM = NULL;
+    }
+
+    titleCarouselFrameCount = 0;
+}
+
+static BOOL AllocTitleCarouselCache(WORD frameCount)
+{
+    WORD cacheW = TITLE_ROT_W * frameCount * ROBOT_VARIANTS;
+
+    titleCarouselBM = AllocBitMap(cacheW, TITLE_ROT_H, DEPTH,
+                                  BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    titleCarouselMaskBM = AllocBitMap(cacheW, TITLE_ROT_H, 1,
+                                      BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+
+    if (!titleCarouselBM || !titleCarouselMaskBM) {
+        FreeTitleCarouselCache();
+        return FALSE;
+    }
+
+    InitRastPort(&titleCarouselRP);
+    titleCarouselRP.BitMap = titleCarouselBM;
+    titleCarouselFrameCount = frameCount;
+    return TRUE;
+}
+
+static void BuildTitleCarouselRotationFrame(struct RastPort *maskRP, WORD variant, WORD frame)
+{
+    static const WORD sinTable[TITLE_SPIN_STEPS] = {
+        0,12,24,36,45,53,59,63,64,63,59,53,45,36,24,12,
+        0,-12,-24,-36,-45,-53,-59,-63,-64,-63,-59,-53,-45,-36,-24,-12
+    };
+    static const WORD cosTable[TITLE_SPIN_STEPS] = {
+        64,63,59,53,45,36,24,12,0,-12,-24,-36,-45,-53,-59,-63,
+        -64,-63,-59,-53,-45,-36,-24,-12,0,12,24,36,45,53,59,63
+    };
+    WORD phase = (frame * TITLE_SPIN_STEPS) / titleCarouselFrameCount;
+    WORD sinv = sinTable[phase & (TITLE_SPIN_STEPS - 1)];
+    WORD cosv = cosTable[phase & (TITLE_SPIN_STEPS - 1)];
+    WORD srcX = (variant * SPR_STATE_COUNT + SPR_READY) * ROBOT_W;
+    WORD dstBaseX = (variant * titleCarouselFrameCount + frame) * TITLE_ROT_W;
+    WORD centre = (ROBOT_W - 1) * TITLE_ROBOT_SCALE / 2;
+    WORD x;
+    WORD y;
+
+    for (y = 0; y < ROBOT_H; y++) {
+        for (x = 0; x < ROBOT_W; x++) {
+            LONG pen = ReadPixel(&robotRP, srcX + x, y);
+            WORD rx;
+            WORD ry;
+            WORD tx;
+            WORD ty;
+            WORD dx;
+            WORD dy;
+
+            if (pen <= 0) continue;
+
+            rx = x - (ROBOT_W / 2);
+            ry = y - (ROBOT_H / 2);
+            tx = ((rx * cosv) - (ry * sinv)) / 64;
+            ty = ((rx * sinv) + (ry * cosv)) / 64;
+            tx = centre + (tx * TITLE_ROBOT_SCALE);
+            ty = centre + (ty * TITLE_ROBOT_SCALE);
+
+            SetAPen(&titleCarouselRP, (UBYTE)pen);
+            SetAPen(maskRP, 1);
+            for (dy = 0; dy < TITLE_ROBOT_SCALE; dy++) {
+                for (dx = 0; dx < TITLE_ROBOT_SCALE; dx++) {
+                    WORD px = tx + dx;
+                    WORD py = ty + dy;
+                    if (px >= 0 && py >= 0 && px < TITLE_ROT_W && py < TITLE_ROT_H) {
+                        WritePixel(&titleCarouselRP, dstBaseX + px, py);
+                        WritePixel(maskRP, dstBaseX + px, py);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static BOOL BuildTitleCarouselRotationCache(void)
+{
+    struct RastPort maskRP;
+    WORD variant;
+    WORD frame;
+
+    if (!robotCacheBM || !robotMaskBM) return FALSE;
+
+    if (!AllocTitleCarouselCache(TITLE_SPIN_STEPS)) {
+        if (!AllocTitleCarouselCache(TITLE_SPIN_STEPS_FALLBACK)) {
+            printf("Could not allocate title carousel rotation cache\n");
+            return FALSE;
+        }
+        printf("Using %ld title carousel rotation frames per robot\n", (LONG)titleCarouselFrameCount);
+    }
+
+    InitRastPort(&maskRP);
+    maskRP.BitMap = titleCarouselMaskBM;
+
+    for (variant = 0; variant < ROBOT_VARIANTS; variant++) {
+        for (frame = 0; frame < titleCarouselFrameCount; frame++) {
+            BuildTitleCarouselRotationFrame(&maskRP, variant, frame);
+        }
+    }
+
+    return TRUE;
+}
+
 static BOOL InitRobotBobs(void)
 {
 
@@ -959,6 +1084,14 @@ static BOOL InitRobotBobs(void)
 
     if (!robotCacheBM || !robotMaskBM) {
         printf("Could not allocate robot BOB cache/mask\n");
+        if (robotCacheBM) {
+            FreeBitMap(robotCacheBM);
+            robotCacheBM = NULL;
+        }
+        if (robotMaskBM) {
+            FreeBitMap(robotMaskBM);
+            robotMaskBM = NULL;
+        }
         return FALSE;
     }
 
@@ -967,6 +1100,18 @@ static BOOL InitRobotBobs(void)
 
     if (!LoadRobotSheetIntoCache()) {
         printf("Could not load PROGDIR:tiles/airobot1.iff through airobot7.iff (need at least 16x16, 16 colours)\n");
+        FreeBitMap(robotCacheBM);
+        FreeBitMap(robotMaskBM);
+        robotCacheBM = NULL;
+        robotMaskBM = NULL;
+        return FALSE;
+    }
+
+    if (!BuildTitleCarouselRotationCache()) {
+        FreeBitMap(robotCacheBM);
+        FreeBitMap(robotMaskBM);
+        robotCacheBM = NULL;
+        robotMaskBM = NULL;
         return FALSE;
     }
 
@@ -1474,57 +1619,24 @@ static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE p
     }
 }
 
-static void DrawRobotVariantSpin(WORD variant, WORD phase, WORD dstX, WORD dstY, WORD scale)
+static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD dstY)
 {
-    static const WORD sinTable[TITLE_SPIN_STEPS] = {
-        0,12,24,36,45,53,59,63,64,63,59,53,45,36,24,12,
-        0,-12,-24,-36,-45,-53,-59,-63,-64,-63,-59,-53,-45,-36,-24,-12
-    };
-    static const WORD cosTable[TITLE_SPIN_STEPS] = {
-        64,63,59,53,45,36,24,12,0,-12,-24,-36,-45,-53,-59,-63,
-        -64,-63,-59,-53,-45,-36,-24,-12,0,12,24,36,45,53,59,63
-    };
+    WORD frame;
     WORD srcX;
-    WORD x;
-    WORD y;
-    WORD sinv;
-    WORD cosv;
-    WORD centre;
 
-    if (!robotCacheBM || variant < 0 || variant >= ROBOT_VARIANTS || scale <= 0) return;
+    if (!titleCarouselBM || !titleCarouselMaskBM || !titleCarouselMaskBM->Planes[0]) return;
+    if (variant < 0 || variant >= ROBOT_VARIANTS || titleCarouselFrameCount <= 0) return;
 
     phase &= (TITLE_SPIN_STEPS - 1);
-    sinv = sinTable[phase];
-    cosv = cosTable[phase];
-    srcX = (variant * SPR_STATE_COUNT + SPR_READY) * ROBOT_W;
-    centre = (ROBOT_W - 1) * scale / 2;
+    frame = (phase * titleCarouselFrameCount) / TITLE_SPIN_STEPS;
+    if (frame >= titleCarouselFrameCount) frame = titleCarouselFrameCount - 1;
+    srcX = (variant * titleCarouselFrameCount + frame) * TITLE_ROT_W;
 
-    for (y = 0; y < ROBOT_H; y++) {
-        for (x = 0; x < ROBOT_W; x++) {
-            LONG pen = ReadPixel(&robotRP, srcX + x, y);
-            WORD rx;
-            WORD ry;
-            WORD tx;
-            WORD ty;
-            WORD dx;
-            WORD dy;
-
-            if (pen <= 0) continue;
-            rx = x - (ROBOT_W / 2);
-            ry = y - (ROBOT_H / 2);
-            tx = ((rx * cosv) - (ry * sinv)) / 64;
-            ty = ((rx * sinv) + (ry * cosv)) / 64;
-            tx = dstX + centre + (tx * scale);
-            ty = dstY + centre + (ty * scale);
-
-            SetAPen(&renderRP, (UBYTE)pen);
-            for (dy = 0; dy < scale; dy++) {
-                for (dx = 0; dx < scale; dx++) {
-                    WritePixel(&renderRP, tx + dx, ty + dy);
-                }
-            }
-        }
-    }
+    BltMaskBitMapRastPort(titleCarouselBM, srcX, 0,
+                          &renderRP, dstX, dstY,
+                          TITLE_ROT_W, TITLE_ROT_H,
+                          (ABC | ABNC | ANBC),
+                          titleCarouselMaskBM->Planes[0]);
 }
 
 static void DrawTitleCarousel(void)
@@ -1562,7 +1674,7 @@ static void DrawTitleCarousel(void)
             RectFill(&renderRP, x, y, x + (ROBOT_W * TITLE_ROBOT_SCALE) - 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) - 1);
         }
 
-        DrawRobotVariantSpin(variant, (titleSpinPhase + slot * 2) & (TITLE_SPIN_STEPS - 1), x, y, TITLE_ROBOT_SCALE);
+        DrawCachedTitleRobotSpin(variant, (titleSpinPhase + slot * 2) & (TITLE_SPIN_STEPS - 1), x, y);
         if (slot != (ROBOT_VARIANTS / 2)) {
             MiniText(&renderRP, x + 10, y + 35, robotVariantTags[variant], 7);
         }
@@ -1889,6 +2001,7 @@ static BOOL OpenGameScreen(void)
 
     if (!win) {
         printf("Could not open game window\n");
+        FreeTitleCarouselCache();
         if (robotCacheBM) FreeBitMap(robotCacheBM);
         if (robotMaskBM) FreeBitMap(robotMaskBM);
         if (tileCacheBM) FreeBitMap(tileCacheBM);
@@ -1913,6 +2026,8 @@ static void CloseGameScreen(void)
         CloseWindow(win);
         win = NULL;
     }
+
+    FreeTitleCarouselCache();
 
     if (robotCacheBM) {
         FreeBitMap(robotCacheBM);
