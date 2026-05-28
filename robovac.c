@@ -67,7 +67,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROBOT_W     16
 #define ROBOT_H     16
 #define MAX_ROBOTS  10
-#define ROBOT_VARIANTS 6
+#define ROBOT_VARIANTS 7
 
 #define START_X     1
 #define START_Y     1
@@ -673,6 +673,87 @@ static void BlitRobotVariant(Object *dto, struct RastPort *dstRP, struct RastPor
     BlitRobotFrameRotated(&srcRP, dstRP, maskRP, 0, variantBaseX + (SPR_ENERGY_BOLT * ROBOT_W), baseRotation % 360);
 }
 
+
+static BOOL ReadExact(BPTR file, void *buffer, LONG size)
+{
+    return Read(file, buffer, size) == size;
+}
+
+static BOOL SkipBytes(BPTR file, ULONG size)
+{
+    UBYTE scratch[64];
+    ULONG remaining = size;
+
+    while (remaining > 0) {
+        LONG chunk = (remaining > sizeof(scratch)) ? sizeof(scratch) : remaining;
+        if (Read(file, scratch, chunk) != chunk) return FALSE;
+        remaining -= chunk;
+    }
+
+    return TRUE;
+}
+
+static ULONG ReadBigEndian32(const UBYTE *b)
+{
+    return ((ULONG)b[0] << 24) | ((ULONG)b[1] << 16) | ((ULONG)b[2] << 8) | (ULONG)b[3];
+}
+
+static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
+{
+    BPTR file;
+    UBYTE header[12];
+    UBYTE chunkHeader[8];
+    BOOL loaded = FALSE;
+
+    file = Open((STRPTR)path, MODE_OLDFILE);
+    if (!file) return FALSE;
+
+    if (!ReadExact(file, header, sizeof(header)) ||
+        header[0] != 'F' || header[1] != 'O' || header[2] != 'R' || header[3] != 'M') {
+        Close(file);
+        return FALSE;
+    }
+
+    while (Read(file, chunkHeader, sizeof(chunkHeader)) == sizeof(chunkHeader)) {
+        ULONG chunkSize = ReadBigEndian32(chunkHeader + 4);
+        ULONG paddedSize = chunkSize + (chunkSize & 1);
+
+        if (chunkHeader[0] == 'C' && chunkHeader[1] == 'M' && chunkHeader[2] == 'A' && chunkHeader[3] == 'P') {
+            ULONG entries = chunkSize / 3;
+            ULONG i;
+
+            for (i = 0; i < entries; i++) {
+                UBYTE rgb[3];
+                if (!ReadExact(file, rgb, sizeof(rgb))) {
+                    Close(file);
+                    return loaded;
+                }
+                if (i < (ULONG)maxPens) {
+                    palette[firstPen + i] = (UWORD)(((rgb[0] >> 4) << 8) |
+                                                    ((rgb[1] >> 4) << 4) |
+                                                     (rgb[2] >> 4));
+                    loaded = TRUE;
+                }
+            }
+
+            if (chunkSize > entries * 3 && !SkipBytes(file, chunkSize - entries * 3)) {
+                Close(file);
+                return loaded;
+            }
+            if ((chunkSize & 1) && !SkipBytes(file, 1)) {
+                Close(file);
+                return loaded;
+            }
+            break;
+        }
+
+        if (!SkipBytes(file, paddedSize)) break;
+    }
+
+    Close(file);
+    return loaded;
+}
+
 static BOOL LoadRobotSheetIntoCache(void)
 {
     Object *dto = NULL;
@@ -681,6 +762,7 @@ static BOOL LoadRobotSheetIntoCache(void)
     Object *dto4 = NULL;
     Object *dto5 = NULL;
     Object *dto6 = NULL;
+    Object *dto7 = NULL;
     Object *boltDto = NULL;
     struct BitMapHeader *bmhd = NULL;
     struct BitMapHeader *boltBmhd = NULL;
@@ -720,7 +802,11 @@ static BOOL LoadRobotSheetIntoCache(void)
                        DTA_GroupID, GID_PICTURE,
                        PDTA_Remap, FALSE,
                        TAG_DONE);
-    if (!dto || !dto2 || !dto3 || !dto4 || !dto5 || !dto6) {
+    dto7 = NewDTObject("PROGDIR:tiles/airobot7.iff",
+                       DTA_GroupID, GID_PICTURE,
+                       PDTA_Remap, FALSE,
+                       TAG_DONE);
+    if (!dto || !dto2 || !dto3 || !dto4 || !dto5 || !dto6 || !dto7) {
         printf("LoadRobotSheetIntoCache: NewDTObject failed\n");
         if (dto) DisposeDTObject(dto);
         if (dto2) DisposeDTObject(dto2);
@@ -728,6 +814,7 @@ static BOOL LoadRobotSheetIntoCache(void)
         if (dto4) DisposeDTObject(dto4);
         if (dto5) DisposeDTObject(dto5);
         if (dto6) DisposeDTObject(dto6);
+        if (dto7) DisposeDTObject(dto7);
         return FALSE;
     }
 
@@ -746,6 +833,7 @@ static BOOL LoadRobotSheetIntoCache(void)
         DisposeDTObject(dto4);
         DisposeDTObject(dto5);
         DisposeDTObject(dto6);
+        DisposeDTObject(dto7);
         return FALSE;
     }
 
@@ -769,6 +857,8 @@ static BOOL LoadRobotSheetIntoCache(void)
     BlitRobotVariant(dto5, &dstRP, &maskRP, 4, 0);
     /* airobot6 source art faces down (90=left,180=up,270=right). */
     BlitRobotVariant(dto6, &dstRP, &maskRP, 5, 180);
+    /* airobot7 source art faces down (90=left,180=up,270=right). */
+    BlitRobotVariant(dto7, &dstRP, &maskRP, 6, 180);
     boltDstX = SPR_ENERGY_BOLT * ROBOT_W;
 
     boltDto = NewDTObject("PROGDIR:tiles/robotvac-tiles.iff",
@@ -806,12 +896,15 @@ static BOOL LoadRobotSheetIntoCache(void)
         }
     }
 
+    LoadPaletteCMap("PROGDIR:tiles/robopal2.pal", 16, 16);
+
     DisposeDTObject(dto);
     DisposeDTObject(dto2);
     DisposeDTObject(dto3);
     DisposeDTObject(dto4);
     DisposeDTObject(dto5);
     DisposeDTObject(dto6);
+    DisposeDTObject(dto7);
     return TRUE;
 }
 
@@ -832,7 +925,7 @@ static BOOL InitRobotBobs(void)
     robotRP.BitMap = robotCacheBM;
 
     if (!LoadRobotSheetIntoCache()) {
-        printf("Could not load PROGDIR:tiles/airobot1.iff (need at least 16x16, 16 colours)\n");
+        printf("Could not load PROGDIR:tiles/airobot1.iff through airobot7.iff (need at least 16x16, 16 colours)\n");
         return FALSE;
     }
 
