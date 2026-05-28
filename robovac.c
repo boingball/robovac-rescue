@@ -103,6 +103,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_S       0x21
 #define RAW_H       0x25
 
+#define TITLE_CAROUSEL_Y 172
+#define TITLE_ROBOT_SCALE 2
+#define TITLE_SPIN_DELAY 18
+
 struct Robot {
     WORD tileX;
     WORD tileY;
@@ -144,6 +148,9 @@ static WORD aiPrevTileX[MAX_ROBOTS];
 static WORD aiPrevTileY[MAX_ROBOTS];
 static WORD robotCount = 2;
 static WORD aiRivals = 1;
+static WORD selectedPlayerVariant = 0;
+static WORD titleSpinTicks = 0;
+static WORD titleSpinFrame = 0;
 
 static WORD dirtLeft = 0;
 static WORD moves = 0;
@@ -213,6 +220,7 @@ static const char *roomNames[5] = {
 
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolt(void);
+static void DrawTitleCarousel(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -1029,7 +1037,7 @@ static void InitRobots(void)
         robots[i].chargeTicks = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
-        robots[i].spriteVariant = (i == 0) ? 0 : (UBYTE)RandRange(ROBOT_VARIANTS);
+        robots[i].spriteVariant = (i == 0) ? (UBYTE)selectedPlayerVariant : (UBYTE)RandRange(ROBOT_VARIANTS);
     }
 
     moves = 0;
@@ -1394,6 +1402,87 @@ static void StepGame(void)
  * Drawing
  * ------------------------------------------------------------------------- */
 
+static UBYTE TitleSpinSpriteIndex(void)
+{
+    static const UBYTE spinFrames[4] = {SPR_UP, SPR_RIGHT, SPR_DOWN, SPR_LEFT};
+    return spinFrames[titleSpinFrame & 3];
+}
+
+static void DrawRobotVariantScaled(WORD variant, UBYTE spriteIndex, WORD dstX, WORD dstY, WORD scale)
+{
+    WORD srcX;
+    WORD x;
+    WORD y;
+
+    if (!robotCacheBM || variant < 0 || variant >= ROBOT_VARIANTS || scale <= 0) return;
+
+    srcX = (variant * SPR_STATE_COUNT + spriteIndex) * ROBOT_W;
+
+    for (y = 0; y < ROBOT_H; y++) {
+        for (x = 0; x < ROBOT_W; x++) {
+            LONG pen = ReadPixel(&robotRP, srcX + x, y);
+            WORD dx;
+            WORD dy;
+
+            if (pen <= 0) continue;
+            SetAPen(&renderRP, (UBYTE)pen);
+            for (dy = 0; dy < scale; dy++) {
+                for (dx = 0; dx < scale; dx++) {
+                    WritePixel(&renderRP, dstX + (x * scale) + dx, dstY + (y * scale) + dy);
+                }
+            }
+        }
+    }
+}
+
+static void DrawTitleCarousel(void)
+{
+    char b[80];
+    WORD slot;
+    UBYTE spriteIndex;
+    static const WORD slotX[ROBOT_VARIANTS] = {24, 64, 104, 144, 184, 224, 264};
+
+    if (++titleSpinTicks >= TITLE_SPIN_DELAY) {
+        titleSpinTicks = 0;
+        titleSpinFrame = (titleSpinFrame + 1) & 3;
+    }
+
+    spriteIndex = TitleSpinSpriteIndex();
+
+    SetAPen(&renderRP, 1);
+    RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, SCREEN_H - 1);
+    SetAPen(&renderRP, 8);
+    RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, TITLE_CAROUSEL_Y - 6);
+
+    PutText(&renderRP, 74, TITLE_CAROUSEL_Y - 18, "SELECT YOUR ROBOVAC", 7);
+    PutText(&renderRP, 60, TITLE_CAROUSEL_Y + 52, "<-  arrows choose  ->", 13);
+
+    for (slot = 0; slot < ROBOT_VARIANTS; slot++) {
+        WORD variant = selectedPlayerVariant + slot - (ROBOT_VARIANTS / 2);
+        WORD x = slotX[slot];
+        WORD y = TITLE_CAROUSEL_Y;
+        while (variant < 0) variant += ROBOT_VARIANTS;
+        while (variant >= ROBOT_VARIANTS) variant -= ROBOT_VARIANTS;
+
+        if (slot == (ROBOT_VARIANTS / 2)) {
+            SetAPen(&renderRP, 13);
+            RectFill(&renderRP, x - 4, y - 4, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 3, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 3);
+            SetAPen(&renderRP, 0);
+            RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
+        } else {
+            SetAPen(&renderRP, 8);
+            RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
+            SetAPen(&renderRP, 0);
+            RectFill(&renderRP, x, y, x + (ROBOT_W * TITLE_ROBOT_SCALE) - 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) - 1);
+        }
+
+        DrawRobotVariantScaled(variant, spriteIndex, x, y, TITLE_ROBOT_SCALE);
+    }
+
+    snprintf(b, sizeof(b), "PLAYER HOOVER %d", selectedPlayerVariant + 1);
+    PutText(&renderRP, 100, TITLE_CAROUSEL_Y + 42, b, 7);
+}
+
 static void DrawHud(void)
 {
     char b[160];
@@ -1403,9 +1492,9 @@ static void DrawHud(void)
 
     if (gameState == GAME_TITLE) {
         PutText(&renderRP, 72, 10, "ROBOVAC RESCUE", 7);
-        PutText(&renderRP, 20, 22, "1/2/3: AI rivals  SPACE/R: start", 13);
-        PutText(&renderRP, 20, 30, "Hidden mode: O = 9-rival battle", 14);
-        PutText(&renderRP, 20, 38, "E/S/H difficulty, B fires bolt", 13);
+        PutText(&renderRP, 12, 22, "Left/Right: select hoover", 13);
+        PutText(&renderRP, 12, 30, "1/2/3: AI rivals  SPACE/R: start", 13);
+        PutText(&renderRP, 12, 38, "E/S/H difficulty, B fires bolt", 14);
         return;
     }
 
@@ -1452,9 +1541,10 @@ static void DrawFrame(void)
         SetAPen(&renderRP, 0);
         RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
         DrawHud();
-        PutText(&renderRP, 42, 112, "A tiny Amiga robot cleaner", 7);
-        PutText(&renderRP, 54, 132, "Clean more dirt than", 9);
-        PutText(&renderRP, 82, 144, "the AI robots", 9);
+        PutText(&renderRP, 42, 86, "A tiny Amiga robot cleaner", 7);
+        PutText(&renderRP, 54, 106, "Clean more dirt than", 9);
+        PutText(&renderRP, 82, 118, "the AI robots", 9);
+        DrawTitleCarousel();
         return;
     }
 
@@ -1566,6 +1656,8 @@ static void HandleRawKey(UWORD rawCode)
     }
 
     if (!keyUpEvent && gameState == GAME_TITLE) {
+        if (code == RAW_LEFT) { selectedPlayerVariant--; if (selectedPlayerVariant < 0) selectedPlayerVariant = ROBOT_VARIANTS - 1; return; }
+        if (code == RAW_RIGHT) { selectedPlayerVariant++; if (selectedPlayerVariant >= ROBOT_VARIANTS) selectedPlayerVariant = 0; return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
         if (code == RAW_3) { StartWithRivals(3); return; }
@@ -1607,7 +1699,7 @@ static void PollWindowMessages(void)
             HandleRawKey(code);
         } else if (cls == IDCMP_MOUSEBUTTONS) {
             if (code == MENUDOWN) running = FALSE;
-            if (code == SELECTDOWN && gameState == GAME_TITLE) ResetLevel();
+            if (code == SELECTDOWN && gameState == GAME_TITLE) StartWithRivals(aiRivals);
         }
     }
 }
