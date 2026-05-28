@@ -5,6 +5,7 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
 ## Controls
 
 - Arrow keys: move your robot
+- Left/Right arrows on title screen: choose your player hoover in the robot carousel
 - `R` / `Space`:
   - On title: start match
   - During match: reset current round
@@ -80,7 +81,7 @@ If loading fails (missing file, wrong format, or too small), RoboVac Rescue fall
 
 ## Robot Sprites and Palette
 
-Robot variants are loaded from `PROGDIR:tiles/airobot1.iff` through `PROGDIR:tiles/airobot7.iff`. The engine builds rotated frames at startup; `airobot7.iff` is expected to face down in its source art, so its generated directions are:
+Robot variants are loaded from `PROGDIR:tiles/airobot1.iff` through `PROGDIR:tiles/airobot7.iff`. The title screen displays these variants in a double-size player-select carousel, and the Left/Right arrows choose which variant becomes the main player robot. The engine builds rotated frames at startup; `airobot7.iff` is expected to face down in its source art, so its generated directions are:
 
 - source/down image: down-ready/load pose
 - 90 degrees: left
