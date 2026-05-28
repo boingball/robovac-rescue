@@ -14,6 +14,20 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
 - `1` / `2` / `3`: choose AI rival count from title screen
 - `Esc` or RMB: quit
 
+## Robot Super Powers
+
+Every robot tracks a five-dirt clean streak. Whenever a robot cleans its fifth dirt tile in that streak, it triggers the super power tied to that robot variant:
+
+- Dust Viper: double speed for 20 moves.
+- Crumb Comet: storm bolt for 10 moves, letting the robot zap nearby rivals.
+- Neon Nibbler: quad ghost for 20 moves, cleaning a 3x3 area and passing through walls/tables.
+- Mote Marauder: EMP blast that stuns every other robot.
+- Pixel Prowler: dirt bomb that drops up to 5 new dirt tiles onto open floor.
+- Bristle Blitz: battery burst that instantly refills the robot.
+- Static Sweep: wall smash for 20 moves, breaking interior wall tiles while moving.
+
+The HUD shows each robot's current clean-streak count, flashes `P` while a timed power is active, and announces each triggered power.
+
 ## Match Structure (Best of 5)
 
 - A match is 5 rounds.
