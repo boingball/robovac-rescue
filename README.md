@@ -78,6 +78,21 @@ Expected layout is a horizontal `128x16` strip containing eight `16x16` tiles in
 
 If loading fails (missing file, wrong format, or too small), RoboVac Rescue falls back to its built-in generated tiles so gameplay still works.
 
+## Robot Sprites and Palette
+
+Robot variants are loaded from `PROGDIR:tiles/airobot1.iff` through `PROGDIR:tiles/airobot7.iff`. The engine builds rotated frames at startup; `airobot7.iff` is expected to face down in its source art, so its generated directions are:
+
+- source/down image: down-ready/load pose
+- 90 degrees: left
+- 180 degrees: up
+- 270 degrees: right
+
+Robot art is copied into the upper half of the 32-colour screen palette (`16-31`). The first robot IFF still provides the fallback robot colours, but the engine now also looks for a Deluxe Paint/IFF palette file at:
+
+- `PROGDIR:tiles/robopal2.pal`
+
+When present, its `CMAP` colours replace robot palette entries `16-31`, so a one-colour tweak such as changing DPaint palette index `13` to blue only needs to be saved in `robopal2.pal`; the colour does not need to be re-saved into every robot IFF as long as all robot images keep using the same palette indexes.
+
 ## Build
 
 ```bash
