@@ -1580,7 +1580,7 @@ static void StepGame(void)
  * Drawing
  * ------------------------------------------------------------------------- */
 
-static void MiniChar(struct RastPort *rp, WORD x, WORD y, char ch, UBYTE pen)
+static const UBYTE *MiniGlyph(char ch)
 {
     static const UBYTE glyphs[37][5] = {
         {7,5,7,5,5}, {6,5,6,5,6}, {7,4,4,4,7}, {6,5,5,5,6}, {7,4,6,4,7}, {7,4,6,4,4},
@@ -1591,32 +1591,72 @@ static void MiniChar(struct RastPort *rp, WORD x, WORD y, char ch, UBYTE pen)
         {5,5,7,1,1}, {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},
         {0,0,0,0,0}
     };
-    WORD idx;
-    WORD row;
-    WORD col;
+    static const UBYTE colon[5] = {0,2,0,2,0};
+    static const UBYTE slash[5] = {1,1,2,4,4};
+    static const UBYTE dash[5] = {0,0,7,0,0};
+    static const UBYTE leftArrow[5] = {1,2,4,2,1};
+    static const UBYTE rightArrow[5] = {4,2,1,2,4};
+    static const UBYTE period[5] = {0,0,0,0,2};
+    static const UBYTE exclaim[5] = {2,2,2,0,2};
+    static const UBYTE question[5] = {7,1,3,0,2};
 
     if (ch >= 'a' && ch <= 'z') ch -= 32;
-    if (ch >= 'A' && ch <= 'Z') idx = ch - 'A';
-    else if (ch >= '0' && ch <= '9') idx = 26 + ch - '0';
-    else idx = 36;
+    if (ch >= 'A' && ch <= 'Z') return glyphs[ch - 'A'];
+    if (ch >= '0' && ch <= '9') return glyphs[26 + ch - '0'];
+    if (ch == ':') return colon;
+    if (ch == '/') return slash;
+    if (ch == '-') return dash;
+    if (ch == '<') return leftArrow;
+    if (ch == '>') return rightArrow;
+    if (ch == '.') return period;
+    if (ch == '!') return exclaim;
+    if (ch == '?') return question;
+    return glyphs[36];
+}
+
+static WORD MiniTextWidth(const char *s, WORD scale)
+{
+    return (WORD)(strlen(s) * 4 * scale);
+}
+
+static void MiniCharScaled(struct RastPort *rp, WORD x, WORD y, char ch, UBYTE pen, WORD scale)
+{
+    const UBYTE *glyph = MiniGlyph(ch);
+    WORD row;
+    WORD col;
 
     SetAPen(rp, pen);
     for (row = 0; row < 5; row++) {
         for (col = 0; col < 3; col++) {
-            if (glyphs[idx][row] & (1 << (2 - col))) {
-                WritePixel(rp, x + col, y + row);
+            if (glyph[row] & (1 << (2 - col))) {
+                if (scale <= 1) {
+                    WritePixel(rp, x + col, y + row);
+                } else {
+                    RectFill(rp, x + col * scale, y + row * scale,
+                             x + col * scale + scale - 1, y + row * scale + scale - 1);
+                }
             }
         }
     }
 }
 
-static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen)
+static void MiniTextScaled(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen, WORD scale)
 {
     while (*s) {
-        MiniChar(rp, x, y, *s, pen);
-        x += 4;
+        MiniCharScaled(rp, x, y, *s, pen, scale);
+        x += 4 * scale;
         s++;
     }
+}
+
+static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen)
+{
+    MiniTextScaled(rp, x, y, s, pen, 1);
+}
+
+static void MiniTextCentered(struct RastPort *rp, WORD y, const char *s, UBYTE pen, WORD scale)
+{
+    MiniTextScaled(rp, (SCREEN_W - MiniTextWidth(s, scale)) / 2, y, s, pen, scale);
 }
 
 static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD dstY)
@@ -1652,8 +1692,7 @@ static void DrawTitleCarousel(void)
     SetAPen(&renderRP, 8);
     RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, TITLE_CAROUSEL_Y - 6);
 
-    PutText(&renderRP, 74, TITLE_CAROUSEL_Y - 18, "SELECT YOUR ROBOVAC", 7);
-    PutText(&renderRP, 60, TITLE_CAROUSEL_Y + 52, "<-  arrows choose  ->", 13);
+    MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y - 24, "SELECT YOUR ROBOVAC", 7, 2);
 
     for (slot = 0; slot < ROBOT_VARIANTS; slot++) {
         WORD variant = selectedPlayerVariant + slot - (ROBOT_VARIANTS / 2);
@@ -1681,7 +1720,8 @@ static void DrawTitleCarousel(void)
     }
 
     snprintf(b, sizeof(b), "PLAYER %s", robotVariantNames[selectedPlayerVariant]);
-    PutText(&renderRP, 74, TITLE_CAROUSEL_Y + 42, b, 7);
+    MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 50, b, 7, 2);
+    MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "<- ARROWS CHOOSE ->", 13, 2);
 }
 
 static void DrawRobotHealthStrip(void)
@@ -1724,10 +1764,10 @@ static void DrawHud(void)
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
 
     if (gameState == GAME_TITLE) {
-        PutText(&renderRP, 72, 10, "ROBOVAC RESCUE", 7);
-        PutText(&renderRP, 12, 22, "Left/Right: select named vac", 13);
-        PutText(&renderRP, 12, 30, "1/2/3: AI rivals  SPACE/R: start", 13);
-        PutText(&renderRP, 12, 38, "E/S/H difficulty, B fires bolt", 14);
+        MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
+        MiniTextCentered(&renderRP, 20, "LEFT/RIGHT: SELECT VAC", 13, 2);
+        MiniTextCentered(&renderRP, 32, "1/2/3: AI RIVALS SPACE/R: START", 13, 2);
+        MiniTextCentered(&renderRP, 44, "E/S/H DIFFICULTY B FIRES BOLT", 14, 2);
         return;
     }
 
@@ -1760,9 +1800,9 @@ static void DrawFrame(void)
         SetAPen(&renderRP, 0);
         RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
         DrawHud();
-        PutText(&renderRP, 42, 86, "A tiny Amiga robot cleaner", 7);
-        PutText(&renderRP, 54, 106, "Clean more dirt than", 9);
-        PutText(&renderRP, 82, 118, "the AI robots", 9);
+        MiniTextCentered(&renderRP, 86, "A TINY AMIGA ROBOT CLEANER", 7, 2);
+        MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
+        MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
         DrawTitleCarousel();
         return;
     }
