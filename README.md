@@ -22,7 +22,7 @@ Every robot tracks a five-dirt clean streak. Whenever a robot cleans its fifth d
 - Crumb Comet: storm bolt for 10 moves, letting the robot zap nearby rivals.
 - Neon Nibbler: quad ghost for 20 moves, cleaning a 3x3 area and passing through walls/tables.
 - Mote Marauder: EMP blast that stuns every other robot.
-- Pixel Prowler: dirt bomb that drops up to 20 new dirt tiles onto open floor.
+- Pixel Prowler: dirt bomb that drops up to 5 new dirt tiles onto open floor.
 - Bristle Blitz: battery burst that instantly refills the robot.
 - Static Sweep: wall smash for 20 moves, breaking interior wall tiles while moving.
 

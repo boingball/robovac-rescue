@@ -68,7 +68,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_DURATION_MOVES  20
 #define POWERUP_BOLT_MOVES      10
 #define POWERUP_EMP_TICKS       250
-#define POWERUP_DIRT_DROP       20
+#define POWERUP_DIRT_DROP       5
 #define POWERUP_QUAD_RADIUS     1
 
 #define ROBOT_W     16
