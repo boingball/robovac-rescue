@@ -60,9 +60,16 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define FP_TO_INT(x) ((x) >> FP_SHIFT)
 
 #define MOVE_SPEED  (3 * FP_ONE)
+#define DOUBLE_SPEED_MOVE_SPEED  (6 * FP_ONE)
 #define EMERGENCY_MOVE_SPEED  (2 * FP_ONE)
 #define EMERGENCY_DOCK_MOVES  5
 #define DOCK_CHARGE_TICKS     250
+#define POWERUP_CLEAN_TARGET    5
+#define POWERUP_DURATION_MOVES  20
+#define POWERUP_BOLT_MOVES      10
+#define POWERUP_EMP_TICKS       250
+#define POWERUP_DIRT_DROP       20
+#define POWERUP_QUAD_RADIUS     1
 
 #define ROBOT_W     16
 #define ROBOT_H     16
@@ -122,6 +129,9 @@ struct Robot {
     WORD stunTicks;
     WORD emergencyMovesLeft;
     WORD chargeTicks;
+    WORD cleanStreak;
+    WORD powerMovesLeft;
+    UBYTE powerType;
     BOOL ai;
     BOOL moving;
     UBYTE spriteIndex;
@@ -179,6 +189,8 @@ static BOOL keyUp = FALSE;
 static BOOL keyDown = FALSE;
 static WORD playerFacingX = 0;
 static WORD playerFacingY = -1;
+static char lastPowerText[80] = "";
+static WORD lastPowerTicks = 0;
 
 struct Bolt {
     BOOL active;
@@ -238,6 +250,27 @@ static const char *robotVariantTags[ROBOT_VARIANTS] = {
     "VIP", "COM", "NIB", "MAR", "PIX", "BLZ", "SWP"
 };
 
+enum PowerType {
+    POWER_NONE = 0,
+    POWER_DOUBLE_SPEED,
+    POWER_BOLT,
+    POWER_QUAD,
+    POWER_EMP,
+    POWER_DIRT_DROP,
+    POWER_BATTERY_BURST,
+    POWER_WALL_SMASH
+};
+
+static const char *powerNames[ROBOT_VARIANTS] = {
+    "DOUBLE SPEED",
+    "STORM BOLT",
+    "QUAD GHOST",
+    "EMP BLAST",
+    "DIRT BOMB",
+    "BATTERY BURST",
+    "WALL SMASH"
+};
+
 static const char *RobotName(WORD id)
 {
     UBYTE variant;
@@ -261,6 +294,8 @@ static const char *RobotTag(WORD id)
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolt(void);
 static void DrawTitleCarousel(void);
+static void TriggerRobotPower(WORD id);
+static WORD SpawnDirtTiles(WORD count);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -384,6 +419,19 @@ static BOOL IsBlocked(WORD tx, WORD ty)
 {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return TRUE;
     return (map[ty][tx] == TILE_WALL || map[ty][tx] == TILE_TABLE);
+}
+
+static BOOL RobotCanPassTile(WORD id, WORD tx, WORD ty)
+{
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
+    if (id >= 0 && id < robotCount && robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+        return TRUE;
+    }
+    if (id >= 0 && id < robotCount && robots[id].powerType == POWER_WALL_SMASH && robots[id].powerMovesLeft > 0 &&
+        map[ty][tx] == TILE_WALL && tx > 0 && ty > 0 && tx < MAP_W - 1 && ty < MAP_H - 1) {
+        return TRUE;
+    }
+    return !IsBlocked(tx, ty);
 }
 
 static BOOL RobotAtTile(WORD tx, WORD ty, WORD ignoreId)
@@ -1213,6 +1261,9 @@ static void InitRobots(void)
         robots[i].stunTicks = 0;
         robots[i].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
         robots[i].chargeTicks = 0;
+        robots[i].cleanStreak = 0;
+        robots[i].powerMovesLeft = 0;
+        robots[i].powerType = POWER_NONE;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
         robots[i].spriteVariant = (i == 0) ? (UBYTE)selectedPlayerVariant : (UBYTE)((selectedPlayerVariant + i) % ROBOT_VARIANTS);
@@ -1221,6 +1272,81 @@ static void InitRobots(void)
     moves = 0;
 }
 
+
+
+static WORD CleanTileForRobot(WORD id, WORD tx, WORD ty)
+{
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return 0;
+    if (map[ty][tx] != TILE_DIRT) return 0;
+
+    map[ty][tx] = TILE_FLOOR;
+    if (dirtLeft > 0) dirtLeft--;
+    robots[id].score++;
+    UpdateRoomTile(tx, ty);
+    return 1;
+}
+
+static void CleanQuadArea(WORD id)
+{
+    WORD ox;
+    WORD oy;
+    WORD cleaned = 0;
+
+    for (oy = -POWERUP_QUAD_RADIUS; oy <= POWERUP_QUAD_RADIUS; oy++) {
+        for (ox = -POWERUP_QUAD_RADIUS; ox <= POWERUP_QUAD_RADIUS; ox++) {
+            cleaned += CleanTileForRobot(id, robots[id].tileX + ox, robots[id].tileY + oy);
+        }
+    }
+
+    if (cleaned > 0) {
+        snprintf(lastPowerText, sizeof(lastPowerText), "%s QUAD CLEAN +%d", RobotTag(id), cleaned);
+        lastPowerTicks = 120;
+    }
+}
+
+static void TriggerRobotPower(WORD id)
+{
+    WORD i;
+    UBYTE variant;
+
+    if (id < 0 || id >= robotCount) return;
+    variant = robots[id].spriteVariant;
+    if (variant >= ROBOT_VARIANTS) variant = 0;
+
+    robots[id].powerType = (UBYTE)(variant + 1);
+    robots[id].powerMovesLeft = POWERUP_DURATION_MOVES;
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s: %s!", RobotTag(id), powerNames[variant]);
+    lastPowerTicks = 180;
+
+    if (robots[id].powerType == POWER_BOLT) {
+        robots[id].powerMovesLeft = POWERUP_BOLT_MOVES;
+    } else if (robots[id].powerType == POWER_EMP) {
+        for (i = 0; i < robotCount; i++) {
+            if (i != id) {
+                robots[i].stunTicks = POWERUP_EMP_TICKS;
+                if (robots[i].moving) {
+                    robots[i].tileX = robots[i].targetX;
+                    robots[i].tileY = robots[i].targetY;
+                    robots[i].px = TO_FP(robots[i].tileX * TILE_SIZE);
+                    robots[i].py = TO_FP(robots[i].tileY * TILE_SIZE);
+                    robots[i].moving = FALSE;
+                }
+            }
+        }
+        robots[id].powerMovesLeft = 0;
+        robots[id].powerType = POWER_NONE;
+    } else if (robots[id].powerType == POWER_DIRT_DROP) {
+        WORD dropped = SpawnDirtTiles(POWERUP_DIRT_DROP);
+        snprintf(lastPowerText, sizeof(lastPowerText), "%s DIRT BOMB +%d", RobotTag(id), dropped);
+        robots[id].powerMovesLeft = 0;
+        robots[id].powerType = POWER_NONE;
+    } else if (robots[id].powerType == POWER_BATTERY_BURST) {
+        robots[id].battery = maxBattery;
+        robots[id].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
+    } else if (robots[id].powerType == POWER_QUAD) {
+        CleanQuadArea(id);
+    }
+}
 
 static BOOL IsRobotDock(WORD id, WORD tx, WORD ty)
 {
@@ -1238,13 +1364,33 @@ static BOOL ValidDirtTile(WORD tx, WORD ty)
     return TRUE;
 }
 
+static WORD SpawnDirtTiles(WORD count)
+{
+    WORD placed = 0, tries = 0;
+    while (placed < count && tries < 2000) {
+        WORD x = 1 + RandRange(MAP_W - 2);
+        WORD y = 1 + RandRange(MAP_H - 2);
+        if (ValidDirtTile(x, y) && !RobotAtTile(x, y, -1)) {
+            map[y][x] = TILE_DIRT;
+            UpdateRoomTile(x, y);
+            placed++;
+        }
+        tries++;
+    }
+    if (placed > 0) CountDirt();
+    return placed;
+}
+
 static void SpawnRoundDirt(WORD count)
 {
     WORD placed = 0, tries = 0;
     while (placed < count && tries < 2000) {
         WORD x = 1 + RandRange(MAP_W - 2);
         WORD y = 1 + RandRange(MAP_H - 2);
-        if (ValidDirtTile(x, y)) { map[y][x] = TILE_DIRT; placed++; }
+        if (ValidDirtTile(x, y)) {
+            map[y][x] = TILE_DIRT;
+            placed++;
+        }
         tries++;
     }
 }
@@ -1272,6 +1418,8 @@ static void ResetLevel(void)
     SpawnRoundDirt(roundDirtTargets[roundIndex]);
     keyLeft = keyRight = keyUp = keyDown = FALSE;
     playerBolt.active = FALSE;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
     gameState = GAME_PLAYING;
 
     InitRobots();
@@ -1296,8 +1444,13 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     nx = robots[id].tileX + dx;
     ny = robots[id].tileY + dy;
 
-    if (IsBlocked(nx, ny)) return FALSE;
+    if (!RobotCanPassTile(id, nx, ny)) return FALSE;
     if (RobotAtTile(nx, ny, id)) return FALSE;
+
+    if (robots[id].powerType == POWER_WALL_SMASH && robots[id].powerMovesLeft > 0 && map[ny][nx] == TILE_WALL) {
+        map[ny][nx] = TILE_FLOOR;
+        UpdateRoomTile(nx, ny);
+    }
 
     if (robots[id].battery < batteryCostPerMove) {
         dockDistNow = AbsW(robots[id].tileX - robotDockX[id]) + AbsW(robots[id].tileY - robotDockY[id]);
@@ -1321,6 +1474,11 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     } else {
         robots[id].battery = 0;
         robots[id].emergencyMovesLeft--;
+    }
+
+    if (robots[id].powerMovesLeft > 0) {
+        robots[id].powerMovesLeft--;
+        if (robots[id].powerMovesLeft <= 0) robots[id].powerType = POWER_NONE;
     }
 
     if (id == 0) {
@@ -1349,12 +1507,16 @@ static void FinishRobotTileMove(WORD id)
     robots[id].py = TO_FP(ty * TILE_SIZE);
     robots[id].moving = FALSE;
 
-    if (map[ty][tx] == TILE_DIRT) {
-        map[ty][tx] = TILE_FLOOR;
-        if (dirtLeft > 0) dirtLeft--;
+    if (CleanTileForRobot(id, tx, ty)) {
+        robots[id].cleanStreak++;
+        if (robots[id].cleanStreak >= POWERUP_CLEAN_TARGET) {
+            robots[id].cleanStreak = 0;
+            TriggerRobotPower(id);
+        }
+    }
 
-        robots[id].score++;
-        UpdateRoomTile(tx, ty);
+    if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+        CleanQuadArea(id);
     }
 
     if (map[ty][tx] == TILE_DOCK) {
@@ -1386,6 +1548,9 @@ static void StepRobotMovement(WORD id)
 
     {
         LONG stepSpeed = (robots[id].battery <= 0) ? EMERGENCY_MOVE_SPEED : MOVE_SPEED;
+        if (robots[id].powerType == POWER_DOUBLE_SPEED && robots[id].powerMovesLeft > 0 && robots[id].battery > 0) {
+            stepSpeed = DOUBLE_SPEED_MOVE_SPEED;
+        }
 
     if (dx > 0) {
         robots[id].px += (dx < stepSpeed) ? dx : stepSpeed;
@@ -1455,7 +1620,7 @@ static void ChooseAiMove(WORD id)
             WORD score;
             BOOL backtrack;
 
-            if (IsBlocked(nx, ny)) continue;
+            if (!RobotCanPassTile(id, nx, ny)) continue;
             if (RobotAtTile(nx, ny, id)) continue;
             score = AbsW(bestX - nx) + AbsW(bestY - ny);
             backtrack = (nx == aiPrevTileX[id] && ny == aiPrevTileY[id]) ? TRUE : FALSE;
@@ -1486,6 +1651,7 @@ static void ChooseAiMove(WORD id)
 static void ChoosePlayerMove(void)
 {
     if (robots[0].moving) return;
+    if (robots[0].stunTicks > 0) return;
 
     if (keyLeft) {
         StartRobotMove(0, -1, 0);
@@ -1551,6 +1717,17 @@ static void StepGame(void)
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
         if (robots[i].stunTicks > 0) robots[i].stunTicks--;
+        if (robots[i].powerType == POWER_BOLT && robots[i].powerMovesLeft > 0 && (RandRange(24) == 0)) {
+            WORD j;
+            for (j = 0; j < robotCount; j++) {
+                if (j != i && AbsW(robots[j].tileX - robots[i].tileX) + AbsW(robots[j].tileY - robots[i].tileY) <= 3) {
+                    robots[j].stunTicks = 80;
+                    robots[j].battery -= 3;
+                    if (robots[j].battery < 0) robots[j].battery = 0;
+                    break;
+                }
+            }
+        }
         if (!robots[i].moving && map[robots[i].tileY][robots[i].tileX] == TILE_DOCK && robots[i].chargeTicks > 0) {
             robots[i].chargeTicks--;
             if (robots[i].chargeTicks <= 0) {
@@ -1560,6 +1737,7 @@ static void StepGame(void)
         }
     }
     StepPlayerBolt();
+    if (lastPowerTicks > 0) lastPowerTicks--;
 
     ChoosePlayerMove();
 
@@ -1743,6 +1921,13 @@ static void DrawRobotHealthStrip(void)
         MiniText(&renderRP, x + 2, 14, RobotTag(i), (i == 0) ? 14 : 7);
         snprintf(scoreText, sizeof(scoreText), "%d", robots[i].score);
         MiniText(&renderRP, x + 21, 14, scoreText, 13);
+        if (robots[i].powerMovesLeft > 0) {
+            MiniText(&renderRP, x + 2, 26, "P", 14);
+        } else if (robots[i].cleanStreak > 0) {
+            char streakText[2];
+            snprintf(streakText, sizeof(streakText), "%d", robots[i].cleanStreak);
+            MiniText(&renderRP, x + 2, 26, streakText, 7);
+        }
 
         SetAPen(&renderRP, 1);
         RectFill(&renderRP, x + 2, 21, x + slotW - 5, 25);
@@ -1787,8 +1972,12 @@ static void DrawHud(void)
         return;
     }
 
-    snprintf(b, sizeof(b), "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
-    PutText(&renderRP, 4, 8, b, 7);
+    if (lastPowerTicks > 0 && lastPowerText[0]) {
+        PutText(&renderRP, 4, 8, lastPowerText, 14);
+    } else {
+        snprintf(b, sizeof(b), "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
+        PutText(&renderRP, 4, 8, b, 7);
+    }
     DrawRobotHealthStrip();
 }
 
@@ -1803,6 +1992,7 @@ static void DrawFrame(void)
         MiniTextCentered(&renderRP, 86, "A TINY AMIGA ROBOT CLEANER", 7, 2);
         MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
         MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
+        MiniTextCentered(&renderRP, 142, "EVERY 5 DIRT EARNS POWERS", 14, 2);
         DrawTitleCarousel();
         return;
     }
@@ -1855,7 +2045,7 @@ static void FirePlayerBolt(void)
     WORD dirX = 0, dirY = 0;
 
     if (gameState != GAME_PLAYING) return;
-    if (robots[0].battery < 2) return;
+    if (robots[0].battery < 2 && !(robots[0].powerType == POWER_BOLT && robots[0].powerMovesLeft > 0)) return;
     if (playerBolt.active) return;
 
     if (robots[0].moving) {
@@ -1868,7 +2058,9 @@ static void FirePlayerBolt(void)
     else { dirX = playerFacingX; dirY = playerFacingY; }
     if (dirX == 0 && dirY == 0) dirY = -1;
 
-    robots[0].battery -= 2;
+    if (!(robots[0].powerType == POWER_BOLT && robots[0].powerMovesLeft > 0)) {
+        robots[0].battery -= 2;
+    }
     playerFacingX = dirX;
     playerFacingY = dirY;
     playerBolt.active = TRUE;
@@ -1894,7 +2086,7 @@ static void StepPlayerBolt(void)
     if (IsBlocked(tx, ty)) { playerBolt.active = FALSE; return; }
 
     for (i = 1; i < robotCount; i++) {
-        if (robots[i].tileX == tx && robots[i].tileY == ty) {
+        if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
             robots[i].stunTicks = 250;
             robots[i].battery -= 5;
             if (robots[i].battery < 0) robots[i].battery = 0;
