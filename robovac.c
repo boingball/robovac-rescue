@@ -105,7 +105,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define TITLE_CAROUSEL_Y 172
 #define TITLE_ROBOT_SCALE 2
-#define TITLE_SPIN_DELAY 18
+#define TITLE_SPIN_STEPS 32
 
 struct Robot {
     WORD tileX;
@@ -149,8 +149,7 @@ static WORD aiPrevTileY[MAX_ROBOTS];
 static WORD robotCount = 2;
 static WORD aiRivals = 1;
 static WORD selectedPlayerVariant = 0;
-static WORD titleSpinTicks = 0;
-static WORD titleSpinFrame = 0;
+static WORD titleSpinPhase = 0;
 
 static WORD dirtLeft = 0;
 static WORD moves = 0;
@@ -217,6 +216,40 @@ enum RobotSpriteState {
 static const char *roomNames[5] = {
     "Living Room", "Dining Room", "Kitchen", "Bathroom", "Bedroom"
 };
+
+static const char *robotVariantNames[ROBOT_VARIANTS] = {
+    "Dust Viper",
+    "Crumb Comet",
+    "Neon Nibbler",
+    "Mote Marauder",
+    "Pixel Prowler",
+    "Bristle Blitz",
+    "Static Sweep"
+};
+
+static const char *robotVariantTags[ROBOT_VARIANTS] = {
+    "VIP", "COM", "NIB", "MAR", "PIX", "BLZ", "SWP"
+};
+
+static const char *RobotName(WORD id)
+{
+    UBYTE variant;
+
+    if (id < 0 || id >= robotCount) return "Vac";
+    variant = robots[id].spriteVariant;
+    if (variant >= ROBOT_VARIANTS) variant = 0;
+    return robotVariantNames[variant];
+}
+
+static const char *RobotTag(WORD id)
+{
+    UBYTE variant;
+
+    if (id < 0 || id >= robotCount) return "VAC";
+    variant = robots[id].spriteVariant;
+    if (variant >= ROBOT_VARIANTS) variant = 0;
+    return robotVariantTags[variant];
+}
 
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolt(void);
@@ -1037,7 +1070,7 @@ static void InitRobots(void)
         robots[i].chargeTicks = 0;
         robots[i].ai = (i != 0) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
-        robots[i].spriteVariant = (i == 0) ? (UBYTE)selectedPlayerVariant : (UBYTE)RandRange(ROBOT_VARIANTS);
+        robots[i].spriteVariant = (i == 0) ? (UBYTE)selectedPlayerVariant : (UBYTE)((selectedPlayerVariant + i) % ROBOT_VARIANTS);
     }
 
     moves = 0;
@@ -1402,33 +1435,92 @@ static void StepGame(void)
  * Drawing
  * ------------------------------------------------------------------------- */
 
-static UBYTE TitleSpinSpriteIndex(void)
+static void MiniChar(struct RastPort *rp, WORD x, WORD y, char ch, UBYTE pen)
 {
-    static const UBYTE spinFrames[4] = {SPR_UP, SPR_RIGHT, SPR_DOWN, SPR_LEFT};
-    return spinFrames[titleSpinFrame & 3];
+    static const UBYTE glyphs[37][5] = {
+        {7,5,7,5,5}, {6,5,6,5,6}, {7,4,4,4,7}, {6,5,5,5,6}, {7,4,6,4,7}, {7,4,6,4,4},
+        {7,4,5,5,7}, {5,5,7,5,5}, {7,2,2,2,7}, {1,1,1,5,7}, {5,5,6,5,5}, {4,4,4,4,7},
+        {5,7,7,5,5}, {5,7,7,7,5}, {7,5,5,5,7}, {7,5,7,4,4}, {7,5,5,7,1}, {7,5,7,6,5},
+        {7,4,7,1,7}, {7,2,2,2,2}, {5,5,5,5,7}, {5,5,5,5,2}, {5,5,7,7,5}, {5,5,2,5,5},
+        {5,5,2,2,2}, {7,1,2,4,7}, {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7},
+        {5,5,7,1,1}, {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7},
+        {0,0,0,0,0}
+    };
+    WORD idx;
+    WORD row;
+    WORD col;
+
+    if (ch >= 'a' && ch <= 'z') ch -= 32;
+    if (ch >= 'A' && ch <= 'Z') idx = ch - 'A';
+    else if (ch >= '0' && ch <= '9') idx = 26 + ch - '0';
+    else idx = 36;
+
+    SetAPen(rp, pen);
+    for (row = 0; row < 5; row++) {
+        for (col = 0; col < 3; col++) {
+            if (glyphs[idx][row] & (1 << (2 - col))) {
+                WritePixel(rp, x + col, y + row);
+            }
+        }
+    }
 }
 
-static void DrawRobotVariantScaled(WORD variant, UBYTE spriteIndex, WORD dstX, WORD dstY, WORD scale)
+static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen)
 {
+    while (*s) {
+        MiniChar(rp, x, y, *s, pen);
+        x += 4;
+        s++;
+    }
+}
+
+static void DrawRobotVariantSpin(WORD variant, WORD phase, WORD dstX, WORD dstY, WORD scale)
+{
+    static const WORD sinTable[TITLE_SPIN_STEPS] = {
+        0,12,24,36,45,53,59,63,64,63,59,53,45,36,24,12,
+        0,-12,-24,-36,-45,-53,-59,-63,-64,-63,-59,-53,-45,-36,-24,-12
+    };
+    static const WORD cosTable[TITLE_SPIN_STEPS] = {
+        64,63,59,53,45,36,24,12,0,-12,-24,-36,-45,-53,-59,-63,
+        -64,-63,-59,-53,-45,-36,-24,-12,0,12,24,36,45,53,59,63
+    };
     WORD srcX;
     WORD x;
     WORD y;
+    WORD sinv;
+    WORD cosv;
+    WORD centre;
 
     if (!robotCacheBM || variant < 0 || variant >= ROBOT_VARIANTS || scale <= 0) return;
 
-    srcX = (variant * SPR_STATE_COUNT + spriteIndex) * ROBOT_W;
+    phase &= (TITLE_SPIN_STEPS - 1);
+    sinv = sinTable[phase];
+    cosv = cosTable[phase];
+    srcX = (variant * SPR_STATE_COUNT + SPR_READY) * ROBOT_W;
+    centre = (ROBOT_W - 1) * scale / 2;
 
     for (y = 0; y < ROBOT_H; y++) {
         for (x = 0; x < ROBOT_W; x++) {
             LONG pen = ReadPixel(&robotRP, srcX + x, y);
+            WORD rx;
+            WORD ry;
+            WORD tx;
+            WORD ty;
             WORD dx;
             WORD dy;
 
             if (pen <= 0) continue;
+            rx = x - (ROBOT_W / 2);
+            ry = y - (ROBOT_H / 2);
+            tx = ((rx * cosv) - (ry * sinv)) / 64;
+            ty = ((rx * sinv) + (ry * cosv)) / 64;
+            tx = dstX + centre + (tx * scale);
+            ty = dstY + centre + (ty * scale);
+
             SetAPen(&renderRP, (UBYTE)pen);
             for (dy = 0; dy < scale; dy++) {
                 for (dx = 0; dx < scale; dx++) {
-                    WritePixel(&renderRP, dstX + (x * scale) + dx, dstY + (y * scale) + dy);
+                    WritePixel(&renderRP, tx + dx, ty + dy);
                 }
             }
         }
@@ -1439,15 +1531,9 @@ static void DrawTitleCarousel(void)
 {
     char b[80];
     WORD slot;
-    UBYTE spriteIndex;
     static const WORD slotX[ROBOT_VARIANTS] = {24, 64, 104, 144, 184, 224, 264};
 
-    if (++titleSpinTicks >= TITLE_SPIN_DELAY) {
-        titleSpinTicks = 0;
-        titleSpinFrame = (titleSpinFrame + 1) & 3;
-    }
-
-    spriteIndex = TitleSpinSpriteIndex();
+    titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
 
     SetAPen(&renderRP, 1);
     RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, SCREEN_H - 1);
@@ -1476,11 +1562,46 @@ static void DrawTitleCarousel(void)
             RectFill(&renderRP, x, y, x + (ROBOT_W * TITLE_ROBOT_SCALE) - 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) - 1);
         }
 
-        DrawRobotVariantScaled(variant, spriteIndex, x, y, TITLE_ROBOT_SCALE);
+        DrawRobotVariantSpin(variant, (titleSpinPhase + slot * 2) & (TITLE_SPIN_STEPS - 1), x, y, TITLE_ROBOT_SCALE);
+        if (slot != (ROBOT_VARIANTS / 2)) {
+            MiniText(&renderRP, x + 10, y + 35, robotVariantTags[variant], 7);
+        }
     }
 
-    snprintf(b, sizeof(b), "PLAYER HOOVER %d", selectedPlayerVariant + 1);
-    PutText(&renderRP, 100, TITLE_CAROUSEL_Y + 42, b, 7);
+    snprintf(b, sizeof(b), "PLAYER %s", robotVariantNames[selectedPlayerVariant]);
+    PutText(&renderRP, 74, TITLE_CAROUSEL_Y + 42, b, 7);
+}
+
+static void DrawRobotHealthStrip(void)
+{
+    WORD i;
+    WORD slotW = SCREEN_W / MAX_ROBOTS;
+
+    for (i = 0; i < robotCount; i++) {
+        WORD x = i * slotW;
+        WORD fill;
+        char scoreText[4];
+        UBYTE pen = robots[i].battery > 25 ? 13 : 12;
+
+        SetAPen(&renderRP, (i == 0) ? 4 : 8);
+        RectFill(&renderRP, x, 12, x + slotW - 2, 29);
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, x + 1, 13, x + slotW - 3, 28);
+
+        MiniText(&renderRP, x + 2, 14, RobotTag(i), (i == 0) ? 14 : 7);
+        snprintf(scoreText, sizeof(scoreText), "%d", robots[i].score);
+        MiniText(&renderRP, x + 21, 14, scoreText, 13);
+
+        SetAPen(&renderRP, 1);
+        RectFill(&renderRP, x + 2, 21, x + slotW - 5, 25);
+        fill = (robots[i].battery * (slotW - 8)) / maxBattery;
+        if (fill < 0) fill = 0;
+        if (fill > slotW - 8) fill = slotW - 8;
+        if (fill > 0) {
+            SetAPen(&renderRP, pen);
+            RectFill(&renderRP, x + 3, 22, x + 2 + fill, 24);
+        }
+    }
 }
 
 static void DrawHud(void)
@@ -1492,45 +1613,31 @@ static void DrawHud(void)
 
     if (gameState == GAME_TITLE) {
         PutText(&renderRP, 72, 10, "ROBOVAC RESCUE", 7);
-        PutText(&renderRP, 12, 22, "Left/Right: select hoover", 13);
+        PutText(&renderRP, 12, 22, "Left/Right: select named vac", 13);
         PutText(&renderRP, 12, 30, "1/2/3: AI rivals  SPACE/R: start", 13);
         PutText(&renderRP, 12, 38, "E/S/H difficulty, B fires bolt", 14);
         return;
     }
 
     if (gameState == GAME_ROUND_END) {
-        snprintf(b, sizeof(b), "ROUND OVER You:%d  A1:%d A2:%d A3:%d", robots[0].score,
-                 (robotCount > 1) ? robots[1].score : 0,
-                 (robotCount > 2) ? robots[2].score : 0,
-                 (robotCount > 3) ? robots[3].score : 0);
-        PutText(&renderRP, 14, 12, b, 13);
-        PutText(&renderRP, 76, 24, "Press R/Space for next round", 7);
+        snprintf(b, sizeof(b), "ROUND WINNER: %s", RobotName(roundWinner));
+        PutText(&renderRP, 14, 10, b, 13);
+        DrawRobotHealthStrip();
+        PutText(&renderRP, 76, 30, "Press R/Space for next round", 7);
         return;
     }
 
     if (gameState == GAME_MATCH_END) {
-        snprintf(b, sizeof(b), "MATCH WINNER: Robot %d  Press R/Space", finalWinner);
-        PutText(&renderRP, 42, 12, b, 12);
-        snprintf(b, sizeof(b), "You:%d A1:%d A2:%d A3:%d", robots[0].score,
-                 (robotCount > 1) ? robots[1].score : 0,
-                 (robotCount > 2) ? robots[2].score : 0,
-                 (robotCount > 3) ? robots[3].score : 0);
-        PutText(&renderRP, 72, 24, b, 7);
+        snprintf(b, sizeof(b), "MATCH WINNER: %s", RobotName(finalWinner));
+        PutText(&renderRP, 42, 10, b, 12);
+        DrawRobotHealthStrip();
+        PutText(&renderRP, 82, 30, "Press R/Space", 7);
         return;
     }
 
-    snprintf(b, sizeof(b), "R%d %s Dirt:%d P:%d(%d) A1:%d(%d) M:%d",
-             roundIndex + 1, roomNames[roomType], dirtLeft, robots[0].score, robots[0].battery,
-             (robotCount > 1) ? robots[1].score : 0,
-             (robotCount > 1) ? robots[1].battery : 0,
-             batteryCostPerMove);
-    PutText(&renderRP, 4, 12, b, 7);
-
-    SetAPen(&renderRP, 1);
-    RectFill(&renderRP, 222, 20, 312, 26);
-
-    SetAPen(&renderRP, robots[0].battery > 25 ? 13 : 12);
-    RectFill(&renderRP, 224, 22, 224 + (robots[0].battery * 86 / maxBattery), 24);
+    snprintf(b, sizeof(b), "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
+    PutText(&renderRP, 4, 8, b, 7);
+    DrawRobotHealthStrip();
 }
 
 static void DrawFrame(void)
