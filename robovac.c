@@ -2171,8 +2171,7 @@ static void DrawTitleCarousel(void)
         if (slot == (ROBOT_VARIANTS / 2)) {
             SetAPen(&renderRP, 13);
             RectFill(&renderRP, x - 4, y - 4, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 3, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 3);
-            SetAPen(&renderRP, 0);
-            RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
+            DrawTitleSelectorGradient(x, y);
         } else {
             SetAPen(&renderRP, 8);
             RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
