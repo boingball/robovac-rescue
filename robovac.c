@@ -117,6 +117,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define INTRO_TITLE_H 100
 #define INTRO_HOLD_FRAMES 90
 #define INTRO_EFFECT_FRAMES 64
+#define INTRO_CACHE_FRAMES 16
 #define INTRO_TOTAL_FRAMES (INTRO_HOLD_FRAMES + INTRO_EFFECT_FRAMES)
 #define TITLE_SPIN_STEPS 32
 #define TITLE_SPIN_STEPS_FALLBACK 16
@@ -163,7 +164,9 @@ static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
 static WORD titleCarouselFrameCount = 0;
+static struct RastPort introTitleRP;
 static struct BitMap *introTitleBM = NULL;
+static struct BitMap *introEffectBM = NULL;
 static WORD introTitleW = 0;
 static WORD introTitleH = 0;
 static WORD introTicks = 0;
@@ -893,6 +896,78 @@ static void LoadIntroPaletteLevel(WORD level)
     introPaletteActive = TRUE;
 }
 
+
+static void BuildIntroEffectFrame(WORD frame)
+{
+    static const WORD sinTable[INTRO_CACHE_FRAMES] = {
+        0,12,23,30,32,30,23,12,0,-12,-23,-30,-32,-30,-23,-12
+    };
+    static const WORD cosTable[INTRO_CACHE_FRAMES] = {
+        64,63,59,57,56,57,59,63,64,63,59,57,56,57,59,63
+    };
+    WORD srcCx = introTitleW / 2;
+    WORD srcCy = introTitleH / 2;
+    WORD dstCx = introTitleW / 2;
+    WORD dstCy = introTitleH / 2;
+    WORD srcBaseX = 0;
+    WORD dstBaseX = frame * introTitleW;
+    WORD sinv = sinTable[frame % INTRO_CACHE_FRAMES];
+    WORD cosv = cosTable[frame % INTRO_CACHE_FRAMES];
+    WORD x;
+    WORD y;
+    struct RastPort cacheRP;
+
+    if (!introTitleBM || !introEffectBM) return;
+
+    InitRastPort(&cacheRP);
+    cacheRP.BitMap = introEffectBM;
+
+    SetAPen(&cacheRP, 0);
+    RectFill(&cacheRP, dstBaseX, 0, dstBaseX + introTitleW - 1, introTitleH - 1);
+
+    for (y = 0; y < introTitleH; y++) {
+        for (x = 0; x < introTitleW; x++) {
+            LONG pen = ReadPixel(&introTitleRP, srcBaseX + x, y);
+            WORD rx;
+            WORD ry;
+            WORD tx;
+            WORD ty;
+
+            if (pen <= 0) continue;
+
+            rx = x - srcCx;
+            ry = y - srcCy;
+            tx = dstBaseX + dstCx + ((rx * cosv) - (ry * sinv)) / 64;
+            ty = dstCy + ((rx * sinv) + (ry * cosv)) / 64;
+
+            if (tx >= dstBaseX && tx < dstBaseX + introTitleW && ty >= 0 && ty < introTitleH) {
+                SetAPen(&cacheRP, (UBYTE)pen);
+                WritePixel(&cacheRP, tx, ty);
+            }
+        }
+    }
+}
+
+static BOOL BuildIntroEffectCache(void)
+{
+    WORD frame;
+
+    if (!introTitleBM || introTitleW <= 0 || introTitleH <= 0) return FALSE;
+
+    introEffectBM = AllocBitMap(introTitleW * INTRO_CACHE_FRAMES, introTitleH, DEPTH,
+                                BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    if (!introEffectBM) {
+        printf("Could not allocate intro title effect cache; using static title blits\n");
+        return FALSE;
+    }
+
+    for (frame = 0; frame < INTRO_CACHE_FRAMES; frame++) {
+        BuildIntroEffectFrame(frame);
+    }
+
+    return TRUE;
+}
+
 static BOOL LoadIntroTitleImage(void)
 {
     Object *dto;
@@ -948,6 +1023,11 @@ static BOOL LoadIntroTitleImage(void)
               introTitleW, introTitleH,
               0xC0, 0xFF, NULL);
 
+    InitRastPort(&introTitleRP);
+    introTitleRP.BitMap = introTitleBM;
+
+    BuildIntroEffectCache();
+
     if (cRegs && numColors) {
         ULONG maxCols = (numColors > 32) ? 32 : numColors;
         for (i = 0; i < (WORD)maxCols; i++) {
@@ -965,6 +1045,11 @@ static BOOL LoadIntroTitleImage(void)
 
 static void FreeIntroTitleImage(void)
 {
+    if (introEffectBM) {
+        FreeBitMap(introEffectBM);
+        introEffectBM = NULL;
+    }
+
     if (introTitleBM) {
         FreeBitMap(introTitleBM);
         introTitleBM = NULL;
@@ -2148,20 +2233,10 @@ static void DrawHud(void)
 
 static void DrawIntroTitleImage(void)
 {
-    static const WORD sinTable[TITLE_SPIN_STEPS] = {
-        0,12,24,36,45,53,59,63,64,63,59,53,45,36,24,12,
-        0,-12,-24,-36,-45,-53,-59,-63,-64,-63,-59,-53,-45,-36,-24,-12
-    };
-    static const WORD cosTable[TITLE_SPIN_STEPS] = {
-        64,63,59,53,45,36,24,12,0,-12,-24,-36,-45,-53,-59,-63,
-        -64,-63,-59,-53,-45,-36,-24,-12,0,12,24,36,45,53,59,63
-    };
-    struct RastPort srcRP;
-    WORD x;
-    WORD y;
     WORD dstX;
     WORD dstY;
     WORD effectTick;
+    WORD frame = 0;
 
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
@@ -2172,49 +2247,20 @@ static void DrawIntroTitleImage(void)
     dstY = (SCREEN_H - introTitleH) / 2;
     effectTick = introTicks - INTRO_HOLD_FRAMES;
 
-    if (effectTick <= 0) {
-        BltBitMapRastPort(introTitleBM, 0, 0,
+    if (effectTick > 0 && introEffectBM) {
+        frame = (effectTick * INTRO_CACHE_FRAMES) / INTRO_EFFECT_FRAMES;
+        if (frame >= INTRO_CACHE_FRAMES) frame = INTRO_CACHE_FRAMES - 1;
+        BltBitMapRastPort(introEffectBM, frame * introTitleW, 0,
                           &renderRP, dstX, dstY,
                           introTitleW, introTitleH,
                           0xC0);
         return;
     }
 
-    InitRastPort(&srcRP);
-    srcRP.BitMap = introTitleBM;
-
-    {
-        WORD phase = ((effectTick * TITLE_SPIN_STEPS) / INTRO_EFFECT_FRAMES) & (TITLE_SPIN_STEPS - 1);
-        WORD sinv = sinTable[phase];
-        WORD cosv = cosTable[phase];
-        WORD scale = 64 - ((effectTick * 40) / INTRO_EFFECT_FRAMES);
-        WORD cx = introTitleW / 2;
-        WORD cy = introTitleH / 2;
-
-        if (scale < 20) scale = 20;
-
-        for (y = 0; y < introTitleH; y++) {
-            for (x = 0; x < introTitleW; x++) {
-                LONG pen = ReadPixel(&srcRP, x, y);
-                WORD rx;
-                WORD ry;
-                WORD tx;
-                WORD ty;
-
-                if (pen <= 0) continue;
-
-                rx = x - cx;
-                ry = y - cy;
-                tx = SCREEN_W / 2 + (((rx * cosv) - (ry * sinv)) * scale) / (64 * 64);
-                ty = SCREEN_H / 2 + (((rx * sinv) + (ry * cosv)) * scale) / (64 * 64);
-
-                if (tx >= 0 && ty >= 0 && tx < SCREEN_W && ty < SCREEN_H) {
-                    SetAPen(&renderRP, (UBYTE)pen);
-                    WritePixel(&renderRP, tx, ty);
-                }
-            }
-        }
-    }
+    BltBitMapRastPort(introTitleBM, 0, 0,
+                      &renderRP, dstX, dstY,
+                      introTitleW, introTitleH,
+                      0xC0);
 }
 
 static void DrawFrame(void)

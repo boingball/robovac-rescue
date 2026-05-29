@@ -80,7 +80,7 @@ On startup, the game looks for a 32-colour ILBM title image at:
 
 - `PROGDIR:tiles/robovac-title.iff`
 
-The expected artwork size is `300x100`, which is centred on the 320x256 custom screen. Because this image can use its own 32-colour palette, RoboVac Rescue temporarily loads the title image palette for the startup splash, then rotates and fades the image away before restoring the normal game palette for the main menu. If the file is missing, the game skips the splash and opens directly on the menu.
+The expected artwork size is `300x100`, which is centred on the 320x256 custom screen. Because this image can use its own 32-colour palette, RoboVac Rescue temporarily loads the title image palette for the startup splash, then fades the palette while blitting from a prebuilt rotation-frame cache before restoring the normal game palette for the main menu. The rotation frames are generated once at startup, so the intro playback path uses cached bitmaps and blitter copies rather than per-pixel redraws every frame. If the file is missing, the game skips the splash and opens directly on the menu.
 
 ## Tilesheet (ILBM)
 
