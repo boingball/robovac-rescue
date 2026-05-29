@@ -2007,9 +2007,7 @@ static void EnterTitleScreen(void)
 {
     gameState = GAME_TITLE;
     introTicks = 0;
-    if (introPaletteActive) {
-        LoadGamePalette();
-    }
+    LoadGamePalette();
 }
 
 static void StepIntro(void)
