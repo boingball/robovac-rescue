@@ -937,14 +937,14 @@ static void BuildIntroEffectFrame(WORD frame)
     static const WORD scaleTable[INTRO_CACHE_FRAMES] = {
         64,72,82,94,108,122,136,148,138,124,108,92,78,64,52,40
     };
-    WORD srcCx = introTitleW / 2;
-    WORD srcCy = introTitleH / 2;
-    WORD dstCx = introTitleW / 2;
-    WORD dstCy = introTitleH / 2;
-    WORD dstBaseX = frame * introTitleW;
-    WORD sinv = sinTable[frame % INTRO_CACHE_FRAMES];
-    WORD cosv = cosTable[frame % INTRO_CACHE_FRAMES];
-    WORD scale = scaleTable[frame % INTRO_CACHE_FRAMES];
+    LONG srcCx = introTitleW / 2;
+    LONG srcCy = introTitleH / 2;
+    LONG dstCx = introTitleW / 2;
+    LONG dstCy = introTitleH / 2;
+    LONG dstBaseX = (LONG)frame * introTitleW;
+    LONG sinv = sinTable[frame % INTRO_CACHE_FRAMES];
+    LONG cosv = cosTable[frame % INTRO_CACHE_FRAMES];
+    LONG scale = scaleTable[frame % INTRO_CACHE_FRAMES];
     WORD x;
     WORD y;
     struct RastPort cacheRP;
@@ -959,20 +959,20 @@ static void BuildIntroEffectFrame(WORD frame)
 
     for (y = 0; y < introTitleH; y++) {
         for (x = 0; x < introTitleW; x++) {
-            WORD dx;
-            WORD dy;
-            WORD sx;
-            WORD sy;
+            LONG dx;
+            LONG dy;
+            LONG sx;
+            LONG sy;
             LONG pen;
 
-            dx = x - dstCx;
-            dy = y - dstCy;
+            dx = (LONG)x - dstCx;
+            dy = (LONG)y - dstCy;
             sx = srcCx + (((dx * cosv) + (dy * sinv)) / scale);
             sy = srcCy + (((dy * cosv) - (dx * sinv)) / scale);
 
             if (sx < 0 || sy < 0 || sx >= introTitleW || sy >= introTitleH) continue;
 
-            pen = ReadPixel(&introTitleRP, sx, sy);
+            pen = ReadPixel(&introTitleRP, (WORD)sx, (WORD)sy);
             if (pen <= 0) continue;
 
             SetAPen(&cacheRP, (UBYTE)pen);
