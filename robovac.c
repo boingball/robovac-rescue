@@ -873,26 +873,10 @@ static void LoadGamePalette(void)
     introPaletteActive = FALSE;
 }
 
-static void LoadIntroPaletteLevel(WORD level)
+static void LoadIntroPalette(void)
 {
-    UWORD faded[32];
-    WORD i;
-
     if (!scr) return;
-    if (level < 0) level = 0;
-    if (level > INTRO_EFFECT_FRAMES) level = INTRO_EFFECT_FRAMES;
-
-    for (i = 0; i < 32; i++) {
-        WORD r = (introPalette[i] >> 8) & 0xF;
-        WORD g = (introPalette[i] >> 4) & 0xF;
-        WORD b = introPalette[i] & 0xF;
-        r = (r * level) / INTRO_EFFECT_FRAMES;
-        g = (g * level) / INTRO_EFFECT_FRAMES;
-        b = (b * level) / INTRO_EFFECT_FRAMES;
-        faded[i] = (UWORD)((r << 8) | (g << 4) | b);
-    }
-
-    LoadRGB4(&scr->ViewPort, faded, 32);
+    LoadRGB4(&scr->ViewPort, introPalette, 32);
     introPaletteActive = TRUE;
 }
 
@@ -900,7 +884,7 @@ static void CaptureIntroPalette(ULONG *cRegs, ULONG numColors)
 {
     WORD i;
 
-    for (i = 0; i < 32; i++) introPalette[i] = palette[i];
+    for (i = 0; i < 32; i++) introPalette[i] = 0x000;
 
     if (cRegs && numColors) {
         ULONG maxCols = (numColors > 32) ? 32 : numColors;
@@ -1105,7 +1089,6 @@ static BOOL LoadIntroTitleImage(void)
     }
 
     CaptureIntroPalette(cRegs, numColors);
-    LoadIntroPaletteLevel(INTRO_EFFECT_FRAMES);
 
     BltBitMap(srcBM, 0, 0,
               introTitleBM, 0, 0,
@@ -2007,8 +1990,6 @@ static void EnterTitleScreen(void)
 
 static void StepIntro(void)
 {
-    WORD fadeLevel;
-
     if (gameState != GAME_INTRO) return;
     if (introTicks > INTRO_TOTAL_FRAMES) {
         EnterTitleScreen();
@@ -2020,12 +2001,7 @@ static void StepIntro(void)
     }
 
     if (introTicks == 0 && !introPaletteActive) {
-        LoadIntroPaletteLevel(INTRO_EFFECT_FRAMES);
-    }
-
-    if (introTicks >= INTRO_HOLD_FRAMES) {
-        fadeLevel = INTRO_TOTAL_FRAMES - introTicks;
-        LoadIntroPaletteLevel(fadeLevel);
+        LoadIntroPalette();
     }
 
     introTicks++;
@@ -2590,8 +2566,11 @@ static BOOL OpenGameScreen(void)
         printf("Robot BOB cache allocation failed; fallback drawing enabled\n");
     }
 
-    if (!LoadIntroTitleImage()) {
+    if (LoadIntroTitleImage()) {
+        LoadIntroPalette();
+    } else {
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
+        LoadGamePalette();
     }
 
     win = OpenWindowTags(NULL,
