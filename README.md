@@ -74,6 +74,14 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
   - AI 2: near bottom-left
   - AI 3: near bottom-right
 
+## Startup Title Image
+
+On startup, the game looks for a 32-colour ILBM title image at:
+
+- `PROGDIR:tiles/robovac-title.iff`
+
+The expected artwork size is `300x100`, which is centred on the 320x256 custom screen. Because this image can use its own 32-colour palette, RoboVac Rescue temporarily loads the title image palette for the startup splash, then rotates and fades the image away before restoring the normal game palette for the main menu. If the file is missing, the game skips the splash and opens directly on the menu.
+
 ## Tilesheet (ILBM)
 
 The engine now attempts to load a 16-colour ILBM tilesheet from:
