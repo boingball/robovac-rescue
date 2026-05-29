@@ -119,6 +119,14 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define INTRO_EFFECT_FRAMES 64
 #define INTRO_CACHE_FRAMES 16
 #define INTRO_TOTAL_FRAMES (INTRO_HOLD_FRAMES + INTRO_EFFECT_FRAMES)
+#define INTRO_MOD_PATH "PROGDIR:music/robovac.mod"
+#define MOD_CHANNELS 4
+#define MOD_SAMPLE_COUNT 31
+#define MOD_PATTERN_BYTES 1024
+#define MOD_HEADER_BYTES 1084
+#define MOD_DEFAULT_SPEED 6
+#define MOD_MIN_PERIOD 113
+#define MOD_MAX_PERIOD 856
 #define TITLE_SPIN_STEPS 32
 #define TITLE_SPIN_STEPS_FALLBACK 16
 #define TITLE_ROT_W (ROBOT_W * TITLE_ROBOT_SCALE)
@@ -176,6 +184,38 @@ static WORD introTitleContentBottom = 0;
 static WORD introTicks = 0;
 static BOOL introPaletteActive = FALSE;
 static UWORD introPalette[32];
+
+struct ModSample {
+    UBYTE *data;
+    ULONG length;
+    ULONG repeatOffset;
+    ULONG repeatLength;
+    UBYTE volume;
+};
+
+struct ModChannel {
+    struct ModSample *sample;
+    UWORD period;
+    UBYTE volume;
+};
+
+struct IntroModPlayer {
+    UBYTE *moduleData;
+    ULONG moduleSize;
+    struct ModSample samples[MOD_SAMPLE_COUNT];
+    struct ModChannel channels[MOD_CHANNELS];
+    UBYTE songLength;
+    UBYTE positions[128];
+    UBYTE patternCount;
+    UBYTE speed;
+    UBYTE tick;
+    UBYTE position;
+    UBYTE row;
+    BOOL loaded;
+    BOOL playing;
+};
+
+static struct IntroModPlayer introMod;
 
 static UBYTE map[MAP_H][MAP_W];
 
@@ -313,6 +353,12 @@ static const char *RobotTag(WORD id)
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolt(void);
 static void DrawTitleCarousel(void);
+static void DrawLoadingScreen(WORD step, WORD total, const char *label);
+static void PresentFrame(void);
+static BOOL LoadIntroMusic(void);
+static void StartIntroMusic(void);
+static void StepIntroMusic(void);
+static void StopIntroMusic(void);
 static void TriggerRobotPower(WORD id);
 static WORD SpawnDirtTiles(WORD count);
 static void EnterTitleScreen(void);
@@ -1972,9 +2018,298 @@ static void CheckEndState(void)
 
 static void EnterTitleScreen(void)
 {
+    StopIntroMusic();
     gameState = GAME_TITLE;
     introTicks = 0;
     LoadGamePalette();
+}
+
+
+/* -------------------------------------------------------------------------
+ * Tiny intro MOD player
+ * ------------------------------------------------------------------------- */
+
+static UWORD ReadBigEndian16(const UBYTE *b)
+{
+    return (UWORD)(((UWORD)b[0] << 8) | (UWORD)b[1]);
+}
+
+static BOOL IsSupportedModSignature(const UBYTE *header)
+{
+    return ((header[1080] == 'M' && header[1081] == '.' && header[1082] == 'K' && header[1083] == '.') ||
+            (header[1080] == 'M' && header[1081] == '!' && header[1082] == 'K' && header[1083] == '!') ||
+            (header[1080] == '4' && header[1081] == 'C' && header[1082] == 'H' && header[1083] == 'N'));
+}
+
+static void PokeCustomWord(ULONG address, UWORD value)
+{
+    *((volatile UWORD *)address) = value;
+}
+
+static void StopPaulaChannel(WORD channel)
+{
+    PokeCustomWord(0xDFF096, (UWORD)(1 << channel));
+}
+
+static void StopAllIntroAudio(void)
+{
+    PokeCustomWord(0xDFF096, 0x000F);
+}
+
+static void PlayPaulaSample(WORD channel, UBYTE *data, ULONG length, UWORD period, UBYTE volume)
+{
+    ULONG base;
+    ULONG addr;
+    UWORD dmaBit;
+    UWORD words;
+
+    if (channel < 0 || channel >= MOD_CHANNELS || !data || length < 2) return;
+
+    if (period < MOD_MIN_PERIOD) period = MOD_MIN_PERIOD;
+    if (period > MOD_MAX_PERIOD) period = MOD_MAX_PERIOD;
+    if (volume > 64) volume = 64;
+
+    words = (UWORD)(length >> 1);
+    if (words == 0) return;
+    addr = (ULONG)data;
+    base = 0xDFF0A0 + ((ULONG)channel * 0x10);
+    dmaBit = (UWORD)(1 << channel);
+
+    PokeCustomWord(0xDFF096, dmaBit);
+    PokeCustomWord(base + 0x00, (UWORD)(addr >> 16));
+    PokeCustomWord(base + 0x02, (UWORD)(addr & 0xFFFF));
+    PokeCustomWord(base + 0x04, words);
+    PokeCustomWord(base + 0x06, period);
+    PokeCustomWord(base + 0x08, volume);
+    PokeCustomWord(0xDFF096, (UWORD)(0x8200 | dmaBit));
+}
+
+static void SilencePaulaChannel(WORD channel)
+{
+    ULONG base;
+
+    if (channel < 0 || channel >= MOD_CHANNELS) return;
+    StopPaulaChannel(channel);
+    base = 0xDFF0A0 + ((ULONG)channel * 0x10);
+    PokeCustomWord(base + 0x08, 0);
+}
+
+static void FreeIntroMusic(void)
+{
+    StopIntroMusic();
+    if (introMod.moduleData) {
+        FreeMem(introMod.moduleData, introMod.moduleSize);
+    }
+    memset(&introMod, 0, sizeof(introMod));
+}
+
+static BOOL LoadIntroMusic(void)
+{
+    BPTR file;
+    LONG size;
+    LONG oldPos;
+    ULONG sampleOffset;
+    UBYTE *header;
+    WORD i;
+    WORD pos;
+
+    if (introMod.loaded) return TRUE;
+
+    file = Open((STRPTR)INTRO_MOD_PATH, MODE_OLDFILE);
+    if (!file) return FALSE;
+
+    oldPos = Seek(file, 0, OFFSET_END);
+    size = Seek(file, 0, OFFSET_CURRENT);
+    Seek(file, 0, OFFSET_BEGINNING);
+    if (oldPos < 0 || size < MOD_HEADER_BYTES) {
+        Close(file);
+        return FALSE;
+    }
+
+    introMod.moduleSize = (ULONG)size;
+    introMod.moduleData = AllocMem(introMod.moduleSize, MEMF_CHIP | MEMF_CLEAR);
+    if (!introMod.moduleData) {
+        Close(file);
+        introMod.moduleSize = 0;
+        return FALSE;
+    }
+
+    if (Read(file, introMod.moduleData, introMod.moduleSize) != (LONG)introMod.moduleSize) {
+        Close(file);
+        FreeIntroMusic();
+        return FALSE;
+    }
+    Close(file);
+
+    header = introMod.moduleData;
+    if (!IsSupportedModSignature(header)) {
+        FreeIntroMusic();
+        return FALSE;
+    }
+
+    introMod.songLength = header[950];
+    if (introMod.songLength == 0 || introMod.songLength > 128) {
+        FreeIntroMusic();
+        return FALSE;
+    }
+
+    introMod.patternCount = 0;
+    for (pos = 0; pos < 128; pos++) {
+        introMod.positions[pos] = header[952 + pos];
+        if (pos < introMod.songLength && introMod.positions[pos] >= introMod.patternCount) {
+            introMod.patternCount = introMod.positions[pos] + 1;
+        }
+    }
+
+    sampleOffset = MOD_HEADER_BYTES + ((ULONG)introMod.patternCount * MOD_PATTERN_BYTES);
+    if (sampleOffset > introMod.moduleSize) {
+        FreeIntroMusic();
+        return FALSE;
+    }
+
+    for (i = 0; i < MOD_SAMPLE_COUNT; i++) {
+        UBYTE *sampleHeader = header + 20 + (i * 30);
+        ULONG length = (ULONG)ReadBigEndian16(sampleHeader + 22) * 2;
+        ULONG repeatOffset = (ULONG)ReadBigEndian16(sampleHeader + 26) * 2;
+        ULONG repeatLength = (ULONG)ReadBigEndian16(sampleHeader + 28) * 2;
+
+        if (sampleOffset + length > introMod.moduleSize) {
+            FreeIntroMusic();
+            return FALSE;
+        }
+
+        introMod.samples[i].data = introMod.moduleData + sampleOffset;
+        introMod.samples[i].length = length;
+        introMod.samples[i].repeatOffset = repeatOffset;
+        introMod.samples[i].repeatLength = repeatLength;
+        introMod.samples[i].volume = sampleHeader[25] > 64 ? 64 : sampleHeader[25];
+        sampleOffset += length;
+    }
+
+    introMod.speed = MOD_DEFAULT_SPEED;
+    introMod.loaded = TRUE;
+    return TRUE;
+}
+
+static UBYTE *ModPatternRow(UBYTE pattern, UBYTE row)
+{
+    ULONG offset = MOD_HEADER_BYTES + ((ULONG)pattern * MOD_PATTERN_BYTES) + ((ULONG)row * 16);
+
+    if (offset + 16 > introMod.moduleSize) return NULL;
+    return introMod.moduleData + offset;
+}
+
+static void ProcessIntroModRow(void)
+{
+    UBYTE pattern;
+    UBYTE *rowData;
+    WORD channel;
+    BOOL jumpNext = FALSE;
+
+    if (!introMod.loaded || introMod.position >= introMod.songLength) {
+        StopIntroMusic();
+        return;
+    }
+
+    pattern = introMod.positions[introMod.position];
+    rowData = ModPatternRow(pattern, introMod.row);
+    if (!rowData) {
+        StopIntroMusic();
+        return;
+    }
+
+    for (channel = 0; channel < MOD_CHANNELS; channel++) {
+        UBYTE *note = rowData + (channel * 4);
+        UBYTE sampleNumber = (note[0] & 0xF0) | (note[2] >> 4);
+        UWORD period = (UWORD)(((note[0] & 0x0F) << 8) | note[1]);
+        UBYTE effect = note[2] & 0x0F;
+        UBYTE param = note[3];
+        struct ModChannel *modChannel = &introMod.channels[channel];
+
+        if (sampleNumber > 0 && sampleNumber <= MOD_SAMPLE_COUNT) {
+            modChannel->sample = &introMod.samples[sampleNumber - 1];
+            modChannel->volume = modChannel->sample->volume;
+        }
+
+        if (effect == 0x0C) {
+            modChannel->volume = param > 64 ? 64 : param;
+        } else if (effect == 0x0F && param > 0 && param <= 31) {
+            introMod.speed = param;
+        } else if (effect == 0x0B || effect == 0x0D) {
+            jumpNext = TRUE;
+        }
+
+        if (period > 0) {
+            modChannel->period = period;
+            if (modChannel->sample && modChannel->sample->length > 1) {
+                PlayPaulaSample(channel, modChannel->sample->data, modChannel->sample->length,
+                                modChannel->period, modChannel->volume);
+            }
+        } else if (effect == 0x0C && modChannel->period > 0) {
+            ULONG base = 0xDFF0A0 + ((ULONG)channel * 0x10);
+            PokeCustomWord(base + 0x08, modChannel->volume);
+        }
+    }
+
+    if (jumpNext) {
+        introMod.row = 63;
+    }
+}
+
+static void StartIntroMusic(void)
+{
+    WORD i;
+
+    if (!introMod.loaded && !LoadIntroMusic()) return;
+
+    StopAllIntroAudio();
+    for (i = 0; i < MOD_CHANNELS; i++) {
+        introMod.channels[i].sample = NULL;
+        introMod.channels[i].period = 0;
+        introMod.channels[i].volume = 0;
+        SilencePaulaChannel(i);
+    }
+
+    introMod.position = 0;
+    introMod.row = 0;
+    introMod.tick = 0;
+    introMod.speed = MOD_DEFAULT_SPEED;
+    introMod.playing = TRUE;
+}
+
+static void StepIntroMusic(void)
+{
+    if (!introMod.playing) return;
+
+    if (introMod.tick == 0) {
+        ProcessIntroModRow();
+        introMod.tick = introMod.speed ? introMod.speed : MOD_DEFAULT_SPEED;
+
+        introMod.row++;
+        if (introMod.row >= 64) {
+            introMod.row = 0;
+            introMod.position++;
+            if (introMod.position >= introMod.songLength) {
+                StopIntroMusic();
+                return;
+            }
+        }
+    }
+
+    introMod.tick--;
+}
+
+static void StopIntroMusic(void)
+{
+    WORD i;
+
+    if (!introMod.playing && !introMod.loaded) return;
+
+    StopAllIntroAudio();
+    for (i = 0; i < MOD_CHANNELS; i++) {
+        SilencePaulaChannel(i);
+    }
+    introMod.playing = FALSE;
 }
 
 static void StepIntro(void)
@@ -1993,7 +2328,10 @@ static void StepIntro(void)
 
     if (introTicks == 0 && !introPaletteActive) {
         LoadIntroPaletteLevel(INTRO_EFFECT_FRAMES);
+        StartIntroMusic();
     }
+
+    StepIntroMusic();
 
     if (introTicks >= INTRO_HOLD_FRAMES) {
         fadeLevel = INTRO_TOTAL_FRAMES - introTicks;
@@ -2137,6 +2475,59 @@ static void MiniTextCentered(struct RastPort *rp, WORD y, const char *s, UBYTE p
     MiniTextScaled(rp, (SCREEN_W - MiniTextWidth(s, scale)) / 2, y, s, pen, scale);
 }
 
+static void DrawBatteryMeter(struct RastPort *rp, WORD x, WORD y, WORD w, WORD h, WORD fill, WORD maxFill, UBYTE fillPen)
+{
+    WORD capW = 4;
+    WORD innerW;
+    WORD fillW;
+    WORD innerTop;
+    WORD innerBottom;
+
+    if (!rp || w < 12 || h < 5) return;
+    if (maxFill <= 0) maxFill = 1;
+    if (fill < 0) fill = 0;
+    if (fill > maxFill) fill = maxFill;
+
+    innerW = w - capW - 5;
+    fillW = (fill * innerW) / maxFill;
+    innerTop = y + 1;
+    innerBottom = y + h - 2;
+
+    SetAPen(rp, 7);
+    RectFill(rp, x, y, x + w - capW - 2, y + h - 1);
+    SetAPen(rp, 8);
+    RectFill(rp, x + w - capW - 1, y + 1, x + w - 1, y + h - 2);
+    SetAPen(rp, 1);
+    RectFill(rp, x + 2, innerTop, x + w - capW - 4, innerBottom);
+
+    if (fillW > 0) {
+        SetAPen(rp, fillPen);
+        RectFill(rp, x + 3, innerTop + 1, x + 2 + fillW, innerBottom - 1);
+    }
+}
+
+static void DrawLoadingScreen(WORD step, WORD total, const char *label)
+{
+    char b[40];
+    WORD fill;
+
+    if (!renderBM || !scr) return;
+    if (total <= 0) total = 1;
+    if (step < 0) step = 0;
+    if (step > total) step = total;
+    if (!label) label = "LOADING";
+
+    fill = (step * 100) / total;
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
+    MiniTextCentered(&renderRP, 96, label, 7, 3);
+    snprintf(b, sizeof(b), "%d/%d", step, total);
+    MiniTextCentered(&renderRP, 122, b, 13, 2);
+    DrawBatteryMeter(&renderRP, 82, 146, 156, 18, fill, 100, 13);
+    PresentFrame();
+}
+
 static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD dstY)
 {
     WORD frame;
@@ -2229,15 +2620,8 @@ static void DrawRobotHealthStrip(void)
             MiniText(&renderRP, x + 2, 26, streakText, 7);
         }
 
-        SetAPen(&renderRP, 1);
-        RectFill(&renderRP, x + 2, 21, x + slotW - 5, 25);
-        fill = (robots[i].battery * (slotW - 8)) / maxBattery;
-        if (fill < 0) fill = 0;
-        if (fill > slotW - 8) fill = slotW - 8;
-        if (fill > 0) {
-            SetAPen(&renderRP, pen);
-            RectFill(&renderRP, x + 3, 22, x + 2 + fill, 24);
-        }
+        fill = robots[i].battery;
+        DrawBatteryMeter(&renderRP, x + 2, 21, slotW - 6, 5, fill, maxBattery, pen);
     }
 }
 
@@ -2545,6 +2929,8 @@ static BOOL OpenGameScreen(void)
     InitRastPort(&roomRP);
     roomRP.BitMap = roomBM;
 
+    DrawLoadingScreen(1, 5, "LOADING");
+
     if (!InitTileCache()) {
         FreeBitMap(roomBM);
         roomBM = NULL;
@@ -2555,9 +2941,16 @@ static BOOL OpenGameScreen(void)
         return FALSE;
     }
 
+    DrawLoadingScreen(2, 5, "TILES");
+
     InitRobotBobs();
+    DrawLoadingScreen(3, 5, "ROBOTS");
 
     LoadIntroTitleImage();
+    DrawLoadingScreen(4, 5, "LOGO");
+
+    LoadIntroMusic();
+    DrawLoadingScreen(5, 5, "READY");
 
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
@@ -2574,6 +2967,7 @@ static BOOL OpenGameScreen(void)
 
     if (!win) {
         FreeIntroTitleImage();
+        FreeIntroMusic();
         FreeTitleCarouselCache();
         if (robotCacheBM) FreeBitMap(robotCacheBM);
         if (robotMaskBM) FreeBitMap(robotMaskBM);
@@ -2601,6 +2995,7 @@ static void CloseGameScreen(void)
     }
 
     FreeIntroTitleImage();
+    FreeIntroMusic();
     FreeTitleCarouselCache();
 
     if (robotCacheBM) {
