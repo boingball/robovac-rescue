@@ -881,10 +881,26 @@ static void LoadGamePalette(void)
     introPaletteActive = FALSE;
 }
 
-static void LoadIntroPalette(void)
+static void LoadIntroPaletteLevel(WORD level)
 {
+    UWORD faded[32];
+    WORD i;
+
     if (!scr) return;
-    LoadRGB4(&scr->ViewPort, introPalette, 32);
+    if (level < 0) level = 0;
+    if (level > INTRO_EFFECT_FRAMES) level = INTRO_EFFECT_FRAMES;
+
+    for (i = 0; i < 32; i++) {
+        WORD r = (introPalette[i] >> 8) & 0xF;
+        WORD g = (introPalette[i] >> 4) & 0xF;
+        WORD b = introPalette[i] & 0xF;
+        r = (r * level) / INTRO_EFFECT_FRAMES;
+        g = (g * level) / INTRO_EFFECT_FRAMES;
+        b = (b * level) / INTRO_EFFECT_FRAMES;
+        faded[i] = (UWORD)((r << 8) | (g << 4) | b);
+    }
+
+    LoadRGB4(&scr->ViewPort, faded, 32);
     introPaletteActive = TRUE;
 }
 
@@ -901,6 +917,8 @@ static void CaptureIntroPalette(ULONG *cRegs, ULONG numColors)
                                       ((cRegs[i * 3 + 1] >> 28) << 4) |
                                       (cRegs[i * 3 + 2] >> 28));
         }
+    } else {
+        for (i = 0; i < 32; i++) introPalette[i] = palette[i];
     }
 }
 
@@ -1055,8 +1073,6 @@ static BOOL LoadIntroTitleImage(void)
     ULONG *cRegs = NULL;
     ULONG numColors = 0;
 
-    CaptureIntroPalette(NULL, 0);
-
     dto = NewDTObject("PROGDIR:tiles/robovac-title.iff",
                       DTA_GroupID, GID_PICTURE,
                       PDTA_Remap, FALSE,
@@ -1096,9 +1112,6 @@ static BOOL LoadIntroTitleImage(void)
         return FALSE;
     }
 
-    CaptureIntroPalette(cRegs, numColors);
-    LoadPaletteCMapInto("PROGDIR:tiles/robotitle.pal", introPalette, 0, 32);
-
     BltBitMap(srcBM, 0, 0,
               introTitleBM, 0, 0,
               introTitleW, introTitleH,
@@ -1109,6 +1122,8 @@ static BOOL LoadIntroTitleImage(void)
 
     CentreIntroTitleBitmap();
     BuildIntroEffectCache();
+
+    CaptureIntroPalette(cRegs, numColors);
 
     DisposeDTObject(dto);
     return TRUE;
@@ -1999,6 +2014,8 @@ static void EnterTitleScreen(void)
 
 static void StepIntro(void)
 {
+    WORD fadeLevel;
+
     if (gameState != GAME_INTRO) return;
     if (introTicks > INTRO_TOTAL_FRAMES) {
         EnterTitleScreen();
@@ -2010,7 +2027,12 @@ static void StepIntro(void)
     }
 
     if (introTicks == 0 && !introPaletteActive) {
-        LoadIntroPalette();
+        LoadIntroPaletteLevel(INTRO_EFFECT_FRAMES);
+    }
+
+    if (introTicks >= INTRO_HOLD_FRAMES) {
+        fadeLevel = INTRO_TOTAL_FRAMES - introTicks;
+        LoadIntroPaletteLevel(fadeLevel);
     }
 
     introTicks++;
@@ -2575,11 +2597,8 @@ static BOOL OpenGameScreen(void)
         printf("Robot BOB cache allocation failed; fallback drawing enabled\n");
     }
 
-    if (LoadIntroTitleImage()) {
-        LoadIntroPalette();
-    } else {
+    if (!LoadIntroTitleImage()) {
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
-        LoadGamePalette();
     }
 
     win = OpenWindowTags(NULL,
