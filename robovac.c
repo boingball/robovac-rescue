@@ -810,12 +810,15 @@ static ULONG ReadBigEndian32(const UBYTE *b)
     return ((ULONG)b[0] << 24) | ((ULONG)b[1] << 16) | ((ULONG)b[2] << 8) | (ULONG)b[3];
 }
 
-static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
+static BOOL LoadPaletteCMapInto(const char *path, UWORD *destPalette, WORD firstPen, WORD maxPens)
 {
     BPTR file;
     UBYTE header[12];
     UBYTE chunkHeader[8];
     BOOL loaded = FALSE;
+
+    if (!destPalette || firstPen < 0 || maxPens <= 0 || firstPen >= 32) return FALSE;
+    if (firstPen + maxPens > 32) maxPens = 32 - firstPen;
 
     file = Open((STRPTR)path, MODE_OLDFILE);
     if (!file) return FALSE;
@@ -841,9 +844,9 @@ static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
                     return loaded;
                 }
                 if (i < (ULONG)maxPens) {
-                    palette[firstPen + i] = (UWORD)(((rgb[0] >> 4) << 8) |
-                                                    ((rgb[1] >> 4) << 4) |
-                                                     (rgb[2] >> 4));
+                    destPalette[firstPen + i] = (UWORD)(((rgb[0] >> 4) << 8) |
+                                                        ((rgb[1] >> 4) << 4) |
+                                                         (rgb[2] >> 4));
                     loaded = TRUE;
                 }
             }
@@ -864,6 +867,11 @@ static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
 
     Close(file);
     return loaded;
+}
+
+static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
+{
+    return LoadPaletteCMapInto(path, palette, firstPen, maxPens);
 }
 
 
@@ -1089,6 +1097,7 @@ static BOOL LoadIntroTitleImage(void)
     }
 
     CaptureIntroPalette(cRegs, numColors);
+    LoadPaletteCMapInto("PROGDIR:tiles/robotitle.pal", introPalette, 0, 32);
 
     BltBitMap(srcBM, 0, 0,
               introTitleBM, 0, 0,
