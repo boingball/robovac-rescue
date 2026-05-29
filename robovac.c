@@ -897,22 +897,119 @@ static void LoadIntroPaletteLevel(WORD level)
 }
 
 
+static void NormaliseIntroTitleBitmap(void)
+{
+    LONG cornerPens[4];
+    LONG bgPen;
+    WORD bgCount;
+    WORD bestCount;
+    WORD minX = introTitleW;
+    WORD minY = introTitleH;
+    WORD maxX = -1;
+    WORD maxY = -1;
+    WORD offsetX = 0;
+    WORD offsetY = 0;
+    WORD x;
+    WORD y;
+    struct RastPort centeredRP;
+    struct BitMap *centeredBM;
+
+    if (!introTitleBM || introTitleW <= 0 || introTitleH <= 0) return;
+
+    cornerPens[0] = ReadPixel(&introTitleRP, 0, 0);
+    cornerPens[1] = ReadPixel(&introTitleRP, introTitleW - 1, 0);
+    cornerPens[2] = ReadPixel(&introTitleRP, 0, introTitleH - 1);
+    cornerPens[3] = ReadPixel(&introTitleRP, introTitleW - 1, introTitleH - 1);
+
+    bgPen = cornerPens[0];
+    bestCount = 0;
+    for (x = 0; x < 4; x++) {
+        bgCount = 0;
+        for (y = 0; y < 4; y++) {
+            if (cornerPens[y] == cornerPens[x]) bgCount++;
+        }
+        if (bgCount > bestCount) {
+            bestCount = bgCount;
+            bgPen = cornerPens[x];
+        }
+    }
+
+    for (y = 0; y < introTitleH; y++) {
+        for (x = 0; x < introTitleW; x++) {
+            LONG pen = ReadPixel(&introTitleRP, x, y);
+            if (pen == bgPen) {
+                if (pen != 0) {
+                    SetAPen(&introTitleRP, 0);
+                    WritePixel(&introTitleRP, x, y);
+                }
+            } else if (pen > 0) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) return;
+
+    offsetX = (introTitleW - (maxX - minX + 1)) / 2 - minX;
+    offsetY = (introTitleH - (maxY - minY + 1)) / 2 - minY;
+    if (offsetX == 0 && offsetY == 0) return;
+
+    centeredBM = AllocBitMap(introTitleW, introTitleH, DEPTH,
+                             BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    if (!centeredBM) return;
+
+    InitRastPort(&centeredRP);
+    centeredRP.BitMap = centeredBM;
+    SetAPen(&centeredRP, 0);
+    RectFill(&centeredRP, 0, 0, introTitleW - 1, introTitleH - 1);
+
+    for (y = 0; y < introTitleH; y++) {
+        for (x = 0; x < introTitleW; x++) {
+            LONG pen;
+            WORD tx;
+            WORD ty;
+
+            pen = ReadPixel(&introTitleRP, x, y);
+            tx = x + offsetX;
+            ty = y + offsetY;
+
+            if (pen <= 0) continue;
+            if (tx < 0 || ty < 0 || tx >= introTitleW || ty >= introTitleH) continue;
+
+            SetAPen(&centeredRP, (UBYTE)pen);
+            WritePixel(&centeredRP, tx, ty);
+        }
+    }
+
+    BltBitMap(centeredBM, 0, 0,
+              introTitleBM, 0, 0,
+              introTitleW, introTitleH,
+              0xC0, 0xFF, NULL);
+    FreeBitMap(centeredBM);
+}
+
 static void BuildIntroEffectFrame(WORD frame)
 {
     static const WORD sinTable[INTRO_CACHE_FRAMES] = {
-        0,12,23,30,32,30,23,12,0,-12,-23,-30,-32,-30,-23,-12
+        0,4,7,10,12,10,7,4,0,-4,-7,-10,-12,-10,-7,-4
     };
     static const WORD cosTable[INTRO_CACHE_FRAMES] = {
-        64,63,59,57,56,57,59,63,64,63,59,57,56,57,59,63
+        64,64,64,63,63,63,64,64,64,64,64,63,63,63,64,64
+    };
+    static const WORD scaleTable[INTRO_CACHE_FRAMES] = {
+        64,72,82,94,108,122,136,148,138,124,108,92,78,64,52,40
     };
     WORD srcCx = introTitleW / 2;
     WORD srcCy = introTitleH / 2;
     WORD dstCx = introTitleW / 2;
     WORD dstCy = introTitleH / 2;
-    WORD srcBaseX = 0;
     WORD dstBaseX = frame * introTitleW;
     WORD sinv = sinTable[frame % INTRO_CACHE_FRAMES];
     WORD cosv = cosTable[frame % INTRO_CACHE_FRAMES];
+    WORD scale = scaleTable[frame % INTRO_CACHE_FRAMES];
     WORD x;
     WORD y;
     struct RastPort cacheRP;
@@ -927,23 +1024,24 @@ static void BuildIntroEffectFrame(WORD frame)
 
     for (y = 0; y < introTitleH; y++) {
         for (x = 0; x < introTitleW; x++) {
-            LONG pen = ReadPixel(&introTitleRP, srcBaseX + x, y);
-            WORD rx;
-            WORD ry;
-            WORD tx;
-            WORD ty;
+            WORD dx;
+            WORD dy;
+            WORD sx;
+            WORD sy;
+            LONG pen;
 
+            dx = x - dstCx;
+            dy = y - dstCy;
+            sx = srcCx + (((dx * cosv) + (dy * sinv)) / scale);
+            sy = srcCy + (((dy * cosv) - (dx * sinv)) / scale);
+
+            if (sx < 0 || sy < 0 || sx >= introTitleW || sy >= introTitleH) continue;
+
+            pen = ReadPixel(&introTitleRP, sx, sy);
             if (pen <= 0) continue;
 
-            rx = x - srcCx;
-            ry = y - srcCy;
-            tx = dstBaseX + dstCx + ((rx * cosv) - (ry * sinv)) / 64;
-            ty = dstCy + ((rx * sinv) + (ry * cosv)) / 64;
-
-            if (tx >= dstBaseX && tx < dstBaseX + introTitleW && ty >= 0 && ty < introTitleH) {
-                SetAPen(&cacheRP, (UBYTE)pen);
-                WritePixel(&cacheRP, tx, ty);
-            }
+            SetAPen(&cacheRP, (UBYTE)pen);
+            WritePixel(&cacheRP, dstBaseX + x, y);
         }
     }
 }
@@ -1026,6 +1124,7 @@ static BOOL LoadIntroTitleImage(void)
     InitRastPort(&introTitleRP);
     introTitleRP.BitMap = introTitleBM;
 
+    NormaliseIntroTitleBitmap();
     BuildIntroEffectCache();
 
     if (cRegs && numColors) {
