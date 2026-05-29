@@ -886,19 +886,22 @@ static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
 static void DisableTitleCopperGradient(BOOL reloadPalette)
 {
     struct ViewPort *viewPort;
+    BOOL detached = FALSE;
 
-    if (!scr) return;
+    if (!scr || !titleCopperActive) return;
 
-    if (titleCopperActive) {
-        viewPort = win ? ViewPortAddress(win) : &scr->ViewPort;
-        Forbid();
-        if (viewPort->UCopIns == titleUCopList) {
-            viewPort->UCopIns = NULL;
-        }
-        Permit();
-        RethinkDisplay();
-        titleCopperActive = FALSE;
+    viewPort = win ? ViewPortAddress(win) : &scr->ViewPort;
+    Forbid();
+    if (viewPort->UCopIns == titleUCopList) {
+        viewPort->UCopIns = NULL;
+        detached = TRUE;
     }
+    Permit();
+
+    if (detached) {
+        RethinkDisplay();
+    }
+    titleCopperActive = FALSE;
 
     if (reloadPalette) {
         LoadRGB4(&scr->ViewPort, palette, 32);
