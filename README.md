@@ -74,6 +74,17 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
   - AI 2: near bottom-left
   - AI 3: near bottom-right
 
+
+## Intro Loading Screen and Music
+
+Before the logo splash, the game now displays a short `LOADING` screen using the same pixel menu font as the title UI. Its progress bar is drawn with the in-game battery-meter style so the first thing on screen matches the RoboVac theme.
+
+When the logo splash starts, the engine looks for a ProTracker 4-channel module at:
+
+- `PROGDIR:music/robovac.mod`
+
+If the module is present, it is loaded into chip memory and started on the first logo frame. If it is missing or not a 4-channel ProTracker module (`M.K.`, `M!K!`, `M&K!`, `4CHN`, `FLT4`, or `N.T.`), the intro simply continues silently. The tiny built-in MOD player is meant for a short splash jingle and handles note triggers, volume changes, speed changes, and simple pattern breaks.
+
 ## Startup Title Image
 
 On startup, the game looks for a 32-colour ILBM title image at:
