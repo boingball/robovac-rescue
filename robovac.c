@@ -896,6 +896,22 @@ static void LoadIntroPaletteLevel(WORD level)
     introPaletteActive = TRUE;
 }
 
+static void CaptureIntroPalette(ULONG *cRegs, ULONG numColors)
+{
+    WORD i;
+
+    for (i = 0; i < 32; i++) introPalette[i] = palette[i];
+
+    if (cRegs && numColors) {
+        ULONG maxCols = (numColors > 32) ? 32 : numColors;
+        for (i = 0; i < (WORD)maxCols; i++) {
+            introPalette[i] = (UWORD)(((cRegs[i * 3 + 0] >> 28) << 8) |
+                                      ((cRegs[i * 3 + 1] >> 28) << 4) |
+                                      (cRegs[i * 3 + 2] >> 28));
+        }
+    }
+}
+
 
 static void CentreIntroTitleBitmap(void)
 {
@@ -1046,9 +1062,8 @@ static BOOL LoadIntroTitleImage(void)
     struct BitMap *srcBM = NULL;
     ULONG *cRegs = NULL;
     ULONG numColors = 0;
-    WORD i;
 
-    for (i = 0; i < 32; i++) introPalette[i] = 0;
+    CaptureIntroPalette(NULL, 0);
 
     dto = NewDTObject("PROGDIR:tiles/robovac-title.iff",
                       DTA_GroupID, GID_PICTURE,
@@ -1089,6 +1104,9 @@ static BOOL LoadIntroTitleImage(void)
         return FALSE;
     }
 
+    CaptureIntroPalette(cRegs, numColors);
+    LoadIntroPaletteLevel(INTRO_EFFECT_FRAMES);
+
     BltBitMap(srcBM, 0, 0,
               introTitleBM, 0, 0,
               introTitleW, introTitleH,
@@ -1099,17 +1117,6 @@ static BOOL LoadIntroTitleImage(void)
 
     CentreIntroTitleBitmap();
     BuildIntroEffectCache();
-
-    if (cRegs && numColors) {
-        ULONG maxCols = (numColors > 32) ? 32 : numColors;
-        for (i = 0; i < (WORD)maxCols; i++) {
-            introPalette[i] = (UWORD)(((cRegs[i * 3 + 0] >> 28) << 8) |
-                                      ((cRegs[i * 3 + 1] >> 28) << 4) |
-                                      (cRegs[i * 3 + 2] >> 28));
-        }
-    } else {
-        for (i = 0; i < 32; i++) introPalette[i] = palette[i];
-    }
 
     DisposeDTObject(dto);
     return TRUE;
