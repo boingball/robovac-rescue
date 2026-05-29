@@ -169,6 +169,10 @@ static struct BitMap *introTitleBM = NULL;
 static struct BitMap *introEffectBM = NULL;
 static WORD introTitleW = 0;
 static WORD introTitleH = 0;
+static WORD introTitleContentLeft = 0;
+static WORD introTitleContentTop = 0;
+static WORD introTitleContentRight = 0;
+static WORD introTitleContentBottom = 0;
 static WORD introTicks = 0;
 static BOOL introPaletteActive = FALSE;
 static UWORD introPalette[32];
@@ -583,7 +587,6 @@ static BOOL InitTileCache(void)
     tileCacheBM = AllocBitMap(TILE_SIZE * TILE_COUNT, TILE_SIZE, DEPTH,
                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
     if (!tileCacheBM) {
-        printf("Could not allocate tile cache bitmap\n");
         return FALSE;
     }
 
@@ -987,7 +990,6 @@ static BOOL BuildIntroEffectCache(void)
     introEffectBM = AllocBitMap(introTitleW * INTRO_CACHE_FRAMES, introTitleH, DEPTH,
                                 BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
     if (!introEffectBM) {
-        printf("Could not allocate intro title effect cache; using static title blits\n");
         return FALSE;
     }
 
@@ -998,28 +1000,36 @@ static BOOL BuildIntroEffectCache(void)
     return TRUE;
 }
 
-static void DebugIntroTitleCachePens(struct RastPort *srcRP)
+static void UpdateIntroTitleContentBounds(void)
 {
-    WORD sampleX[4];
-    WORD sampleY[4];
-    WORD i;
+    WORD x;
+    WORD y;
+    BOOL found = FALSE;
 
-    if (!srcRP || !introTitleBM || introTitleW <= 0 || introTitleH <= 0) return;
+    introTitleContentLeft = 0;
+    introTitleContentTop = 0;
+    introTitleContentRight = introTitleW > 0 ? introTitleW - 1 : 0;
+    introTitleContentBottom = introTitleH > 0 ? introTitleH - 1 : 0;
 
-    sampleX[0] = 0;
-    sampleY[0] = 0;
-    sampleX[1] = introTitleW / 4;
-    sampleY[1] = introTitleH / 4;
-    sampleX[2] = introTitleW / 2;
-    sampleY[2] = introTitleH / 2;
-    sampleX[3] = introTitleW - 1;
-    sampleY[3] = introTitleH - 1;
+    if (!introTitleBM || introTitleW <= 0 || introTitleH <= 0) return;
 
-    for (i = 0; i < 4; i++) {
-        LONG srcPen = ReadPixel(srcRP, sampleX[i], sampleY[i]);
-        LONG cachedPen = ReadPixel(&introTitleRP, sampleX[i], sampleY[i]);
-        printf("Intro title cache pen check (%ld,%ld): source=%ld cache=%ld\n",
-               (LONG)sampleX[i], (LONG)sampleY[i], srcPen, cachedPen);
+    for (y = 0; y < introTitleH; y++) {
+        for (x = 0; x < introTitleW; x++) {
+            if (ReadPixel(&introTitleRP, x, y) > 0) {
+                if (!found) {
+                    introTitleContentLeft = x;
+                    introTitleContentTop = y;
+                    introTitleContentRight = x;
+                    introTitleContentBottom = y;
+                    found = TRUE;
+                } else {
+                    if (x < introTitleContentLeft) introTitleContentLeft = x;
+                    if (y < introTitleContentTop) introTitleContentTop = y;
+                    if (x > introTitleContentRight) introTitleContentRight = x;
+                    if (y > introTitleContentBottom) introTitleContentBottom = y;
+                }
+            }
+        }
     }
 }
 
@@ -1028,7 +1038,6 @@ static BOOL LoadIntroTitleImage(void)
     Object *dto;
     struct BitMapHeader *bmhd = NULL;
     struct BitMap *srcBM = NULL;
-    struct RastPort srcRP;
     ULONG *cRegs = NULL;
     ULONG numColors = 0;
 
@@ -1076,13 +1085,10 @@ static BOOL LoadIntroTitleImage(void)
               introTitleW, introTitleH,
               0xC0, 0xFF, NULL);
 
-    InitRastPort(&srcRP);
-    srcRP.BitMap = srcBM;
-
     InitRastPort(&introTitleRP);
     introTitleRP.BitMap = introTitleBM;
 
-    DebugIntroTitleCachePens(&srcRP);
+    UpdateIntroTitleContentBounds();
     BuildIntroEffectCache();
 
     CaptureIntroPalette(cRegs, numColors);
@@ -1104,6 +1110,10 @@ static void FreeIntroTitleImage(void)
     }
     introTitleW = 0;
     introTitleH = 0;
+    introTitleContentLeft = 0;
+    introTitleContentTop = 0;
+    introTitleContentRight = 0;
+    introTitleContentBottom = 0;
 }
 
 static BOOL LoadRobotSheetIntoCache(void)
@@ -1159,7 +1169,6 @@ static BOOL LoadRobotSheetIntoCache(void)
                        PDTA_Remap, FALSE,
                        TAG_DONE);
     if (!dto || !dto2 || !dto3 || !dto4 || !dto5 || !dto6 || !dto7) {
-        printf("LoadRobotSheetIntoCache: NewDTObject failed\n");
         if (dto) DisposeDTObject(dto);
         if (dto2) DisposeDTObject(dto2);
         if (dto3) DisposeDTObject(dto3);
@@ -1360,10 +1369,8 @@ static BOOL BuildTitleCarouselRotationCache(void)
 
     if (!AllocTitleCarouselCache(TITLE_SPIN_STEPS)) {
         if (!AllocTitleCarouselCache(TITLE_SPIN_STEPS_FALLBACK)) {
-            printf("Could not allocate title carousel rotation cache\n");
             return FALSE;
         }
-        printf("Using %ld title carousel rotation frames per robot\n", (LONG)titleCarouselFrameCount);
     }
 
     InitRastPort(&maskRP);
@@ -1387,7 +1394,6 @@ static BOOL InitRobotBobs(void)
                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
 
     if (!robotCacheBM || !robotMaskBM) {
-        printf("Could not allocate robot BOB cache/mask\n");
         if (robotCacheBM) {
             FreeBitMap(robotCacheBM);
             robotCacheBM = NULL;
@@ -1403,7 +1409,6 @@ static BOOL InitRobotBobs(void)
     robotRP.BitMap = robotCacheBM;
 
     if (!LoadRobotSheetIntoCache()) {
-        printf("Could not load PROGDIR:tiles/airobot1.iff through airobot7.iff (need at least 16x16, 16 colours)\n");
         FreeBitMap(robotCacheBM);
         FreeBitMap(robotMaskBM);
         robotCacheBM = NULL;
@@ -2289,8 +2294,8 @@ static void DrawIntroTitleImage(void)
 
     if (!introTitleBM) return;
 
-    dstX = (SCREEN_W - introTitleW) / 2;
-    dstY = (SCREEN_H - introTitleH) / 2;
+    dstX = ((SCREEN_W - (introTitleContentRight - introTitleContentLeft + 1)) / 2) - introTitleContentLeft;
+    dstY = ((SCREEN_H - (introTitleContentBottom - introTitleContentTop + 1)) / 2) - introTitleContentTop;
     effectTick = introTicks - INTRO_HOLD_FRAMES;
 
     if (effectTick > 0 && introEffectBM) {
@@ -2509,7 +2514,6 @@ static BOOL OpenGameScreen(void)
         TAG_END);
 
     if (!scr) {
-        printf("Could not open custom screen\n");
         return FALSE;
     }
 
@@ -2519,7 +2523,6 @@ static BOOL OpenGameScreen(void)
                            BMF_CLEAR | BMF_DISPLAYABLE,
                            scr->RastPort.BitMap);
     if (!renderBM) {
-        printf("Could not allocate render bitmap\n");
         CloseScreen(scr);
         scr = NULL;
         return FALSE;
@@ -2529,7 +2532,6 @@ static BOOL OpenGameScreen(void)
                          BMF_CLEAR | BMF_DISPLAYABLE,
                          scr->RastPort.BitMap);
     if (!roomBM) {
-        printf("Could not allocate room bitmap\n");
         FreeBitMap(renderBM);
         renderBM = NULL;
         CloseScreen(scr);
@@ -2553,13 +2555,9 @@ static BOOL OpenGameScreen(void)
         return FALSE;
     }
 
-    if (!InitRobotBobs()) {
-        printf("Robot BOB cache allocation failed; fallback drawing enabled\n");
-    }
+    InitRobotBobs();
 
-    if (!LoadIntroTitleImage()) {
-        printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
-    }
+    LoadIntroTitleImage();
 
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
@@ -2575,7 +2573,6 @@ static BOOL OpenGameScreen(void)
         TAG_END);
 
     if (!win) {
-        printf("Could not open game window\n");
         FreeIntroTitleImage();
         FreeTitleCarouselCache();
         if (robotCacheBM) FreeBitMap(robotCacheBM);
@@ -2639,8 +2636,6 @@ static void CloseGameScreen(void)
 
 int main(void)
 {
-    printf("RoboVac Rescue smooth AI prototype starting...\n");
-
     if (!OpenGameScreen()) {
         return 20;
     }
@@ -2657,6 +2652,5 @@ int main(void)
 
     CloseGameScreen();
 
-    printf("RoboVac Rescue ended.\n");
     return 0;
 }
