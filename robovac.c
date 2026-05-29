@@ -17,6 +17,7 @@
  * Controls:
  *   Arrow keys - move player robot
  *   R/Space    - start/reset
+ *   Q          - open in-game restart/quit menu
  *   1/2/3      - start with 1/2/3 AI rivals from title screen
  *   O          - hidden 9-rival mode (battle mode)
  *   Esc/RMB    - quit
@@ -106,8 +107,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_RIGHT   0x4E
 #define RAW_UP      0x4C
 #define RAW_DOWN    0x4D
+#define RAW_Q       0x10
 #define RAW_R       0x13
 #define RAW_SPACE   0x40
+#define RAW_RETURN  0x44
 #define RAW_1       0x01
 #define RAW_2       0x02
 #define RAW_3       0x03
@@ -206,6 +209,8 @@ static WORD roundWinner = -1;
 static WORD finalWinner = -1;
 static WORD roomType = 0;
 static BOOL running = TRUE;
+static BOOL pauseMenuOpen = FALSE;
+static WORD pauseMenuSelection = 0;
 
 static BOOL keyLeft = FALSE;
 static BOOL keyRight = FALSE;
@@ -321,6 +326,7 @@ static void DrawTitleCarousel(void);
 static void TriggerRobotPower(WORD id);
 static WORD SpawnDirtTiles(WORD count);
 static void EnterTitleScreen(void);
+static void ClosePauseMenu(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -1763,6 +1769,7 @@ static void ResetLevel(void)
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
     gameState = GAME_PLAYING;
+    ClosePauseMenu();
 
     InitRobots();
     CountDirt();
@@ -2094,6 +2101,7 @@ static void StepGame(void)
     }
 
     if (gameState != GAME_PLAYING) return;
+    if (pauseMenuOpen) return;
 
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
@@ -2405,6 +2413,42 @@ static void DrawIntroTitleImage(void)
                       0xC0);
 }
 
+
+static void DrawPauseMenu(void)
+{
+    static const char *items[2] = { "RESTART LEVEL", "QUIT" };
+    WORD left = 76;
+    WORD top = 82;
+    WORD right = 244;
+    WORD bottom = 170;
+    WORD i;
+
+    SetAPen(&renderRP, 1);
+    RectFill(&renderRP, left - 4, top - 4, right + 4, bottom + 4);
+    SetAPen(&renderRP, 13);
+    RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, left, top, right, bottom);
+
+    MiniTextCentered(&renderRP, top + 10, "PAUSED", 7, 2);
+    MiniTextCentered(&renderRP, top + 28, "Q/ESC CLOSE", 8, 1);
+
+    for (i = 0; i < 2; i++) {
+        WORD y = top + 46 + (i * 18);
+        WORD textX = (SCREEN_W - MiniTextWidth(items[i], 2)) / 2;
+
+        if (i == pauseMenuSelection) {
+            SetAPen(&renderRP, 4);
+            RectFill(&renderRP, left + 14, y - 4, right - 14, y + 13);
+            MiniTextScaled(&renderRP, left + 20, y, ">", 14, 2);
+            MiniTextScaled(&renderRP, right - 28, y, "<", 14, 2);
+        }
+        MiniTextScaled(&renderRP, textX, y, items[i], (i == pauseMenuSelection) ? 14 : 7, 2);
+    }
+
+    MiniTextCentered(&renderRP, bottom - 12, "ARROWS ENTER", 13, 1);
+}
+
 static void DrawFrame(void)
 {
     WORD i;
@@ -2446,6 +2490,10 @@ static void DrawFrame(void)
     }
     DrawRobotBob(0);
     DrawPlayerBolt();
+
+    if (pauseMenuOpen) {
+        DrawPauseMenu();
+    }
 }
 
 static void PresentFrame(void)
@@ -2459,6 +2507,60 @@ static void PresentFrame(void)
 /* -------------------------------------------------------------------------
  * Input
  * ------------------------------------------------------------------------- */
+
+
+static void ClearMovementKeys(void)
+{
+    keyLeft = FALSE;
+    keyRight = FALSE;
+    keyUp = FALSE;
+    keyDown = FALSE;
+}
+
+static void OpenPauseMenu(void)
+{
+    if (gameState != GAME_PLAYING) return;
+    pauseMenuOpen = TRUE;
+    pauseMenuSelection = 0;
+    ClearMovementKeys();
+}
+
+static void ClosePauseMenu(void)
+{
+    pauseMenuOpen = FALSE;
+    pauseMenuSelection = 0;
+    ClearMovementKeys();
+}
+
+static void ActivatePauseMenuSelection(void)
+{
+    if (pauseMenuSelection == 0) {
+        ResetLevel();
+    } else {
+        running = FALSE;
+    }
+}
+
+static BOOL HandlePauseMenuRawKey(UWORD code, BOOL keyUpEvent)
+{
+    if (!pauseMenuOpen) return FALSE;
+    if (keyUpEvent) return TRUE;
+
+    if (code == RAW_Q || code == RAW_ESC) {
+        ClosePauseMenu();
+        return TRUE;
+    }
+    if (code == RAW_UP || code == RAW_DOWN) {
+        pauseMenuSelection = 1 - pauseMenuSelection;
+        return TRUE;
+    }
+    if (code == RAW_RETURN || code == RAW_SPACE) {
+        ActivatePauseMenuSelection();
+        return TRUE;
+    }
+
+    return TRUE;
+}
 
 static void StartWithRivals(WORD rivals)
 {
@@ -2533,8 +2635,17 @@ static void HandleRawKey(UWORD rawCode)
     BOOL keyUpEvent = (rawCode & 0x80) ? TRUE : FALSE;
     UWORD code = rawCode & 0x7F;
 
+    if (HandlePauseMenuRawKey(code, keyUpEvent)) {
+        return;
+    }
+
     if (code == RAW_ESC && !keyUpEvent) {
         running = FALSE;
+        return;
+    }
+
+    if (!keyUpEvent && code == RAW_Q && gameState == GAME_PLAYING) {
+        OpenPauseMenu();
         return;
     }
 
