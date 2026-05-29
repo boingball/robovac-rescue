@@ -76,6 +76,12 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
 
 ## Startup Title Image
 
+The startup/title screens also look for a 4-channel ProTracker module at:
+
+- `PROGDIR:mods/robovac_startup.mod`
+
+When present, the module is loaded into chip RAM and played while the startup title image or main title menu is visible. Playback stops as soon as a match starts.
+
 On startup, the game looks for a 32-colour ILBM title image at:
 
 - `PROGDIR:tiles/robovac-title.iff`
