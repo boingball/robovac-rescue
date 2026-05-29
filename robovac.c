@@ -40,6 +40,7 @@
 #include <datatypes/pictureclass.h>
 #include <datatypes/datatypes.h>
 #include <hardware/custom.h>
+#include <hardware/dmabits.h>
 #include <utility/tagitem.h>
 
 #include <stdio.h>
@@ -135,6 +136,27 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_COPPER_PEN 1
 #define TITLE_COPPER_BANDS 32
 
+#define TITLE_MUSIC_PATH "PROGDIR:mods/robovac_startup.mod"
+#define MOD_HEADER_SIZE 1084
+#define MOD_SAMPLE_COUNT 31
+#define MOD_POSITION_COUNT 128
+#define MOD_CHANNELS 4
+#define MOD_ROWS 64
+#define MOD_PATTERN_BYTES (MOD_ROWS * MOD_CHANNELS * 4)
+#define MOD_DEFAULT_SPEED 6
+#define MOD_MAX_SPEED 31
+#define TITLE_MUSIC_TICKS_PER_FRAME 3
+#ifndef DMAF_SETCLR
+#define DMAF_SETCLR 0x8000
+#endif
+#ifndef DMAF_AUD0
+#define DMAF_AUD0 0x0001
+#define DMAF_AUD1 0x0002
+#define DMAF_AUD2 0x0004
+#define DMAF_AUD3 0x0008
+#endif
+#define TITLE_MUSIC_DMA_MASK (DMAF_AUD0 | DMAF_AUD1 | DMAF_AUD2 | DMAF_AUD3)
+
 struct Robot {
     WORD tileX;
     WORD tileY;
@@ -154,6 +176,28 @@ struct Robot {
     BOOL moving;
     UBYTE spriteIndex;
     UBYTE spriteVariant;
+};
+
+
+struct ModSample {
+    char *data;
+    UWORD lengthWords;
+    UWORD loopStartWords;
+    UWORD loopLengthWords;
+    UBYTE volume;
+};
+
+struct ModPlayer {
+    UBYTE *moduleData;
+    LONG moduleSize;
+    UBYTE songLength;
+    UBYTE position;
+    UBYTE row;
+    UBYTE tick;
+    UBYTE speed;
+    BOOL loaded;
+    BOOL playing;
+    struct ModSample samples[MOD_SAMPLE_COUNT];
 };
 
 static struct Screen *scr = NULL;
@@ -184,6 +228,7 @@ static BOOL introPaletteActive = FALSE;
 static BOOL titleCopperActive = FALSE;
 static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
+static struct ModPlayer titleMusic;
 
 static UBYTE map[MAP_H][MAP_W];
 
@@ -327,6 +372,10 @@ static void TriggerRobotPower(WORD id);
 static WORD SpawnDirtTiles(WORD count);
 static void EnterTitleScreen(void);
 static void ClosePauseMenu(void);
+static BOOL LoadTitleMusic(void);
+static void FreeTitleMusic(void);
+static void StepTitleMusic(void);
+static void StopTitleMusic(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -531,6 +580,226 @@ static void DrawTileIntoCache(UBYTE tileType)
         WritePixel(&tileRP, sx + 4, sy + 7);
         WritePixel(&tileRP, sx + 11, sy + 9);
         WritePixel(&tileRP, sx + 8, sy + 4);
+    }
+}
+
+
+static UWORD ReadBE16(const UBYTE *p)
+{
+    return (UWORD)(((UWORD)p[0] << 8) | p[1]);
+}
+
+static LONG GetFileSize(BPTR fh)
+{
+    LONG size;
+
+    if (Seek(fh, 0, OFFSET_END) == -1) return -1;
+    size = Seek(fh, 0, OFFSET_CURRENT);
+    if (size == -1) return -1;
+    if (Seek(fh, 0, OFFSET_BEGINNING) == -1) return -1;
+    return size;
+}
+
+static UWORD AudioDmaBit(WORD channel)
+{
+    switch (channel) {
+        case 0: return DMAF_AUD0;
+        case 1: return DMAF_AUD1;
+        case 2: return DMAF_AUD2;
+        default: return DMAF_AUD3;
+    }
+}
+
+static void StopTitleMusic(void)
+{
+    if (titleMusic.playing) {
+        custom.dmacon = TITLE_MUSIC_DMA_MASK;
+        titleMusic.playing = FALSE;
+    }
+    titleMusic.position = 0;
+    titleMusic.row = 0;
+    titleMusic.tick = 0;
+    titleMusic.speed = MOD_DEFAULT_SPEED;
+}
+
+static BOOL LoadTitleMusic(void)
+{
+    BPTR fh;
+    LONG size;
+    LONG readSize;
+    UBYTE *data;
+    LONG sampleOffset;
+    WORD i;
+    UBYTE maxPattern = 0;
+
+    memset(&titleMusic, 0, sizeof(titleMusic));
+    titleMusic.speed = MOD_DEFAULT_SPEED;
+
+    fh = Open(TITLE_MUSIC_PATH, MODE_OLDFILE);
+    if (!fh) {
+        printf("Optional %s not loaded; title music disabled\n", TITLE_MUSIC_PATH);
+        return FALSE;
+    }
+
+    size = GetFileSize(fh);
+    if (size < MOD_HEADER_SIZE) {
+        Close(fh);
+        printf("%s is too small for a ProTracker module\n", TITLE_MUSIC_PATH);
+        return FALSE;
+    }
+
+    data = (UBYTE *)AllocMem(size, MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
+    if (!data) {
+        Close(fh);
+        printf("Could not allocate chip RAM for %s\n", TITLE_MUSIC_PATH);
+        return FALSE;
+    }
+
+    readSize = Read(fh, data, size);
+    Close(fh);
+    if (readSize != size) {
+        FreeMem(data, size);
+        printf("Could not read %s\n", TITLE_MUSIC_PATH);
+        return FALSE;
+    }
+
+    if (data[1080] != 'M' || data[1081] != '.' || data[1082] != 'K' || data[1083] != '.') {
+        FreeMem(data, size);
+        printf("%s is not a 4-channel M.K. ProTracker module\n", TITLE_MUSIC_PATH);
+        return FALSE;
+    }
+
+    titleMusic.songLength = data[950];
+    if (titleMusic.songLength == 0 || titleMusic.songLength > MOD_POSITION_COUNT) {
+        FreeMem(data, size);
+        printf("%s has an invalid song length\n", TITLE_MUSIC_PATH);
+        return FALSE;
+    }
+
+    for (i = 0; i < titleMusic.songLength; i++) {
+        if (data[952 + i] > maxPattern) maxPattern = data[952 + i];
+    }
+
+    sampleOffset = MOD_HEADER_SIZE + ((LONG)maxPattern + 1) * MOD_PATTERN_BYTES;
+    for (i = 0; i < MOD_SAMPLE_COUNT; i++) {
+        UBYTE *sampleInfo = data + 20 + (i * 30);
+        ULONG lengthBytes = (ULONG)ReadBE16(sampleInfo + 22) * 2;
+        ULONG loopStartBytes = (ULONG)ReadBE16(sampleInfo + 26) * 2;
+        ULONG loopLengthBytes = (ULONG)ReadBE16(sampleInfo + 28) * 2;
+
+        if (sampleOffset + (LONG)lengthBytes > size) {
+            FreeMem(data, size);
+            printf("%s sample data is truncated\n", TITLE_MUSIC_PATH);
+            return FALSE;
+        }
+
+        titleMusic.samples[i].data = (char *)(data + sampleOffset);
+        titleMusic.samples[i].lengthWords = (UWORD)(lengthBytes / 2);
+        titleMusic.samples[i].loopStartWords = (UWORD)(loopStartBytes / 2);
+        titleMusic.samples[i].loopLengthWords = (UWORD)(loopLengthBytes / 2);
+        titleMusic.samples[i].volume = sampleInfo[25];
+        sampleOffset += lengthBytes;
+    }
+
+    titleMusic.moduleData = data;
+    titleMusic.moduleSize = size;
+    titleMusic.loaded = TRUE;
+    return TRUE;
+}
+
+static void FreeTitleMusic(void)
+{
+    StopTitleMusic();
+    if (titleMusic.moduleData) {
+        FreeMem(titleMusic.moduleData, titleMusic.moduleSize);
+    }
+    memset(&titleMusic, 0, sizeof(titleMusic));
+}
+
+static void TriggerModNote(WORD channel, UBYTE sampleNumber, UWORD period)
+{
+    struct ModSample *sample;
+    UWORD dmaBit;
+
+    if (channel < 0 || channel >= MOD_CHANNELS) return;
+    if (sampleNumber == 0 || sampleNumber > MOD_SAMPLE_COUNT) return;
+    if (period == 0) return;
+
+    sample = &titleMusic.samples[sampleNumber - 1];
+    if (!sample->data || sample->lengthWords == 0) return;
+
+    dmaBit = AudioDmaBit(channel);
+    custom.dmacon = dmaBit;
+    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+    custom.aud[channel].ac_len = sample->lengthWords;
+    custom.aud[channel].ac_per = period;
+    custom.aud[channel].ac_vol = (sample->volume > 64) ? 64 : sample->volume;
+    custom.dmacon = DMAF_SETCLR | dmaBit;
+}
+
+static void PlayCurrentModRow(void)
+{
+    UBYTE pattern;
+    UBYTE *patternData;
+    WORD channel;
+
+    if (!titleMusic.loaded || titleMusic.songLength == 0) return;
+    if (titleMusic.position >= titleMusic.songLength) titleMusic.position = 0;
+
+    pattern = titleMusic.moduleData[952 + titleMusic.position];
+    patternData = titleMusic.moduleData + MOD_HEADER_SIZE + ((LONG)pattern * MOD_PATTERN_BYTES) +
+                  ((LONG)titleMusic.row * MOD_CHANNELS * 4);
+
+    for (channel = 0; channel < MOD_CHANNELS; channel++) {
+        UBYTE *note = patternData + (channel * 4);
+        UWORD period = (UWORD)(((note[0] & 0x0F) << 8) | note[1]);
+        UBYTE sampleNumber = (UBYTE)((note[0] & 0xF0) | (note[2] >> 4));
+        UBYTE effect = (UBYTE)(note[2] & 0x0F);
+        UBYTE param = note[3];
+
+        if (effect == 0x0F && param > 0 && param <= MOD_MAX_SPEED) {
+            titleMusic.speed = param;
+        }
+        TriggerModNote(channel, sampleNumber, period);
+    }
+}
+
+static void StepTitleMusic(void)
+{
+    WORD ticks;
+
+    if (!titleMusic.loaded) return;
+
+    if (!titleMusic.playing) {
+        titleMusic.playing = TRUE;
+        titleMusic.position = 0;
+        titleMusic.row = 0;
+        titleMusic.tick = 0;
+        titleMusic.speed = MOD_DEFAULT_SPEED;
+    }
+
+    /*
+     * Rendering the full title/intro scene is heavier than a plain VBlank
+     * replay interrupt on the target machines, so advance a few ProTracker
+     * ticks per rendered frame to keep the startup module near authored tempo.
+     */
+    for (ticks = 0; ticks < TITLE_MUSIC_TICKS_PER_FRAME; ticks++) {
+        if (titleMusic.tick == 0) {
+            PlayCurrentModRow();
+        }
+
+        titleMusic.tick++;
+        if (titleMusic.tick >= titleMusic.speed) {
+            titleMusic.tick = 0;
+            titleMusic.row++;
+            if (titleMusic.row >= MOD_ROWS) {
+                titleMusic.row = 0;
+                titleMusic.position++;
+                if (titleMusic.position >= titleMusic.songLength) {
+                    titleMusic.position = 0;
+                }
+            }
+        }
     }
 }
 
@@ -2095,6 +2364,10 @@ static void StepGame(void)
 {
     WORD i;
 
+    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
+        StepTitleMusic();
+    }
+
     if (gameState == GAME_INTRO) {
         StepIntro();
         return;
@@ -2566,6 +2839,7 @@ static BOOL HandlePauseMenuRawKey(UWORD code, BOOL keyUpEvent)
 static void StartWithRivals(WORD rivals)
 {
     WORD i;
+    StopTitleMusic();
     aiRivals = rivals;
     if (aiRivals < 1) aiRivals = 1;
     if (aiRivals > 9) aiRivals = 9;
@@ -2772,6 +3046,8 @@ static BOOL OpenGameScreen(void)
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
     }
 
+    LoadTitleMusic();
+
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
         WA_Left,         0,
@@ -2787,6 +3063,7 @@ static BOOL OpenGameScreen(void)
 
     if (!win) {
         printf("Could not open game window\n");
+        FreeTitleMusic();
         FreeIntroTitleImage();
         FreeTitleCarouselCache();
         if (robotCacheBM) FreeBitMap(robotCacheBM);
@@ -2809,6 +3086,7 @@ static BOOL OpenGameScreen(void)
 
 static void CloseGameScreen(void)
 {
+    StopTitleMusic();
     FreeTitleCopperGradient();
 
     if (win) {
@@ -2818,6 +3096,7 @@ static void CloseGameScreen(void)
 
     FreeIntroTitleImage();
     FreeTitleCarouselCache();
+    FreeTitleMusic();
 
     if (robotCacheBM) {
         FreeBitMap(robotCacheBM);
