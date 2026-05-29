@@ -28,6 +28,8 @@
 #include <graphics/rastport.h>
 #include <graphics/view.h>
 #include <graphics/gfxmacros.h>
+#include <graphics/copper.h>
+#include <graphics/videocontrol.h>
 #include <proto/exec.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
@@ -36,9 +38,13 @@
 
 #include <datatypes/pictureclass.h>
 #include <datatypes/datatypes.h>
+#include <hardware/custom.h>
+#include <utility/tagitem.h>
 
 #include <stdio.h>
 #include <string.h>
+
+extern struct Custom custom;
 
 static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
@@ -123,6 +129,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_SPIN_STEPS_FALLBACK 16
 #define TITLE_ROT_W (ROBOT_W * TITLE_ROBOT_SCALE)
 #define TITLE_ROT_H (ROBOT_H * TITLE_ROBOT_SCALE)
+#define TITLE_COPPER_PEN 1
+#define TITLE_COPPER_BANDS 32
 
 struct Robot {
     WORD tileX;
@@ -170,6 +178,7 @@ static WORD introTitleW = 0;
 static WORD introTitleH = 0;
 static WORD introTicks = 0;
 static BOOL introPaletteActive = FALSE;
+static BOOL titleCopperActive = FALSE;
 static UWORD introPalette[32];
 
 static UBYTE map[MAP_H][MAP_W];
@@ -873,9 +882,79 @@ static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
     return LoadPaletteCMapInto(path, palette, firstPen, maxPens);
 }
 
+static void DisableTitleCopperGradient(BOOL reloadPalette)
+{
+    if (!scr || !titleCopperActive) return;
+
+    FreeVPortCopLists(&scr->ViewPort);
+    RethinkDisplay();
+    titleCopperActive = FALSE;
+
+    if (reloadPalette) {
+        LoadRGB4(&scr->ViewPort, palette, 32);
+    }
+}
+
+static BOOL EnableTitleCopperGradient(void)
+{
+    struct UCopList *uCopList;
+    struct ViewPort *viewPort;
+    struct TagItem uCopTags[] = {
+        { VTAG_USERCLIP_SET, TRUE },
+        { VTAG_END_CM, 0 }
+    };
+    WORD band;
+    WORD top = TITLE_CAROUSEL_Y - 8;
+    WORD height = SCREEN_H - top;
+
+    if (!scr) return FALSE;
+    if (titleCopperActive) return TRUE;
+
+    uCopList = (struct UCopList *)AllocMem(sizeof(struct UCopList), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!uCopList) return FALSE;
+
+    CINIT(uCopList, TITLE_COPPER_BANDS);
+
+    for (band = 0; band < TITLE_COPPER_BANDS; band++) {
+        WORD y = top + ((band * height) / TITLE_COPPER_BANDS);
+        WORD r;
+        WORD g;
+        WORD b;
+        UWORD color;
+
+        if (band < (TITLE_COPPER_BANDS / 2)) {
+            WORD level = 12 - ((12 * band) / ((TITLE_COPPER_BANDS / 2) - 1));
+            r = level;
+            g = level;
+            b = level;
+        } else {
+            WORD level = (15 * (band - (TITLE_COPPER_BANDS / 2))) / ((TITLE_COPPER_BANDS / 2) - 1);
+            r = level;
+            g = level;
+            b = level;
+        }
+
+        color = (UWORD)((r << 8) | (g << 4) | b);
+        CWAIT(uCopList, y, 0);
+        CMOVE(uCopList, custom.color[TITLE_COPPER_PEN], color);
+    }
+
+    CEND(uCopList);
+
+    viewPort = win ? ViewPortAddress(win) : &scr->ViewPort;
+    Forbid();
+    viewPort->UCopIns = uCopList;
+    Permit();
+
+    VideoControl(viewPort->ColorMap, uCopTags);
+    RethinkDisplay();
+    titleCopperActive = TRUE;
+    return TRUE;
+}
 
 static void LoadGamePalette(void)
 {
+    DisableTitleCopperGradient(FALSE);
     LoadRGB4(&scr->ViewPort, palette, 32);
     introPaletteActive = FALSE;
 }
@@ -1271,6 +1350,12 @@ static BOOL AllocTitleCarouselCache(WORD frameCount)
     return TRUE;
 }
 
+static WORD RoundedDiv(WORD value, WORD divisor)
+{
+    if (value >= 0) return (value + (divisor / 2)) / divisor;
+    return -((-value + (divisor / 2)) / divisor);
+}
+
 static void BuildTitleCarouselRotationFrame(struct RastPort *maskRP, WORD variant, WORD frame)
 {
     static const WORD sinTable[TITLE_SPIN_STEPS] = {
@@ -1284,43 +1369,38 @@ static void BuildTitleCarouselRotationFrame(struct RastPort *maskRP, WORD varian
     WORD phase = (frame * TITLE_SPIN_STEPS) / titleCarouselFrameCount;
     WORD sinv = sinTable[phase & (TITLE_SPIN_STEPS - 1)];
     WORD cosv = cosTable[phase & (TITLE_SPIN_STEPS - 1)];
-    WORD srcX = (variant * SPR_STATE_COUNT + SPR_READY) * ROBOT_W;
+    WORD srcBaseX = (variant * SPR_STATE_COUNT + SPR_READY) * ROBOT_W;
     WORD dstBaseX = (variant * titleCarouselFrameCount + frame) * TITLE_ROT_W;
-    WORD centre = (ROBOT_W - 1) * TITLE_ROBOT_SCALE / 2;
-    WORD x;
-    WORD y;
+    WORD dstCentre = (TITLE_ROT_W - 1) / 2;
+    WORD srcCentre = ROBOT_W / 2;
+    WORD px;
+    WORD py;
 
-    for (y = 0; y < ROBOT_H; y++) {
-        for (x = 0; x < ROBOT_W; x++) {
-            LONG pen = ReadPixel(&robotRP, srcX + x, y);
-            WORD rx;
-            WORD ry;
-            WORD tx;
-            WORD ty;
-            WORD dx;
-            WORD dy;
+    /*
+     * Draw the cached spin with inverse mapping from each destination pixel back
+     * to the nearest source pixel. The old forward mapping rotated source pixels
+     * into the 2x destination and left occasional unmapped holes, visible as
+     * missing dots during the carousel spin.
+     */
+    for (py = 0; py < TITLE_ROT_H; py++) {
+        for (px = 0; px < TITLE_ROT_W; px++) {
+            WORD rx = px - dstCentre;
+            WORD ry = py - dstCentre;
+            WORD srcScaledX = ((rx * cosv) + (ry * sinv)) / 64;
+            WORD srcScaledY = ((ry * cosv) - (rx * sinv)) / 64;
+            WORD sx = srcCentre + RoundedDiv(srcScaledX, TITLE_ROBOT_SCALE);
+            WORD sy = srcCentre + RoundedDiv(srcScaledY, TITLE_ROBOT_SCALE);
+            LONG pen;
 
+            if (sx < 0 || sy < 0 || sx >= ROBOT_W || sy >= ROBOT_H) continue;
+
+            pen = ReadPixel(&robotRP, srcBaseX + sx, sy);
             if (pen <= 0) continue;
 
-            rx = x - (ROBOT_W / 2);
-            ry = y - (ROBOT_H / 2);
-            tx = ((rx * cosv) - (ry * sinv)) / 64;
-            ty = ((rx * sinv) + (ry * cosv)) / 64;
-            tx = centre + (tx * TITLE_ROBOT_SCALE);
-            ty = centre + (ty * TITLE_ROBOT_SCALE);
-
             SetAPen(&titleCarouselRP, (UBYTE)pen);
+            WritePixel(&titleCarouselRP, dstBaseX + px, py);
             SetAPen(maskRP, 1);
-            for (dy = 0; dy < TITLE_ROBOT_SCALE; dy++) {
-                for (dx = 0; dx < TITLE_ROBOT_SCALE; dx++) {
-                    WORD px = tx + dx;
-                    WORD py = ty + dy;
-                    if (px >= 0 && py >= 0 && px < TITLE_ROT_W && py < TITLE_ROT_H) {
-                        WritePixel(&titleCarouselRP, dstBaseX + px, py);
-                        WritePixel(maskRP, dstBaseX + px, py);
-                    }
-                }
-            }
+            WritePixel(maskRP, dstBaseX + px, py);
         }
     }
 }
@@ -2127,23 +2207,23 @@ static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD d
                           titleCarouselMaskBM->Planes[0]);
 }
 
-static void DrawTitleSelectorGradient(WORD x, WORD y)
+static void DrawTitlePanelBase(WORD top, WORD bottom)
 {
-    static const UBYTE gradientPens[] = {4, 4, 6, 6, 8, 8, 1, 1, 0};
+    SetAPen(&renderRP, TITLE_COPPER_PEN);
+    RectFill(&renderRP, 0, top, SCREEN_W - 1, bottom);
+}
+
+static void DrawTitleSelectorBox(WORD x, WORD y)
+{
     WORD left = x - 2;
     WORD top = y - 2;
     WORD right = x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1;
     WORD bottom = y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1;
-    WORD h = bottom - top + 1;
-    WORD bandCount = sizeof(gradientPens) / sizeof(gradientPens[0]);
-    WORD band;
 
-    for (band = 0; band < bandCount; band++) {
-        WORD y0 = top + (band * h) / bandCount;
-        WORD y1 = top + ((band + 1) * h) / bandCount - 1;
-        SetAPen(&renderRP, gradientPens[band]);
-        RectFill(&renderRP, left, y0, right, y1);
-    }
+    SetAPen(&renderRP, 13);
+    RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, left, top, right, bottom);
 }
 
 static void DrawTitleCarousel(void)
@@ -2154,8 +2234,8 @@ static void DrawTitleCarousel(void)
 
     titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
 
-    SetAPen(&renderRP, 1);
-    RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, SCREEN_H - 1);
+    EnableTitleCopperGradient();
+    DrawTitlePanelBase(TITLE_CAROUSEL_Y - 8, SCREEN_H - 1);
     SetAPen(&renderRP, 8);
     RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, TITLE_CAROUSEL_Y - 6);
 
@@ -2169,9 +2249,7 @@ static void DrawTitleCarousel(void)
         while (variant >= ROBOT_VARIANTS) variant -= ROBOT_VARIANTS;
 
         if (slot == (ROBOT_VARIANTS / 2)) {
-            SetAPen(&renderRP, 13);
-            RectFill(&renderRP, x - 4, y - 4, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 3, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 3);
-            DrawTitleSelectorGradient(x, y);
+            DrawTitleSelectorBox(x, y);
         } else {
             SetAPen(&renderRP, 8);
             RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
@@ -2301,6 +2379,7 @@ static void DrawFrame(void)
     WORD i;
 
     if (gameState == GAME_INTRO) {
+        DisableTitleCopperGradient(TRUE);
         DrawIntroTitleImage();
         return;
     }
@@ -2312,10 +2391,12 @@ static void DrawFrame(void)
         MiniTextCentered(&renderRP, 86, "A TINY AMIGA ROBOT CLEANER", 7, 2);
         MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
         MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
-        MiniTextCentered(&renderRP, 142, "EVERY 5 DIRT EARNS POWERS", 14, 2);
+        MiniTextCentered(&renderRP, 134, "EVERY 5 DIRT EARNS POWERS", 14, 2);
         DrawTitleCarousel();
         return;
     }
+
+    DisableTitleCopperGradient(TRUE);
 
     if (roomBM) {
         BltBitMap(roomBM, 0, 0,
@@ -2585,6 +2666,8 @@ static BOOL OpenGameScreen(void)
 
 static void CloseGameScreen(void)
 {
+    DisableTitleCopperGradient(FALSE);
+
     if (win) {
         CloseWindow(win);
         win = NULL;
