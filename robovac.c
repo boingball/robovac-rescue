@@ -2127,6 +2127,26 @@ static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD d
                           titleCarouselMaskBM->Planes[0]);
 }
 
+static void DrawTitleCarouselPanelGradient(void)
+{
+    static const UBYTE gradientPens[] = {
+        7, 6, 7, 6, 8, 6, 8, 1, 8, 6, 8, 6, 7, 6, 7, 6,
+        6, 8, 6, 8, 1, 8, 6, 8, 6, 7, 6, 7
+    };
+    WORD top = TITLE_CAROUSEL_Y - 8;
+    WORD bottom = SCREEN_H - 1;
+    WORD h = bottom - top + 1;
+    WORD bandCount = sizeof(gradientPens) / sizeof(gradientPens[0]);
+    WORD band;
+
+    for (band = 0; band < bandCount; band++) {
+        WORD y0 = top + (band * h) / bandCount;
+        WORD y1 = top + ((band + 1) * h) / bandCount - 1;
+        SetAPen(&renderRP, gradientPens[band]);
+        RectFill(&renderRP, 0, y0, SCREEN_W - 1, y1);
+    }
+}
+
 static void DrawTitleCarousel(void)
 {
     char b[80];
@@ -2135,8 +2155,7 @@ static void DrawTitleCarousel(void)
 
     titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
 
-    SetAPen(&renderRP, 1);
-    RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, SCREEN_H - 1);
+    DrawTitleCarouselPanelGradient();
     SetAPen(&renderRP, 8);
     RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, TITLE_CAROUSEL_Y - 6);
 
