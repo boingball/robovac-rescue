@@ -2416,7 +2416,7 @@ static void DrawIntroTitleImage(void)
 
 static void DrawPauseMenu(void)
 {
-    static const char *items[2] = { "RESTART LEVEL", "QUIT" };
+    static const char *items[2] = { "RESTART LEVEL", "MAIN MENU" };
     WORD left = 76;
     WORD top = 82;
     WORD right = 244;
@@ -2537,7 +2537,8 @@ static void ActivatePauseMenuSelection(void)
     if (pauseMenuSelection == 0) {
         ResetLevel();
     } else {
-        running = FALSE;
+        ClosePauseMenu();
+        EnterTitleScreen();
     }
 }
 
