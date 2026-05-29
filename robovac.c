@@ -3121,6 +3121,7 @@ static void CloseGameScreen(void)
 
     FreeIntroTitleImage();
     FreeTitleCarouselCache();
+    FreeTitleMusic();
 
     if (robotCacheBM) {
         FreeBitMap(robotCacheBM);
