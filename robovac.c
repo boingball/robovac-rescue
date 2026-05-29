@@ -145,6 +145,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MOD_PATTERN_BYTES (MOD_ROWS * MOD_CHANNELS * 4)
 #define MOD_DEFAULT_SPEED 6
 #define MOD_MAX_SPEED 31
+#define TITLE_MUSIC_TICKS_PER_FRAME 3
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
 #endif
@@ -765,6 +766,8 @@ static void PlayCurrentModRow(void)
 
 static void StepTitleMusic(void)
 {
+    WORD ticks;
+
     if (!titleMusic.loaded) return;
 
     if (!titleMusic.playing) {
@@ -775,19 +778,26 @@ static void StepTitleMusic(void)
         titleMusic.speed = MOD_DEFAULT_SPEED;
     }
 
-    if (titleMusic.tick == 0) {
-        PlayCurrentModRow();
-    }
+    /*
+     * Rendering the full title/intro scene is heavier than a plain VBlank
+     * replay interrupt on the target machines, so advance a few ProTracker
+     * ticks per rendered frame to keep the startup module near authored tempo.
+     */
+    for (ticks = 0; ticks < TITLE_MUSIC_TICKS_PER_FRAME; ticks++) {
+        if (titleMusic.tick == 0) {
+            PlayCurrentModRow();
+        }
 
-    titleMusic.tick++;
-    if (titleMusic.tick >= titleMusic.speed) {
-        titleMusic.tick = 0;
-        titleMusic.row++;
-        if (titleMusic.row >= MOD_ROWS) {
-            titleMusic.row = 0;
-            titleMusic.position++;
-            if (titleMusic.position >= titleMusic.songLength) {
-                titleMusic.position = 0;
+        titleMusic.tick++;
+        if (titleMusic.tick >= titleMusic.speed) {
+            titleMusic.tick = 0;
+            titleMusic.row++;
+            if (titleMusic.row >= MOD_ROWS) {
+                titleMusic.row = 0;
+                titleMusic.position++;
+                if (titleMusic.position >= titleMusic.songLength) {
+                    titleMusic.position = 0;
+                }
             }
         }
     }
