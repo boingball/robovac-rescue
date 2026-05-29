@@ -923,73 +923,6 @@ static void CaptureIntroPalette(ULONG *cRegs, ULONG numColors)
 }
 
 
-static void CentreIntroTitleBitmap(void)
-{
-    WORD minX = introTitleW;
-    WORD minY = introTitleH;
-    WORD maxX = -1;
-    WORD maxY = -1;
-    WORD offsetX = 0;
-    WORD offsetY = 0;
-    WORD x;
-    WORD y;
-    struct RastPort centeredRP;
-    struct BitMap *centeredBM;
-
-    if (!introTitleBM || introTitleW <= 0 || introTitleH <= 0) return;
-
-    for (y = 0; y < introTitleH; y++) {
-        for (x = 0; x < introTitleW; x++) {
-            LONG pen = ReadPixel(&introTitleRP, x, y);
-            if (pen > 0) {
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
-            }
-        }
-    }
-
-    if (maxX < minX || maxY < minY) return;
-
-    offsetX = (introTitleW - (maxX - minX + 1)) / 2 - minX;
-    offsetY = (introTitleH - (maxY - minY + 1)) / 2 - minY;
-    if (offsetX == 0 && offsetY == 0) return;
-
-    centeredBM = AllocBitMap(introTitleW, introTitleH, DEPTH,
-                             BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
-    if (!centeredBM) return;
-
-    InitRastPort(&centeredRP);
-    centeredRP.BitMap = centeredBM;
-    SetAPen(&centeredRP, 0);
-    RectFill(&centeredRP, 0, 0, introTitleW - 1, introTitleH - 1);
-
-    for (y = 0; y < introTitleH; y++) {
-        for (x = 0; x < introTitleW; x++) {
-            LONG pen;
-            WORD tx;
-            WORD ty;
-
-            pen = ReadPixel(&introTitleRP, x, y);
-            tx = x + offsetX;
-            ty = y + offsetY;
-
-            if (pen <= 0) continue;
-            if (tx < 0 || ty < 0 || tx >= introTitleW || ty >= introTitleH) continue;
-
-            SetAPen(&centeredRP, (UBYTE)pen);
-            WritePixel(&centeredRP, tx, ty);
-        }
-    }
-
-    BltBitMap(centeredBM, 0, 0,
-              introTitleBM, 0, 0,
-              introTitleW, introTitleH,
-              0xC0, 0xFF, NULL);
-    FreeBitMap(centeredBM);
-}
-
 static void BuildIntroEffectFrame(WORD frame)
 {
     static const WORD sinTable[INTRO_CACHE_FRAMES] = {
@@ -1065,11 +998,37 @@ static BOOL BuildIntroEffectCache(void)
     return TRUE;
 }
 
+static void DebugIntroTitleCachePens(struct RastPort *srcRP)
+{
+    WORD sampleX[4];
+    WORD sampleY[4];
+    WORD i;
+
+    if (!srcRP || !introTitleBM || introTitleW <= 0 || introTitleH <= 0) return;
+
+    sampleX[0] = 0;
+    sampleY[0] = 0;
+    sampleX[1] = introTitleW / 4;
+    sampleY[1] = introTitleH / 4;
+    sampleX[2] = introTitleW / 2;
+    sampleY[2] = introTitleH / 2;
+    sampleX[3] = introTitleW - 1;
+    sampleY[3] = introTitleH - 1;
+
+    for (i = 0; i < 4; i++) {
+        LONG srcPen = ReadPixel(srcRP, sampleX[i], sampleY[i]);
+        LONG cachedPen = ReadPixel(&introTitleRP, sampleX[i], sampleY[i]);
+        printf("Intro title cache pen check (%ld,%ld): source=%ld cache=%ld\n",
+               (LONG)sampleX[i], (LONG)sampleY[i], srcPen, cachedPen);
+    }
+}
+
 static BOOL LoadIntroTitleImage(void)
 {
     Object *dto;
     struct BitMapHeader *bmhd = NULL;
     struct BitMap *srcBM = NULL;
+    struct RastPort srcRP;
     ULONG *cRegs = NULL;
     ULONG numColors = 0;
 
@@ -1117,10 +1076,13 @@ static BOOL LoadIntroTitleImage(void)
               introTitleW, introTitleH,
               0xC0, 0xFF, NULL);
 
+    InitRastPort(&srcRP);
+    srcRP.BitMap = srcBM;
+
     InitRastPort(&introTitleRP);
     introTitleRP.BitMap = introTitleBM;
 
-    CentreIntroTitleBitmap();
+    DebugIntroTitleCachePens(&srcRP);
     BuildIntroEffectCache();
 
     CaptureIntroPalette(cRegs, numColors);
@@ -2007,9 +1969,7 @@ static void EnterTitleScreen(void)
 {
     gameState = GAME_TITLE;
     introTicks = 0;
-    if (introPaletteActive) {
-        LoadGamePalette();
-    }
+    LoadGamePalette();
 }
 
 static void StepIntro(void)
