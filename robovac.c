@@ -146,6 +146,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MOD_DEFAULT_SPEED 6
 #define MOD_MAX_SPEED 31
 #define TITLE_MUSIC_TICKS_PER_FRAME 3
+#define TITLE_MUSIC_SILENCE_PERIOD 428
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
 #endif
@@ -610,12 +611,35 @@ static UWORD AudioDmaBit(WORD channel)
     }
 }
 
+static void ClearTitleAudioChannels(UWORD *safePtr, BOOL waitForDmaStop)
+{
+    WORD channel;
+
+    custom.dmacon = TITLE_MUSIC_DMA_MASK;
+    for (channel = 0; channel < MOD_CHANNELS; channel++) {
+        custom.aud[channel].ac_vol = 0;
+    }
+
+    if (waitForDmaStop && scr) {
+        WaitTOF();
+        WaitTOF();
+    }
+
+    for (channel = 0; channel < MOD_CHANNELS; channel++) {
+        custom.aud[channel].ac_ptr = safePtr;
+        custom.aud[channel].ac_len = 1;
+        custom.aud[channel].ac_per = TITLE_MUSIC_SILENCE_PERIOD;
+        custom.aud[channel].ac_vol = 0;
+    }
+    custom.dmacon = TITLE_MUSIC_DMA_MASK;
+}
+
 static void StopTitleMusic(void)
 {
-    if (titleMusic.playing) {
-        custom.dmacon = TITLE_MUSIC_DMA_MASK;
-        titleMusic.playing = FALSE;
-    }
+    BOOL hadAudio = titleMusic.loaded || titleMusic.playing;
+
+    ClearTitleAudioChannels((UWORD *)titleMusic.moduleData, hadAudio);
+    titleMusic.playing = FALSE;
     titleMusic.position = 0;
     titleMusic.row = 0;
     titleMusic.tick = 0;
@@ -714,6 +738,7 @@ static void FreeTitleMusic(void)
         FreeMem(titleMusic.moduleData, titleMusic.moduleSize);
     }
     memset(&titleMusic, 0, sizeof(titleMusic));
+    ClearTitleAudioChannels(NULL, FALSE);
 }
 
 static void TriggerModNote(WORD channel, UBYTE sampleNumber, UWORD period)
@@ -3086,7 +3111,7 @@ static BOOL OpenGameScreen(void)
 
 static void CloseGameScreen(void)
 {
-    StopTitleMusic();
+    FreeTitleMusic();
     FreeTitleCopperGradient();
 
     if (win) {
