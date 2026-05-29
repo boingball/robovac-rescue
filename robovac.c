@@ -897,12 +897,8 @@ static void LoadIntroPaletteLevel(WORD level)
 }
 
 
-static void NormaliseIntroTitleBitmap(void)
+static void CentreIntroTitleBitmap(void)
 {
-    LONG cornerPens[4];
-    LONG bgPen;
-    WORD bgCount;
-    WORD bestCount;
     WORD minX = introTitleW;
     WORD minY = introTitleH;
     WORD maxX = -1;
@@ -916,33 +912,10 @@ static void NormaliseIntroTitleBitmap(void)
 
     if (!introTitleBM || introTitleW <= 0 || introTitleH <= 0) return;
 
-    cornerPens[0] = ReadPixel(&introTitleRP, 0, 0);
-    cornerPens[1] = ReadPixel(&introTitleRP, introTitleW - 1, 0);
-    cornerPens[2] = ReadPixel(&introTitleRP, 0, introTitleH - 1);
-    cornerPens[3] = ReadPixel(&introTitleRP, introTitleW - 1, introTitleH - 1);
-
-    bgPen = cornerPens[0];
-    bestCount = 0;
-    for (x = 0; x < 4; x++) {
-        bgCount = 0;
-        for (y = 0; y < 4; y++) {
-            if (cornerPens[y] == cornerPens[x]) bgCount++;
-        }
-        if (bgCount > bestCount) {
-            bestCount = bgCount;
-            bgPen = cornerPens[x];
-        }
-    }
-
     for (y = 0; y < introTitleH; y++) {
         for (x = 0; x < introTitleW; x++) {
             LONG pen = ReadPixel(&introTitleRP, x, y);
-            if (pen == bgPen) {
-                if (pen != 0) {
-                    SetAPen(&introTitleRP, 0);
-                    WritePixel(&introTitleRP, x, y);
-                }
-            } else if (pen > 0) {
+            if (pen > 0) {
                 if (x < minX) minX = x;
                 if (x > maxX) maxX = x;
                 if (y < minY) minY = y;
@@ -1124,7 +1097,7 @@ static BOOL LoadIntroTitleImage(void)
     InitRastPort(&introTitleRP);
     introTitleRP.BitMap = introTitleBM;
 
-    NormaliseIntroTitleBitmap();
+    CentreIntroTitleBitmap();
     BuildIntroEffectCache();
 
     if (cRegs && numColors) {
