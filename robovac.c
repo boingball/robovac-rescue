@@ -89,10 +89,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TILE_MARKER    7
 #define TILE_COUNT     8
 
-#define GAME_TITLE      0
-#define GAME_PLAYING    1
-#define GAME_ROUND_END  2
-#define GAME_MATCH_END  3
+#define GAME_INTRO      0
+#define GAME_TITLE      1
+#define GAME_PLAYING    2
+#define GAME_ROUND_END  3
+#define GAME_MATCH_END  4
 
 #define RAW_ESC     0x45
 #define RAW_LEFT    0x4F
@@ -112,6 +113,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define TITLE_CAROUSEL_Y 172
 #define TITLE_ROBOT_SCALE 2
+#define INTRO_TITLE_W 300
+#define INTRO_TITLE_H 100
+#define INTRO_HOLD_FRAMES 90
+#define INTRO_EFFECT_FRAMES 64
+#define INTRO_TOTAL_FRAMES (INTRO_HOLD_FRAMES + INTRO_EFFECT_FRAMES)
 #define TITLE_SPIN_STEPS 32
 #define TITLE_SPIN_STEPS_FALLBACK 16
 #define TITLE_ROT_W (ROBOT_W * TITLE_ROBOT_SCALE)
@@ -157,6 +163,12 @@ static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
 static WORD titleCarouselFrameCount = 0;
+static struct BitMap *introTitleBM = NULL;
+static WORD introTitleW = 0;
+static WORD introTitleH = 0;
+static WORD introTicks = 0;
+static BOOL introPaletteActive = FALSE;
+static UWORD introPalette[32];
 
 static UBYTE map[MAP_H][MAP_W];
 
@@ -296,6 +308,7 @@ static void StepPlayerBolt(void);
 static void DrawTitleCarousel(void);
 static void TriggerRobotPower(WORD id);
 static WORD SpawnDirtTiles(WORD count);
+static void EnterTitleScreen(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -850,6 +863,116 @@ static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
     return loaded;
 }
 
+
+static void LoadGamePalette(void)
+{
+    LoadRGB4(&scr->ViewPort, palette, 32);
+    introPaletteActive = FALSE;
+}
+
+static void LoadIntroPaletteLevel(WORD level)
+{
+    UWORD faded[32];
+    WORD i;
+
+    if (!scr) return;
+    if (level < 0) level = 0;
+    if (level > INTRO_EFFECT_FRAMES) level = INTRO_EFFECT_FRAMES;
+
+    for (i = 0; i < 32; i++) {
+        WORD r = (introPalette[i] >> 8) & 0xF;
+        WORD g = (introPalette[i] >> 4) & 0xF;
+        WORD b = introPalette[i] & 0xF;
+        r = (r * level) / INTRO_EFFECT_FRAMES;
+        g = (g * level) / INTRO_EFFECT_FRAMES;
+        b = (b * level) / INTRO_EFFECT_FRAMES;
+        faded[i] = (UWORD)((r << 8) | (g << 4) | b);
+    }
+
+    LoadRGB4(&scr->ViewPort, faded, 32);
+    introPaletteActive = TRUE;
+}
+
+static BOOL LoadIntroTitleImage(void)
+{
+    Object *dto;
+    struct BitMapHeader *bmhd = NULL;
+    struct BitMap *srcBM = NULL;
+    ULONG *cRegs = NULL;
+    ULONG numColors = 0;
+    WORD i;
+
+    for (i = 0; i < 32; i++) introPalette[i] = 0;
+
+    dto = NewDTObject("PROGDIR:tiles/robovac-title.iff",
+                      DTA_GroupID, GID_PICTURE,
+                      PDTA_Remap, FALSE,
+                      TAG_DONE);
+    if (!dto) return FALSE;
+
+    if (!DoDTMethod(dto, NULL, NULL, DTM_PROCLAYOUT, 0L, TRUE)) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
+
+    if (!GetDTAttrs(dto,
+                    PDTA_BitMapHeader, (ULONG)&bmhd,
+                    PDTA_BitMap, (ULONG)&srcBM,
+                    PDTA_CRegs, (ULONG)&cRegs,
+                    PDTA_NumColors, (ULONG)&numColors,
+                    TAG_DONE) || !bmhd || !srcBM) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
+
+    introTitleW = bmhd->bmh_Width;
+    introTitleH = bmhd->bmh_Height;
+    if (introTitleW <= 0 || introTitleH <= 0 || introTitleW > SCREEN_W || introTitleH > SCREEN_H) {
+        DisposeDTObject(dto);
+        introTitleW = 0;
+        introTitleH = 0;
+        return FALSE;
+    }
+
+    introTitleBM = AllocBitMap(introTitleW, introTitleH, DEPTH,
+                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    if (!introTitleBM) {
+        DisposeDTObject(dto);
+        introTitleW = 0;
+        introTitleH = 0;
+        return FALSE;
+    }
+
+    BltBitMap(srcBM, 0, 0,
+              introTitleBM, 0, 0,
+              introTitleW, introTitleH,
+              0xC0, 0xFF, NULL);
+
+    if (cRegs && numColors) {
+        ULONG maxCols = (numColors > 32) ? 32 : numColors;
+        for (i = 0; i < (WORD)maxCols; i++) {
+            introPalette[i] = (UWORD)(((cRegs[i * 3 + 0] >> 28) << 8) |
+                                      ((cRegs[i * 3 + 1] >> 28) << 4) |
+                                      (cRegs[i * 3 + 2] >> 28));
+        }
+    } else {
+        for (i = 0; i < 32; i++) introPalette[i] = palette[i];
+    }
+
+    DisposeDTObject(dto);
+    return TRUE;
+}
+
+static void FreeIntroTitleImage(void)
+{
+    if (introTitleBM) {
+        FreeBitMap(introTitleBM);
+        introTitleBM = NULL;
+    }
+    introTitleW = 0;
+    introTitleH = 0;
+}
+
 static BOOL LoadRobotSheetIntoCache(void)
 {
     Object *dto = NULL;
@@ -1163,7 +1286,7 @@ static BOOL InitRobotBobs(void)
         return FALSE;
     }
 
-    LoadRGB4(&scr->ViewPort, palette, 32);
+    LoadGamePalette();
 
     return TRUE;
 }
@@ -1708,9 +1831,50 @@ static void CheckEndState(void)
     }
 }
 
+
+static void EnterTitleScreen(void)
+{
+    gameState = GAME_TITLE;
+    introTicks = 0;
+    if (introPaletteActive) {
+        LoadGamePalette();
+    }
+}
+
+static void StepIntro(void)
+{
+    WORD fadeLevel;
+
+    if (gameState != GAME_INTRO) return;
+    if (introTicks > INTRO_TOTAL_FRAMES) {
+        EnterTitleScreen();
+        return;
+    }
+    if (!introTitleBM) {
+        EnterTitleScreen();
+        return;
+    }
+
+    if (introTicks == 0 && !introPaletteActive) {
+        LoadIntroPaletteLevel(INTRO_EFFECT_FRAMES);
+    }
+
+    if (introTicks >= INTRO_HOLD_FRAMES) {
+        fadeLevel = INTRO_TOTAL_FRAMES - introTicks;
+        LoadIntroPaletteLevel(fadeLevel);
+    }
+
+    introTicks++;
+}
+
 static void StepGame(void)
 {
     WORD i;
+
+    if (gameState == GAME_INTRO) {
+        StepIntro();
+        return;
+    }
 
     if (gameState != GAME_PLAYING) return;
 
@@ -1981,9 +2145,86 @@ static void DrawHud(void)
     DrawRobotHealthStrip();
 }
 
+
+static void DrawIntroTitleImage(void)
+{
+    static const WORD sinTable[TITLE_SPIN_STEPS] = {
+        0,12,24,36,45,53,59,63,64,63,59,53,45,36,24,12,
+        0,-12,-24,-36,-45,-53,-59,-63,-64,-63,-59,-53,-45,-36,-24,-12
+    };
+    static const WORD cosTable[TITLE_SPIN_STEPS] = {
+        64,63,59,53,45,36,24,12,0,-12,-24,-36,-45,-53,-59,-63,
+        -64,-63,-59,-53,-45,-36,-24,-12,0,12,24,36,45,53,59,63
+    };
+    struct RastPort srcRP;
+    WORD x;
+    WORD y;
+    WORD dstX;
+    WORD dstY;
+    WORD effectTick;
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
+
+    if (!introTitleBM) return;
+
+    dstX = (SCREEN_W - introTitleW) / 2;
+    dstY = (SCREEN_H - introTitleH) / 2;
+    effectTick = introTicks - INTRO_HOLD_FRAMES;
+
+    if (effectTick <= 0) {
+        BltBitMapRastPort(introTitleBM, 0, 0,
+                          &renderRP, dstX, dstY,
+                          introTitleW, introTitleH,
+                          0xC0);
+        return;
+    }
+
+    InitRastPort(&srcRP);
+    srcRP.BitMap = introTitleBM;
+
+    {
+        WORD phase = ((effectTick * TITLE_SPIN_STEPS) / INTRO_EFFECT_FRAMES) & (TITLE_SPIN_STEPS - 1);
+        WORD sinv = sinTable[phase];
+        WORD cosv = cosTable[phase];
+        WORD scale = 64 - ((effectTick * 40) / INTRO_EFFECT_FRAMES);
+        WORD cx = introTitleW / 2;
+        WORD cy = introTitleH / 2;
+
+        if (scale < 20) scale = 20;
+
+        for (y = 0; y < introTitleH; y++) {
+            for (x = 0; x < introTitleW; x++) {
+                LONG pen = ReadPixel(&srcRP, x, y);
+                WORD rx;
+                WORD ry;
+                WORD tx;
+                WORD ty;
+
+                if (pen <= 0) continue;
+
+                rx = x - cx;
+                ry = y - cy;
+                tx = SCREEN_W / 2 + (((rx * cosv) - (ry * sinv)) * scale) / (64 * 64);
+                ty = SCREEN_H / 2 + (((rx * sinv) + (ry * cosv)) * scale) / (64 * 64);
+
+                if (tx >= 0 && ty >= 0 && tx < SCREEN_W && ty < SCREEN_H) {
+                    SetAPen(&renderRP, (UBYTE)pen);
+                    WritePixel(&renderRP, tx, ty);
+                }
+            }
+        }
+    }
+}
+
 static void DrawFrame(void)
 {
     WORD i;
+
+    if (gameState == GAME_INTRO) {
+        DrawIntroTitleImage();
+        return;
+    }
 
     if (gameState == GAME_TITLE) {
         SetAPen(&renderRP, 0);
@@ -2106,6 +2347,11 @@ static void HandleRawKey(UWORD rawCode)
         return;
     }
 
+    if (!keyUpEvent && gameState == GAME_INTRO) {
+        EnterTitleScreen();
+        return;
+    }
+
     if (!keyUpEvent && gameState == GAME_TITLE) {
         if (code == RAW_LEFT) { selectedPlayerVariant--; if (selectedPlayerVariant < 0) selectedPlayerVariant = ROBOT_VARIANTS - 1; return; }
         if (code == RAW_RIGHT) { selectedPlayerVariant++; if (selectedPlayerVariant >= ROBOT_VARIANTS) selectedPlayerVariant = 0; return; }
@@ -2150,6 +2396,7 @@ static void PollWindowMessages(void)
             HandleRawKey(code);
         } else if (cls == IDCMP_MOUSEBUTTONS) {
             if (code == MENUDOWN) running = FALSE;
+            if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
             if (code == SELECTDOWN && gameState == GAME_TITLE) StartWithRivals(aiRivals);
         }
     }
@@ -2218,6 +2465,10 @@ static BOOL OpenGameScreen(void)
         printf("Robot BOB cache allocation failed; fallback drawing enabled\n");
     }
 
+    if (!LoadIntroTitleImage()) {
+        printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
+    }
+
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
         WA_Left,         0,
@@ -2233,6 +2484,7 @@ static BOOL OpenGameScreen(void)
 
     if (!win) {
         printf("Could not open game window\n");
+        FreeIntroTitleImage();
         FreeTitleCarouselCache();
         if (robotCacheBM) FreeBitMap(robotCacheBM);
         if (robotMaskBM) FreeBitMap(robotMaskBM);
@@ -2259,6 +2511,7 @@ static void CloseGameScreen(void)
         win = NULL;
     }
 
+    FreeIntroTitleImage();
     FreeTitleCarouselCache();
 
     if (robotCacheBM) {
@@ -2300,7 +2553,7 @@ int main(void)
         return 20;
     }
 
-    gameState = GAME_TITLE;
+    gameState = introTitleBM ? GAME_INTRO : GAME_TITLE;
 
     while (running) {
         PollWindowMessages();
