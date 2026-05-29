@@ -179,6 +179,7 @@ static WORD introTitleH = 0;
 static WORD introTicks = 0;
 static BOOL introPaletteActive = FALSE;
 static BOOL titleCopperActive = FALSE;
+static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 
 static UBYTE map[MAP_H][MAP_W];
@@ -884,10 +885,22 @@ static BOOL LoadPaletteCMap(const char *path, WORD firstPen, WORD maxPens)
 
 static void DisableTitleCopperGradient(BOOL reloadPalette)
 {
+    struct ViewPort *viewPort;
+    BOOL detached = FALSE;
+
     if (!scr || !titleCopperActive) return;
 
-    FreeVPortCopLists(&scr->ViewPort);
-    RethinkDisplay();
+    viewPort = win ? ViewPortAddress(win) : &scr->ViewPort;
+    Forbid();
+    if (viewPort->UCopIns == titleUCopList) {
+        viewPort->UCopIns = NULL;
+        detached = TRUE;
+    }
+    Permit();
+
+    if (detached) {
+        RethinkDisplay();
+    }
     titleCopperActive = FALSE;
 
     if (reloadPalette) {
@@ -897,7 +910,6 @@ static void DisableTitleCopperGradient(BOOL reloadPalette)
 
 static BOOL EnableTitleCopperGradient(void)
 {
-    struct UCopList *uCopList;
     struct ViewPort *viewPort;
     struct TagItem uCopTags[] = {
         { VTAG_USERCLIP_SET, TRUE },
@@ -910,46 +922,65 @@ static BOOL EnableTitleCopperGradient(void)
     if (!scr) return FALSE;
     if (titleCopperActive) return TRUE;
 
-    uCopList = (struct UCopList *)AllocMem(sizeof(struct UCopList), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!uCopList) return FALSE;
+    if (!titleUCopList) {
+        titleUCopList = (struct UCopList *)AllocMem(sizeof(struct UCopList), MEMF_PUBLIC | MEMF_CLEAR);
+        if (!titleUCopList) return FALSE;
 
-    CINIT(uCopList, TITLE_COPPER_BANDS);
+        CINIT(titleUCopList, TITLE_COPPER_BANDS);
 
-    for (band = 0; band < TITLE_COPPER_BANDS; band++) {
-        WORD y = top + ((band * height) / TITLE_COPPER_BANDS);
-        WORD r;
-        WORD g;
-        WORD b;
-        UWORD color;
+        for (band = 0; band < TITLE_COPPER_BANDS; band++) {
+            WORD y = top + ((band * height) / TITLE_COPPER_BANDS);
+            WORD r;
+            WORD g;
+            WORD b;
+            UWORD color;
 
-        if (band < (TITLE_COPPER_BANDS / 2)) {
-            WORD level = 12 - ((12 * band) / ((TITLE_COPPER_BANDS / 2) - 1));
-            r = level;
-            g = level;
-            b = level;
-        } else {
-            WORD level = (15 * (band - (TITLE_COPPER_BANDS / 2))) / ((TITLE_COPPER_BANDS / 2) - 1);
-            r = level;
-            g = level;
-            b = level;
+            if (band < (TITLE_COPPER_BANDS / 2)) {
+                WORD level = 12 - ((12 * band) / ((TITLE_COPPER_BANDS / 2) - 1));
+                r = level;
+                g = level;
+                b = level;
+            } else {
+                WORD level = (15 * (band - (TITLE_COPPER_BANDS / 2))) / ((TITLE_COPPER_BANDS / 2) - 1);
+                r = level;
+                g = level;
+                b = level;
+            }
+
+            color = (UWORD)((r << 8) | (g << 4) | b);
+            CWAIT(titleUCopList, y, 0);
+            CMOVE(titleUCopList, custom.color[TITLE_COPPER_PEN], color);
         }
 
-        color = (UWORD)((r << 8) | (g << 4) | b);
-        CWAIT(uCopList, y, 0);
-        CMOVE(uCopList, custom.color[TITLE_COPPER_PEN], color);
+        CEND(titleUCopList);
     }
-
-    CEND(uCopList);
 
     viewPort = win ? ViewPortAddress(win) : &scr->ViewPort;
     Forbid();
-    viewPort->UCopIns = uCopList;
+    viewPort->UCopIns = titleUCopList;
     Permit();
 
     VideoControl(viewPort->ColorMap, uCopTags);
     RethinkDisplay();
     titleCopperActive = TRUE;
     return TRUE;
+}
+
+
+static void FreeTitleCopperGradient(void)
+{
+    struct ViewPort *viewPort;
+
+    if (!scr || !titleUCopList) return;
+
+    viewPort = win ? ViewPortAddress(win) : &scr->ViewPort;
+    Forbid();
+    viewPort->UCopIns = titleUCopList;
+    Permit();
+
+    FreeVPortCopLists(viewPort);
+    titleUCopList = NULL;
+    titleCopperActive = FALSE;
 }
 
 static void LoadGamePalette(void)
@@ -2666,7 +2697,7 @@ static BOOL OpenGameScreen(void)
 
 static void CloseGameScreen(void)
 {
-    DisableTitleCopperGradient(FALSE);
+    FreeTitleCopperGradient();
 
     if (win) {
         CloseWindow(win);
