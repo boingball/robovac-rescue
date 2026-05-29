@@ -117,7 +117,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define INTRO_TITLE_H 100
 #define INTRO_HOLD_FRAMES 90
 #define INTRO_EFFECT_FRAMES 64
-#define INTRO_CACHE_FRAMES 16
+#define INTRO_SLICE_H 4
 #define INTRO_TOTAL_FRAMES (INTRO_HOLD_FRAMES + INTRO_EFFECT_FRAMES)
 #define TITLE_SPIN_STEPS 32
 #define TITLE_SPIN_STEPS_FALLBACK 16
@@ -166,7 +166,6 @@ static struct BitMap *titleCarouselMaskBM = NULL;
 static WORD titleCarouselFrameCount = 0;
 static struct RastPort introTitleRP;
 static struct BitMap *introTitleBM = NULL;
-static struct BitMap *introEffectBM = NULL;
 static WORD introTitleW = 0;
 static WORD introTitleH = 0;
 static WORD introTicks = 0;
@@ -923,112 +922,99 @@ static void CaptureIntroPalette(ULONG *cRegs, ULONG numColors)
 }
 
 
-static void BuildIntroEffectFrame(WORD frame)
+static WORD IntroEffectSin(WORD phase)
 {
-    static const WORD sinTable[INTRO_CACHE_FRAMES] = {
-        0,4,7,10,12,10,7,4,0,-4,-7,-10,-12,-10,-7,-4
+    static const WORD sinTable[32] = {
+         0,  3,  6,  8, 11, 12, 13, 12,
+        11,  8,  6,  3,  0, -3, -6, -8,
+       -11,-12,-13,-12,-11, -8, -6, -3,
+         0,  3,  6,  8, 11, 12, 13, 12
     };
-    static const WORD cosTable[INTRO_CACHE_FRAMES] = {
-        64,64,64,63,63,63,64,64,64,64,64,63,63,63,64,64
-    };
-    static const WORD scaleTable[INTRO_CACHE_FRAMES] = {
-        64,72,82,94,108,122,136,148,138,124,108,92,78,64,52,40
-    };
-    WORD srcCx = introTitleW / 2;
-    WORD srcCy = introTitleH / 2;
-    WORD dstCx = introTitleW / 2;
-    WORD dstCy = introTitleH / 2;
-    WORD dstBaseX = frame * introTitleW;
-    WORD sinv = sinTable[frame % INTRO_CACHE_FRAMES];
-    WORD cosv = cosTable[frame % INTRO_CACHE_FRAMES];
-    WORD scale = scaleTable[frame % INTRO_CACHE_FRAMES];
-    WORD x;
-    WORD y;
-    struct RastPort cacheRP;
 
-    if (!introTitleBM || !introEffectBM) return;
+    return sinTable[phase & 31];
+}
 
-    InitRastPort(&cacheRP);
-    cacheRP.BitMap = introEffectBM;
+static void DrawIntroTitleBobEffect(WORD dstX, WORD dstY, WORD effectTick)
+{
+    WORD progress;
+    WORD sliceY;
+    WORD centerY;
+    WORD squeeze;
+    WORD twist;
 
-    SetAPen(&cacheRP, 0);
-    RectFill(&cacheRP, dstBaseX, 0, dstBaseX + introTitleW - 1, introTitleH - 1);
+    if (!introTitleBM) return;
 
-    for (y = 0; y < introTitleH; y++) {
-        for (x = 0; x < introTitleW; x++) {
-            WORD dx;
-            WORD dy;
-            WORD sx;
-            WORD sy;
-            LONG pen;
+    if (effectTick < 0) effectTick = 0;
+    if (effectTick > INTRO_EFFECT_FRAMES) effectTick = INTRO_EFFECT_FRAMES;
 
-            dx = x - dstCx;
-            dy = y - dstCy;
-            sx = srcCx + (((dx * cosv) + (dy * sinv)) / scale);
-            sy = srcCy + (((dy * cosv) - (dx * sinv)) / scale);
+    progress = (effectTick * 64) / INTRO_EFFECT_FRAMES;
+    centerY = introTitleH / 2;
+    squeeze = (introTitleH * progress) / 160;
+    twist = 2 + (progress / 3);
 
-            if (sx < 0 || sy < 0 || sx >= introTitleW || sy >= introTitleH) continue;
+    for (sliceY = 0; sliceY < introTitleH; sliceY += INTRO_SLICE_H) {
+        WORD h = INTRO_SLICE_H;
+        WORD relY;
+        WORD absRelY;
+        WORD dstSliceY;
+        WORD wave;
+        WORD sliceScale;
+        WORD margin;
+        WORD srcX;
+        WORD srcY;
+        WORD srcW;
+        WORD outX;
 
-            pen = ReadPixel(&introTitleRP, sx, sy);
-            if (pen <= 0) continue;
+        if (sliceY + h > introTitleH) h = introTitleH - sliceY;
 
-            SetAPen(&cacheRP, (UBYTE)pen);
-            WritePixel(&cacheRP, dstBaseX + x, y);
+        relY = sliceY + (h / 2) - centerY;
+        absRelY = relY < 0 ? -relY : relY;
+        if (squeeze > 0 && absRelY > centerY - squeeze) continue;
+
+        sliceScale = 64 - ((progress * absRelY) / (centerY ? centerY : 1));
+        if (sliceScale < 24) sliceScale = 24;
+        margin = (introTitleW * (64 - sliceScale)) / 128;
+        srcX = margin;
+        srcY = sliceY;
+        srcW = introTitleW - (margin * 2);
+        if (srcW <= 0) continue;
+
+        wave = (IntroEffectSin((sliceY / INTRO_SLICE_H) + (effectTick / 2)) * twist) / 13;
+        outX = dstX + margin + wave;
+        dstSliceY = dstY + centerY + ((relY * (64 - (progress / 3))) / 64);
+
+        if (dstSliceY < 0) {
+            WORD clip = -dstSliceY;
+            if (clip >= h) continue;
+            srcY += clip;
+            h -= clip;
+            dstSliceY = 0;
         }
+        if (dstSliceY + h > SCREEN_H) h = SCREEN_H - dstSliceY;
+        if (h <= 0) continue;
+        if (outX < 0) {
+            WORD clip = -outX;
+            if (clip >= srcW) continue;
+            srcX += clip;
+            srcW -= clip;
+            outX = 0;
+        }
+        if (outX + srcW > SCREEN_W) srcW = SCREEN_W - outX;
+        if (srcW <= 0) continue;
+
+        BltBitMapRastPort(introTitleBM, srcX, srcY,
+                          &renderRP, outX, dstSliceY,
+                          srcW, h,
+                          0xC0);
     }
 }
 
-static BOOL BuildIntroEffectCache(void)
-{
-    WORD frame;
-
-    if (!introTitleBM || introTitleW <= 0 || introTitleH <= 0) return FALSE;
-
-    introEffectBM = AllocBitMap(introTitleW * INTRO_CACHE_FRAMES, introTitleH, DEPTH,
-                                BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
-    if (!introEffectBM) {
-        printf("Could not allocate intro title effect cache; using static title blits\n");
-        return FALSE;
-    }
-
-    for (frame = 0; frame < INTRO_CACHE_FRAMES; frame++) {
-        BuildIntroEffectFrame(frame);
-    }
-
-    return TRUE;
-}
-
-static void DebugIntroTitleCachePens(struct RastPort *srcRP)
-{
-    WORD sampleX[4];
-    WORD sampleY[4];
-    WORD i;
-
-    if (!srcRP || !introTitleBM || introTitleW <= 0 || introTitleH <= 0) return;
-
-    sampleX[0] = 0;
-    sampleY[0] = 0;
-    sampleX[1] = introTitleW / 4;
-    sampleY[1] = introTitleH / 4;
-    sampleX[2] = introTitleW / 2;
-    sampleY[2] = introTitleH / 2;
-    sampleX[3] = introTitleW - 1;
-    sampleY[3] = introTitleH - 1;
-
-    for (i = 0; i < 4; i++) {
-        LONG srcPen = ReadPixel(srcRP, sampleX[i], sampleY[i]);
-        LONG cachedPen = ReadPixel(&introTitleRP, sampleX[i], sampleY[i]);
-        printf("Intro title cache pen check (%ld,%ld): source=%ld cache=%ld\n",
-               (LONG)sampleX[i], (LONG)sampleY[i], srcPen, cachedPen);
-    }
-}
 
 static BOOL LoadIntroTitleImage(void)
 {
     Object *dto;
     struct BitMapHeader *bmhd = NULL;
     struct BitMap *srcBM = NULL;
-    struct RastPort srcRP;
     ULONG *cRegs = NULL;
     ULONG numColors = 0;
 
@@ -1076,14 +1062,8 @@ static BOOL LoadIntroTitleImage(void)
               introTitleW, introTitleH,
               0xC0, 0xFF, NULL);
 
-    InitRastPort(&srcRP);
-    srcRP.BitMap = srcBM;
-
     InitRastPort(&introTitleRP);
     introTitleRP.BitMap = introTitleBM;
-
-    DebugIntroTitleCachePens(&srcRP);
-    BuildIntroEffectCache();
 
     CaptureIntroPalette(cRegs, numColors);
 
@@ -1093,11 +1073,6 @@ static BOOL LoadIntroTitleImage(void)
 
 static void FreeIntroTitleImage(void)
 {
-    if (introEffectBM) {
-        FreeBitMap(introEffectBM);
-        introEffectBM = NULL;
-    }
-
     if (introTitleBM) {
         FreeBitMap(introTitleBM);
         introTitleBM = NULL;
@@ -2282,7 +2257,6 @@ static void DrawIntroTitleImage(void)
     WORD dstX;
     WORD dstY;
     WORD effectTick;
-    WORD frame = 0;
 
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
@@ -2293,13 +2267,8 @@ static void DrawIntroTitleImage(void)
     dstY = (SCREEN_H - introTitleH) / 2;
     effectTick = introTicks - INTRO_HOLD_FRAMES;
 
-    if (effectTick > 0 && introEffectBM) {
-        frame = (effectTick * INTRO_CACHE_FRAMES) / INTRO_EFFECT_FRAMES;
-        if (frame >= INTRO_CACHE_FRAMES) frame = INTRO_CACHE_FRAMES - 1;
-        BltBitMapRastPort(introEffectBM, frame * introTitleW, 0,
-                          &renderRP, dstX, dstY,
-                          introTitleW, introTitleH,
-                          0xC0);
+    if (effectTick > 0) {
+        DrawIntroTitleBobEffect(dstX, dstY, effectTick);
         return;
     }
 
