@@ -2127,6 +2127,25 @@ static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD d
                           titleCarouselMaskBM->Planes[0]);
 }
 
+static void DrawTitleSelectorGradient(WORD x, WORD y)
+{
+    static const UBYTE gradientPens[] = {4, 4, 6, 6, 8, 8, 1, 1, 0};
+    WORD left = x - 2;
+    WORD top = y - 2;
+    WORD right = x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1;
+    WORD bottom = y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1;
+    WORD h = bottom - top + 1;
+    WORD bandCount = sizeof(gradientPens) / sizeof(gradientPens[0]);
+    WORD band;
+
+    for (band = 0; band < bandCount; band++) {
+        WORD y0 = top + (band * h) / bandCount;
+        WORD y1 = top + ((band + 1) * h) / bandCount - 1;
+        SetAPen(&renderRP, gradientPens[band]);
+        RectFill(&renderRP, left, y0, right, y1);
+    }
+}
+
 static void DrawTitleCarousel(void)
 {
     char b[80];
@@ -2152,8 +2171,7 @@ static void DrawTitleCarousel(void)
         if (slot == (ROBOT_VARIANTS / 2)) {
             SetAPen(&renderRP, 13);
             RectFill(&renderRP, x - 4, y - 4, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 3, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 3);
-            SetAPen(&renderRP, 0);
-            RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
+            DrawTitleSelectorGradient(x, y);
         } else {
             SetAPen(&renderRP, 8);
             RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
