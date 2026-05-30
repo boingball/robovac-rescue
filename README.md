@@ -4,18 +4,20 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
 
 ## Controls
 
-- Player 1: arrow keys move; `B` shoots a bolt. Joystick 1 stays disabled until joystick 1 fire is pressed, then `J1` appears and joystick 1 can move/fire.
+- Player 1: arrow keys move; `B` shoots a bolt. Joystick 1 stays disabled until joystick 1 fire is pressed, then `J1` appears and joystick 1 can move/fire on menus; mouse/joystick port 1 movement is ignored during gameplay so the mouse cannot steer Player 1.
 - Player 2: `Z` left, `X` down, `C` right, `S` up; `V` shoots a bolt. Joystick 2 stays disabled until joystick 2 fire is pressed, then `J2` appears and joystick 2 can move/fire.
 - Title carousel:
   - By default this is a one-player game and Left/Right arrows choose Player 1's hoover.
   - Player 2 joins by pressing joystick 2 fire or `V`; the carousel switches to Player 2 selection.
-  - Player 2 chooses with joystick 2 left/right or `Z`/`C`, then presses joystick 2 fire or `V` again to lock Player 2 and return the carousel to Player 1.
+  - Player 2 chooses with joystick 2 left/right or `Z`/`C`, then presses joystick 2 fire or `V` again to lock Player 2 and open the two-player AI rival prompt.
+  - In the two-player AI prompt, choose `0`, `1`, `2`, or `3` AI rivals directly, or use Up/Down plus `R` / `Space` / Enter.
 - `R` / `Space`:
-  - On title: start match (or lock Player 2 if Player 2 is currently selecting)
+  - On title: start match (or lock Player 2 if Player 2 is currently selecting; locked two-player mode opens the AI rival prompt)
   - During match: reset current round
   - End of round: continue to next round
   - End of match: start new best-of-5 match
-- `1` / `2` / `3`: choose AI rival count from title screen
+- `1` / `2` / `3`: choose AI rival count from the one-player title screen
+- `0` / `1` / `2` / `3`: choose AI rival count from the two-player AI prompt
 - `Esc` or RMB: quit
 
 ## Robot Super Powers
@@ -73,10 +75,9 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
 - AI robots monitor their own battery and return to their own dock when low (<= 25), then resume cleaning after recharge.
 - Recharging only occurs on each robot's own dock.
 - Dock positions:
-  - Player: near top-left
-  - AI 1: near top-right
-  - AI 2: near bottom-left
-  - AI 3: near bottom-right
+  - Player 1: top-left
+  - Player 2: bottom-right
+  - AI rivals: remaining dock positions, starting with top-right and bottom-left
 
 ## Startup Title Image
 

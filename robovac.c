@@ -21,7 +21,8 @@
  *   P2 fire/V     - arm/lock two-player carousel selection from title screen
  *   R/Space    - start/reset
  *   Q          - open in-game restart/quit menu
- *   1/2/3      - start with 1/2/3 AI rivals from title screen
+ *   0/1/2/3    - choose AI rivals from two-player AI prompt
+ *   1/2/3      - start one-player match with 1/2/3 AI rivals from title screen
  *   O          - hidden 9-rival mode (battle mode)
  *   Esc/RMB    - quit
  */
@@ -118,6 +119,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_R       0x13
 #define RAW_SPACE   0x40
 #define RAW_RETURN  0x44
+#define RAW_0       0x0A
 #define RAW_1       0x01
 #define RAW_2       0x02
 #define RAW_3       0x03
@@ -277,6 +279,8 @@ static WORD roomType = 0;
 static BOOL running = TRUE;
 static BOOL pauseMenuOpen = FALSE;
 static WORD pauseMenuSelection = 0;
+static BOOL aiSelectMenuOpen = FALSE;
+static WORD aiSelectMenuSelection = 0;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -308,10 +312,38 @@ static struct Bolt playerBolts[MAX_HUMAN_PLAYERS] = {
 
 static ULONG rng = 0x1234ABCD;
 
-static const WORD robotStartX[MAX_ROBOTS] = {1, 18, 17, 18, 1, 2, 1, 18, 17, 18};
-static const WORD robotStartY[MAX_ROBOTS] = {1, 1, 1, 2, 12, 12, 11, 12, 12, 11};
-static const WORD robotDockX[MAX_ROBOTS]  = {1, 18, 18, 18, 1, 1, 1, 18, 18, 18};
-static const WORD robotDockY[MAX_ROBOTS]  = {1, 1, 1, 1, 12, 12, 12, 12, 12, 12};
+static const WORD robotStartXOnePlayer[MAX_ROBOTS] = {1, 18, 1, 18, 17, 2, 1, 18, 17, 18};
+static const WORD robotStartYOnePlayer[MAX_ROBOTS] = {1, 1, 11, 11, 10, 10, 10, 10, 11, 10};
+static const WORD robotDockXOnePlayer[MAX_ROBOTS]  = {1, 18, 1, 18, 17, 1, 1, 18, 18, 18};
+static const WORD robotDockYOnePlayer[MAX_ROBOTS]  = {1, 1, 11, 11, 11, 11, 11, 11, 11, 11};
+static const WORD robotStartXTwoPlayer[MAX_ROBOTS] = {1, 18, 18, 1, 17, 2, 1, 18, 17, 18};
+static const WORD robotStartYTwoPlayer[MAX_ROBOTS] = {1, 11, 1, 11, 10, 10, 10, 10, 11, 10};
+static const WORD robotDockXTwoPlayer[MAX_ROBOTS]  = {1, 18, 18, 1, 17, 1, 1, 18, 18, 18};
+static const WORD robotDockYTwoPlayer[MAX_ROBOTS]  = {1, 11, 1, 11, 11, 11, 11, 11, 11, 11};
+
+static WORD RobotStartX(WORD id)
+{
+    if (id < 0 || id >= MAX_ROBOTS) return 1;
+    return (humanPlayers >= 2) ? robotStartXTwoPlayer[id] : robotStartXOnePlayer[id];
+}
+
+static WORD RobotStartY(WORD id)
+{
+    if (id < 0 || id >= MAX_ROBOTS) return 1;
+    return (humanPlayers >= 2) ? robotStartYTwoPlayer[id] : robotStartYOnePlayer[id];
+}
+
+static WORD RobotDockX(WORD id)
+{
+    if (id < 0 || id >= MAX_ROBOTS) return 1;
+    return (humanPlayers >= 2) ? robotDockXTwoPlayer[id] : robotDockXOnePlayer[id];
+}
+
+static WORD RobotDockY(WORD id)
+{
+    if (id < 0 || id >= MAX_ROBOTS) return 1;
+    return (humanPlayers >= 2) ? robotDockYTwoPlayer[id] : robotDockYOnePlayer[id];
+}
 
 static UWORD palette[32] = {
     0x000, 0x222, 0xA52, 0xE84,
@@ -402,6 +434,9 @@ static void TriggerRobotPower(WORD id);
 static WORD SpawnDirtTiles(WORD count);
 static void EnterTitleScreen(void);
 static void ClosePauseMenu(void);
+static void CloseAiSelectMenu(void);
+static void OpenAiSelectMenu(WORD initialSelection);
+static void StartMatch(WORD players, WORD rivals);
 static void ClearMovementKeys(void);
 static BOOL LoadTitleMusic(void);
 static void FreeTitleMusic(void);
@@ -2008,9 +2043,9 @@ static void InitRobots(void)
     if (robotCount > MAX_ROBOTS) robotCount = MAX_ROBOTS;
 
     for (i = 0; i < robotCount; i++) {
-        SetRobotTile(i, robotStartX[i], robotStartY[i]);
-        aiPrevTileX[i] = robotStartX[i];
-        aiPrevTileY[i] = robotStartY[i];
+        SetRobotTile(i, RobotStartX(i), RobotStartY(i));
+        aiPrevTileX[i] = RobotStartX(i);
+        aiPrevTileY[i] = RobotStartY(i);
         robots[i].battery = maxBattery;
         robots[i].score = 0;
         robots[i].stunTicks = 0;
@@ -2110,7 +2145,7 @@ static void TriggerRobotPower(WORD id)
 static BOOL IsRobotDock(WORD id, WORD tx, WORD ty)
 {
     if (id < 0 || id >= MAX_ROBOTS) return FALSE;
-    return (tx == robotDockX[id] && ty == robotDockY[id]) ? TRUE : FALSE;
+    return (tx == RobotDockX(id) && ty == RobotDockY(id)) ? TRUE : FALSE;
 }
 
 static BOOL ValidDirtTile(WORD tx, WORD ty)
@@ -2118,7 +2153,7 @@ static BOOL ValidDirtTile(WORD tx, WORD ty)
     WORD i;
     if (map[ty][tx] != TILE_FLOOR) return FALSE;
     for (i = 0; i < MAX_ROBOTS; i++) {
-        if (IsRobotDock(i, tx, ty)) return FALSE;
+        if (tx == RobotDockX(i) && ty == RobotDockY(i)) return FALSE;
     }
     return TRUE;
 }
@@ -2176,6 +2211,11 @@ static void ResetLevel(void)
         }
     }
 
+    map[1][1] = TILE_DOCK;
+    map[1][18] = TILE_DOCK;
+    map[11][1] = TILE_DOCK;
+    map[11][18] = TILE_DOCK;
+
     SpawnRoundDirt(roundDirtTargets[roundIndex]);
     ClearMovementKeys();
     playerBolts[0].active = FALSE;
@@ -2216,8 +2256,8 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     }
 
     if (robots[id].battery < batteryCostPerMove) {
-        dockDistNow = AbsW(robots[id].tileX - robotDockX[id]) + AbsW(robots[id].tileY - robotDockY[id]);
-        dockDistNext = AbsW(nx - robotDockX[id]) + AbsW(ny - robotDockY[id]);
+        dockDistNow = AbsW(robots[id].tileX - RobotDockX(id)) + AbsW(robots[id].tileY - RobotDockY(id));
+        dockDistNext = AbsW(nx - RobotDockX(id)) + AbsW(ny - RobotDockY(id));
         if (dockDistNext >= dockDistNow) return FALSE;
     }
 
@@ -2353,9 +2393,9 @@ static void ChooseAiMove(WORD id)
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
 
-    if (robots[id].battery <= 25 || (robots[id].battery <= 0 && (AbsW(robots[id].tileX - robotDockX[id]) + AbsW(robots[id].tileY - robotDockY[id]) <= 4))) {
-        bestX = robotDockX[id];
-        bestY = robotDockY[id];
+    if (robots[id].battery <= 25 || (robots[id].battery <= 0 && (AbsW(robots[id].tileX - RobotDockX(id)) + AbsW(robots[id].tileY - RobotDockY(id)) <= 4))) {
+        bestX = RobotDockX(id);
+        bestY = RobotDockY(id);
     } else if (robots[id].battery < batteryCostPerMove) return;
 
     curX = robots[id].tileX;
@@ -2489,6 +2529,7 @@ static void EnterTitleScreen(void)
     titleSelectPlayer = 0;
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
+    CloseAiSelectMenu();
     joyEnabled[0] = FALSE;
     joyEnabled[1] = FALSE;
     ClearMovementKeys();
@@ -2910,6 +2951,41 @@ static void DrawPauseMenu(void)
     MiniTextCentered(&renderRP, bottom - 12, "ARROWS ENTER", 13, 1);
 }
 
+static void DrawAiSelectMenu(void)
+{
+    static const char *items[4] = { "0 AI", "1 AI", "2 AI", "3 AI" };
+    WORD left = 76;
+    WORD top = 70;
+    WORD right = 244;
+    WORD bottom = 188;
+    WORD i;
+
+    SetAPen(&renderRP, 1);
+    RectFill(&renderRP, left - 4, top - 4, right + 4, bottom + 4);
+    SetAPen(&renderRP, 13);
+    RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, left, top, right, bottom);
+
+    MiniTextCentered(&renderRP, top + 10, "TWO PLAYER AI", 7, 2);
+    MiniTextCentered(&renderRP, top + 28, "HOW MANY RIVALS?", 8, 1);
+
+    for (i = 0; i < 4; i++) {
+        WORD y = top + 44 + (i * 16);
+        WORD textX = (SCREEN_W - MiniTextWidth(items[i], 2)) / 2;
+
+        if (i == aiSelectMenuSelection) {
+            SetAPen(&renderRP, 4);
+            RectFill(&renderRP, left + 14, y - 4, right - 14, y + 13);
+            MiniTextScaled(&renderRP, left + 20, y, ">", 14, 2);
+            MiniTextScaled(&renderRP, right - 28, y, "<", 14, 2);
+        }
+        MiniTextScaled(&renderRP, textX, y, items[i], (i == aiSelectMenuSelection) ? 14 : 7, 2);
+    }
+
+    MiniTextCentered(&renderRP, bottom - 12, "0-3 OR ARROWS ENTER", 13, 1);
+}
+
 static void DrawFrame(void)
 {
     WORD i;
@@ -2929,6 +3005,9 @@ static void DrawFrame(void)
         MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
         MiniTextCentered(&renderRP, 134, "EVERY 5 DIRT EARNS POWERS", 14, 2);
         DrawTitleCarousel();
+        if (aiSelectMenuOpen) {
+            DrawAiSelectMenu();
+        }
         return;
     }
 
@@ -3004,6 +3083,64 @@ static void ClosePauseMenu(void)
     ClearMovementKeys();
 }
 
+static void OpenAiSelectMenu(WORD initialSelection)
+{
+    if (gameState != GAME_TITLE) return;
+    if (initialSelection < 0) initialSelection = 0;
+    if (initialSelection > 3) initialSelection = 3;
+    humanPlayers = 2;
+    titleTwoPlayerArmed = TRUE;
+    titlePlayer2Locked = TRUE;
+    titleSelectPlayer = 0;
+    aiSelectMenuOpen = TRUE;
+    aiSelectMenuSelection = initialSelection;
+    ClearMovementKeys();
+}
+
+static void CloseAiSelectMenu(void)
+{
+    aiSelectMenuOpen = FALSE;
+    aiSelectMenuSelection = 0;
+    ClearMovementKeys();
+}
+
+static void ActivateAiSelectMenu(void)
+{
+    WORD rivals = aiSelectMenuSelection;
+    CloseAiSelectMenu();
+    StartMatch(2, rivals);
+}
+
+static BOOL HandleAiSelectMenuRawKey(UWORD code, BOOL keyUpEvent)
+{
+    if (!aiSelectMenuOpen) return FALSE;
+    if (keyUpEvent) return TRUE;
+
+    if (code == RAW_Q || code == RAW_ESC) {
+        CloseAiSelectMenu();
+        return TRUE;
+    }
+    if (code == RAW_UP) {
+        aiSelectMenuSelection = (aiSelectMenuSelection + 3) & 3;
+        return TRUE;
+    }
+    if (code == RAW_DOWN) {
+        aiSelectMenuSelection = (aiSelectMenuSelection + 1) & 3;
+        return TRUE;
+    }
+    if (code == RAW_0 || code == RAW_1 || code == RAW_2 || code == RAW_3) {
+        aiSelectMenuSelection = (code == RAW_0) ? 0 : (WORD)code;
+        ActivateAiSelectMenu();
+        return TRUE;
+    }
+    if (code == RAW_RETURN || code == RAW_SPACE) {
+        ActivateAiSelectMenu();
+        return TRUE;
+    }
+
+    return TRUE;
+}
+
 static void ActivatePauseMenuSelection(void)
 {
     if (pauseMenuSelection == 0) {
@@ -3055,6 +3192,10 @@ static void StartMatch(WORD players, WORD rivals)
 
 static void StartWithRivals(WORD rivals)
 {
+    if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) {
+        OpenAiSelectMenu(rivals);
+        return;
+    }
     StartMatch(humanPlayers, rivals);
 }
 
@@ -3082,6 +3223,7 @@ static void TitleLockPlayer2(void)
     }
     titlePlayer2Locked = TRUE;
     titleSelectPlayer = 0;
+    OpenAiSelectMenu(aiRivals);
 }
 
 static void TitlePlayer2Fire(void)
@@ -3173,6 +3315,10 @@ static void HandleRawKey(UWORD rawCode)
     BOOL keyUpEvent = (rawCode & 0x80) ? TRUE : FALSE;
     UWORD code = rawCode & 0x7F;
 
+    if (HandleAiSelectMenuRawKey(code, keyUpEvent)) {
+        return;
+    }
+
     if (HandlePauseMenuRawKey(code, keyUpEvent)) {
         return;
     }
@@ -3198,6 +3344,7 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_Z) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; TitleChooseVariant(1, -1); return; }
         if (code == RAW_C) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; TitleChooseVariant(1, 1); return; }
         if (code == RAW_V) { TitlePlayer2Fire(); return; }
+        if (code == RAW_0 && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(0); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
         if (code == RAW_3) { StartWithRivals(3); return; }
@@ -3214,6 +3361,7 @@ static void HandleRawKey(UWORD rawCode)
         if (gameState == GAME_PLAYING) { ResetLevel(); }
         else if (gameState == GAME_ROUND_END) { roundIndex++; ResetLevel(); }
         else if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); }
+        else if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(aiRivals); }
         else { WORD i; roundIndex = 0; for (i=0;i<MAX_ROBOTS;i++){roundWins[i]=0; totalScores[i]=0;} ResetLevel(); }
         return;
     }
@@ -3295,7 +3443,16 @@ static void PollJoysticks(void)
         BOOL up = JOY_UP(dat[i]);
         BOOL down = JOY_DOWN(dat[i]);
         BOOL fire = ReadJoystickFire(i);
-        BOOL firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
+        BOOL firePressed;
+
+        if (gameState == GAME_PLAYING && i == 0) {
+            left = FALSE;
+            right = FALSE;
+            up = FALSE;
+            down = FALSE;
+            fire = FALSE;
+        }
+        firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
 
         if (firePressed) {
             joyEnabled[i] = TRUE;
@@ -3332,9 +3489,13 @@ static void PollWindowMessages(void)
         if (cls == IDCMP_RAWKEY) {
             HandleRawKey(code);
         } else if (cls == IDCMP_MOUSEBUTTONS) {
+            if (gameState == GAME_PLAYING) continue;
             if (code == MENUDOWN) running = FALSE;
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
-            if (code == SELECTDOWN && gameState == GAME_TITLE) StartWithRivals(aiRivals);
+            if (code == SELECTDOWN && gameState == GAME_TITLE) {
+                if (aiSelectMenuOpen) ActivateAiSelectMenu();
+                else StartWithRivals(aiRivals);
+            }
         }
     }
 }
