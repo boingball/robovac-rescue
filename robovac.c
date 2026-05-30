@@ -153,6 +153,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_COPPER_BANDS 32
 
 #define TITLE_MUSIC_PATH "PROGDIR:mods/robovac_startup.mod"
+#define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenuShort.8svx"
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
 #define COUNTDOWN_SAMPLE_PATH "PROGDIR:samples/countdown.8svx"
 #define GO_SAMPLE_PATH "PROGDIR:samples/go.8svx"
@@ -163,6 +164,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define COUNTDOWN_AUDIO_CHANNEL 1
 #define MAIN_MUSIC_LEFT_AUDIO_CHANNEL 0
 #define MAIN_MUSIC_RIGHT_AUDIO_CHANNEL 3
+#define MENU_MUSIC_LEFT_AUDIO_CHANNEL 0
+#define MENU_MUSIC_RIGHT_AUDIO_CHANNEL 3
 #define HOOVER_MOVE_AUDIO_CHANNEL 1
 #define BOLT_FIRE_AUDIO_CHANNEL 2
 #define PAULA_CLOCK_HZ 3546895UL
@@ -288,6 +291,7 @@ static BOOL titleCopperActive = FALSE;
 static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 static struct ModPlayer titleMusic;
+static struct OneShotSample menuMusicSample;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
@@ -308,6 +312,7 @@ static WORD titleSelectPlayer = 0;
 static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
+static UWORD *audioSilenceWord = NULL;
 
 static WORD dirtLeft = 0;
 static WORD moves = 0;
@@ -496,6 +501,11 @@ static void FreeTitleMusic(void);
 static void StepTitleMusic(void);
 static void ServiceTitleMusicForState(void);
 static void StopTitleMusic(void);
+static BOOL LoadMenuMusicSample(void);
+static void FreeMenuMusicSample(void);
+static void StartMenuMusic(void);
+static void StopMenuMusic(void);
+static void ServiceMenuMusicForState(void);
 static BOOL LoadRoundStartSamples(void);
 static void FreeRoundStartSamples(void);
 static void PlayGetReadySample(void);
@@ -751,6 +761,12 @@ static void PlayOneShotSample(struct OneShotSample *sample, WORD channel)
     custom.aud[channel].ac_per = sample->period;
     custom.aud[channel].ac_vol = sample->volume;
     custom.dmacon = DMAF_SETCLR | dmaBit;
+
+    if (audioSilenceWord) {
+        custom.aud[channel].ac_ptr = audioSilenceWord;
+        custom.aud[channel].ac_len = 1;
+    }
+
     sample->ticksRemaining = sample->playbackTicks;
     sample->playing = TRUE;
 }
@@ -1021,6 +1037,39 @@ static void FreeRoundStartSamples(void)
     FreeOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
     FreeOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
     FreeOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+}
+
+static BOOL LoadMenuMusicSample(void)
+{
+    return LoadOneShotSample(MENU_MUSIC_SAMPLE_PATH, &menuMusicSample, "menu music");
+}
+
+static void StopMenuMusic(void)
+{
+    StopOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+}
+
+static void StartMenuMusic(void)
+{
+    if (menuMusicSample.playing) return;
+    PlayLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    PlayLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+}
+
+static void ServiceMenuMusicForState(void)
+{
+    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
+        StartMenuMusic();
+    } else if (menuMusicSample.playing) {
+        StopMenuMusic();
+    }
+}
+
+static void FreeMenuMusicSample(void)
+{
+    StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+    FreeOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
 }
 
 static BOOL LoadGameplaySamples(void)
@@ -1359,11 +1408,8 @@ static void StepTitleMusic(void)
 
 static void ServiceTitleMusicForState(void)
 {
-    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
-        StepTitleMusic();
-    } else if (titleMusic.playing) {
-        StopTitleMusic();
-    }
+    if (titleMusic.playing) StopTitleMusic();
+    ServiceMenuMusicForState();
 }
 
 static BOOL LoadTileSheetIntoCache(void)
@@ -2720,6 +2766,7 @@ static void ResetLevel(void)
     const char **layout;
 
     StopTitleMusic();
+    StopMenuMusic();
     StopGameplaySamples();
     StopRoundStartSamples();
 
@@ -4196,6 +4243,11 @@ static BOOL OpenGameScreen(void)
 
     LoadRGB4(&scr->ViewPort, palette, 32);
 
+    audioSilenceWord = (UWORD *)AllocMem(sizeof(UWORD), MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
+    if (!audioSilenceWord) {
+        printf("Could not allocate chip RAM for audio silence guard; one-shot samples may repeat\n");
+    }
+
     renderBM = AllocBitMap(SCREEN_W, SCREEN_H, DEPTH,
                            BMF_CLEAR | BMF_DISPLAYABLE,
                            scr->RastPort.BitMap);
@@ -4245,7 +4297,7 @@ static BOOL OpenGameScreen(void)
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
     }
 
-    LoadTitleMusic();
+    LoadMenuMusicSample();
     LoadRoundStartSamples();
     LoadGameplaySamples();
 
@@ -4275,6 +4327,7 @@ static void CloseGameScreen(void)
 {
     FreeGameplaySamples();
     FreeRoundStartSamples();
+    FreeMenuMusicSample();
     FreeTitleMusic();
     FreeTitleCopperGradient();
 
@@ -4319,6 +4372,11 @@ static void CloseGameScreen(void)
     if (scr) {
         CloseScreen(scr);
         scr = NULL;
+    }
+
+    if (audioSilenceWord) {
+        FreeMem(audioSilenceWord, sizeof(UWORD));
+        audioSilenceWord = NULL;
     }
 }
 
