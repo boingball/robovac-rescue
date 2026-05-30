@@ -152,8 +152,14 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
 #define COUNTDOWN_SAMPLE_PATH "PROGDIR:samples/countdown.8svx"
 #define GO_SAMPLE_PATH "PROGDIR:samples/go.8svx"
+#define MAIN_MUSIC_SAMPLE_PATH "PROGDIR:samples/mainmusic-lo.8svx"
+#define BOLT_FIRE_SAMPLE_PATH "PROGDIR:samples/boltfire.8svx"
+#define HOOVER_MOVE_SAMPLE_PATH "PROGDIR:samples/hoover-go-loop-low.8svx"
 #define GET_READY_AUDIO_CHANNEL 0
 #define COUNTDOWN_AUDIO_CHANNEL 1
+#define MAIN_MUSIC_AUDIO_CHANNEL 0
+#define HOOVER_MOVE_AUDIO_CHANNEL 1
+#define BOLT_FIRE_AUDIO_CHANNEL 2
 #define PAULA_CLOCK_HZ 3546895UL
 #define ROUND_COUNTDOWN_SECONDS 3
 #define ROUND_COUNTDOWN_STEP_FRAMES 17
@@ -219,6 +225,8 @@ struct OneShotSample {
     UWORD period;
     UWORD playbackTicks;
     WORD ticksRemaining;
+    UWORD loopStartWords;
+    UWORD loopLengthWords;
     UBYTE volume;
     BOOL loaded;
     BOOL playing;
@@ -273,6 +281,9 @@ static struct ModPlayer titleMusic;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
+static struct OneShotSample mainMusicSample;
+static struct OneShotSample boltFireSample;
+static struct OneShotSample hooverMoveSample;
 
 static UBYTE map[MAP_H][MAP_W];
 
@@ -481,6 +492,12 @@ static void StopGetReadySample(void);
 static void StopCountdownSample(void);
 static void StopGoSample(void);
 static void StepRoundStartSamples(void);
+static BOOL LoadGameplaySamples(void);
+static void FreeGameplaySamples(void);
+static void StartMainGameMusic(void);
+static void StopGameplaySamples(void);
+static void ServiceHooverMoveSample(void);
+static void PlayBoltFireSample(void);
 static UWORD AudioDmaBit(WORD channel);
 static UWORD ReadBE16(const UBYTE *p);
 static ULONG ReadBE32(const UBYTE *p);
@@ -731,6 +748,29 @@ static void StepOneShotSample(struct OneShotSample *sample, WORD channel)
     if (sample->ticksRemaining <= 0) StopOneShotSample(sample, channel);
 }
 
+static void PlayLoopedSample(struct OneShotSample *sample, WORD channel)
+{
+    UWORD dmaBit;
+
+    if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
+
+    dmaBit = AudioDmaBit(channel);
+    custom.dmacon = dmaBit;
+    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+    custom.aud[channel].ac_len = sample->lengthWords;
+    custom.aud[channel].ac_per = sample->period;
+    custom.aud[channel].ac_vol = sample->volume;
+    custom.dmacon = DMAF_SETCLR | dmaBit;
+
+    if (sample->loopLengthWords > 0) {
+        custom.aud[channel].ac_ptr = (UWORD *)(sample->data + ((ULONG)sample->loopStartWords * 2UL));
+        custom.aud[channel].ac_len = sample->loopLengthWords;
+    }
+
+    sample->ticksRemaining = 0;
+    sample->playing = TRUE;
+}
+
 static void StopGetReadySample(void)
 {
     StopOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
@@ -770,6 +810,43 @@ static void StepRoundStartSamples(void)
     StepOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
 }
 
+static BOOL AnyHooverMoving(void)
+{
+    WORD i;
+
+    if (gameState != GAME_PLAYING || roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) return FALSE;
+    for (i = 0; i < robotCount; i++) {
+        if (robots[i].moving) return TRUE;
+    }
+    return FALSE;
+}
+
+static void StartMainGameMusic(void)
+{
+    if (!mainMusicSample.playing) PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_AUDIO_CHANNEL);
+}
+
+static void StopGameplaySamples(void)
+{
+    StopOneShotSample(&mainMusicSample, MAIN_MUSIC_AUDIO_CHANNEL);
+    StopOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
+    StopOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
+}
+
+static void ServiceHooverMoveSample(void)
+{
+    if (AnyHooverMoving()) {
+        if (!hooverMoveSample.playing) PlayLoopedSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
+    } else if (hooverMoveSample.playing) {
+        StopOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
+    }
+}
+
+static void PlayBoltFireSample(void)
+{
+    PlayOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
+}
+
 static void FreeOneShotSample(struct OneShotSample *sample, WORD channel)
 {
     StopOneShotSample(sample, channel);
@@ -791,6 +868,8 @@ static BOOL LoadOneShotSample(const char *path, struct OneShotSample *sample, co
     UWORD sampleRate = 0;
     UBYTE compression = 0;
     ULONG volume = 0x10000UL;
+    ULONG oneShotSamples = 0;
+    ULONG repeatSamples = 0;
     LONG allocSize;
     ULONG playbackTicks;
 
@@ -837,6 +916,8 @@ static BOOL LoadOneShotSample(const char *path, struct OneShotSample *sample, co
         if (dataPos + (LONG)chunkSize > size) break;
 
         if (memcmp(fileData + pos, "VHDR", 4) == 0 && chunkSize >= 20) {
+            oneShotSamples = ReadBE32(fileData + dataPos);
+            repeatSamples = ReadBE32(fileData + dataPos + 4);
             sampleRate = ReadBE16(fileData + dataPos + 12);
             compression = fileData[dataPos + 15];
             volume = ReadBE32(fileData + dataPos + 16);
@@ -874,6 +955,23 @@ static BOOL LoadOneShotSample(const char *path, struct OneShotSample *sample, co
     if (playbackTicks > 32767UL) playbackTicks = 32767UL;
     sample->playbackTicks = (UWORD)playbackTicks;
     sample->ticksRemaining = 0;
+    if (repeatSamples > 1UL && repeatSamples < (ULONG)bodySize) {
+        ULONG loopStartBytes;
+        ULONG loopLengthBytes;
+
+        if (oneShotSamples + repeatSamples <= (ULONG)bodySize) {
+            loopStartBytes = oneShotSamples;
+        } else {
+            loopStartBytes = (ULONG)bodySize - repeatSamples;
+        }
+        loopLengthBytes = repeatSamples;
+        loopStartBytes &= ~1UL;
+        loopLengthBytes &= ~1UL;
+        if (loopLengthBytes >= 2UL && loopStartBytes + loopLengthBytes <= (ULONG)allocSize) {
+            sample->loopStartWords = (UWORD)(loopStartBytes / 2UL);
+            sample->loopLengthWords = (UWORD)(loopLengthBytes / 2UL);
+        }
+    }
     sample->volume = (volume >= 0x10000UL) ? 64 : (UBYTE)((volume * 64UL) / 0x10000UL);
     if (sample->volume == 0) sample->volume = 64;
     sample->loaded = TRUE;
@@ -895,6 +993,23 @@ static void FreeRoundStartSamples(void)
     FreeOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
     FreeOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
     FreeOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+}
+
+static BOOL LoadGameplaySamples(void)
+{
+    BOOL loaded = FALSE;
+
+    loaded |= LoadOneShotSample(MAIN_MUSIC_SAMPLE_PATH, &mainMusicSample, "main game music");
+    loaded |= LoadOneShotSample(BOLT_FIRE_SAMPLE_PATH, &boltFireSample, "bolt fire effect");
+    loaded |= LoadOneShotSample(HOOVER_MOVE_SAMPLE_PATH, &hooverMoveSample, "hoover movement loop");
+    return loaded;
+}
+
+static void FreeGameplaySamples(void)
+{
+    FreeOneShotSample(&mainMusicSample, MAIN_MUSIC_AUDIO_CHANNEL);
+    FreeOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
+    FreeOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
 }
 
 static UWORD ReadBE16(const UBYTE *p)
@@ -2451,6 +2566,7 @@ static void ResetLevel(void)
     const char **layout;
 
     StopTitleMusic();
+    StopGameplaySamples();
     StopGetReadySample();
     StopCountdownSample();
     StopGoSample();
@@ -2789,6 +2905,7 @@ static void CheckEndState(void)
 
 static void EnterTitleScreen(void)
 {
+    StopGameplaySamples();
     StopGetReadySample();
     StopCountdownSample();
     StopGoSample();
@@ -2843,7 +2960,10 @@ static void StepGame(void)
     }
 
     if (gameState != GAME_PLAYING) return;
-    if (pauseMenuOpen) return;
+    if (pauseMenuOpen) {
+        ServiceHooverMoveSample();
+        return;
+    }
 
     StepRoundStartSamples();
 
@@ -2868,10 +2988,11 @@ static void StepGame(void)
     }
     if (roundGoTicks > 0) {
         roundGoTicks--;
-        if (roundGoTicks <= 0) {
+        if (!goSample.playing || roundGoTicks <= 0) {
             StopGetReadySample();
             StopCountdownSample();
             StopGoSample();
+            StartMainGameMusic();
         }
     }
 
@@ -2916,7 +3037,9 @@ static void StepGame(void)
         }
     }
 
+    ServiceHooverMoveSample();
     CheckEndState();
+    if (gameState != GAME_PLAYING) StopGameplaySamples();
 }
 
 /* -------------------------------------------------------------------------
@@ -3637,6 +3760,7 @@ static void FirePlayerBolt(WORD id)
     bolt->px = TO_FP(robots[id].tileX * TILE_SIZE);
     bolt->py = TO_FP(robots[id].tileY * TILE_SIZE);
     bolt->ttl = 24;
+    PlayBoltFireSample();
 }
 
 static void StepPlayerBolt(WORD ownerId)
@@ -3949,6 +4073,7 @@ static BOOL OpenGameScreen(void)
 
     LoadTitleMusic();
     LoadRoundStartSamples();
+    LoadGameplaySamples();
 
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
@@ -3974,6 +4099,7 @@ static BOOL OpenGameScreen(void)
 
 static void CloseGameScreen(void)
 {
+    FreeGameplaySamples();
     FreeRoundStartSamples();
     FreeTitleMusic();
     FreeTitleCopperGradient();
