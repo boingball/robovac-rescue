@@ -152,7 +152,6 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_COPPER_PEN 1
 #define TITLE_COPPER_BANDS 32
 
-#define TITLE_MUSIC_PATH "PROGDIR:mods/robovac_startup.mod"
 #define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenuShort.8svx"
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
 #define COUNTDOWN_SAMPLE_PATH "PROGDIR:samples/countdown.8svx"
@@ -174,18 +173,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROUND_COUNTDOWN_STEP_FRAMES 17
 #define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
 #define ROUND_GO_FRAMES 55
-#define MOD_HEADER_SIZE 1084
-#define MOD_SAMPLE_COUNT 31
-#define MOD_POSITION_COUNT 128
-#define MOD_CHANNELS 4
-#define MOD_ROWS 64
-#define MOD_PATTERN_BYTES (MOD_ROWS * MOD_CHANNELS * 4)
-#define MOD_DEFAULT_SPEED 6
-#define MOD_MAX_SPEED 31
-#define MOD_TARGET_BPM 120
-#define MOD_TICK_USEC (2500000UL / MOD_TARGET_BPM)
-#define MOD_MAX_CATCHUP_TICKS 16
-#define TITLE_MUSIC_SILENCE_PERIOD 428
+
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
 #endif
@@ -195,7 +183,6 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD2 0x0004
 #define DMAF_AUD3 0x0008
 #endif
-#define TITLE_MUSIC_DMA_MASK (DMAF_AUD0 | DMAF_AUD1 | DMAF_AUD2 | DMAF_AUD3)
 #define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
 #define MENU_MUSIC_STREAM_PREROLL_FRAMES 0
 
@@ -226,13 +213,6 @@ struct Robot {
 };
 
 
-struct ModSample {
-    char *data;
-    UWORD lengthWords;
-    UWORD loopStartWords;
-    UWORD loopLengthWords;
-    UBYTE volume;
-};
 
 struct OneShotSample {
     UBYTE *data;
@@ -248,22 +228,6 @@ struct OneShotSample {
     BOOL playing;
 };
 
-struct ModPlayer {
-    UBYTE *moduleData;
-    LONG moduleSize;
-    UBYTE songLength;
-    UBYTE position;
-    UBYTE row;
-    UBYTE tick;
-    UBYTE speed;
-    ULONG lastSeconds;
-    ULONG lastMicros;
-    ULONG tickUsecAccumulator;
-    BOOL clockPrimed;
-    BOOL loaded;
-    BOOL playing;
-    struct ModSample samples[MOD_SAMPLE_COUNT];
-};
 
 static struct Screen *scr = NULL;
 static struct Window *win = NULL;
@@ -293,7 +257,6 @@ static BOOL introPaletteActive = FALSE;
 static BOOL titleCopperActive = FALSE;
 static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
-static struct ModPlayer titleMusic;
 static struct OneShotSample menuMusicSample;
 static BOOL menuMusicStreaming = FALSE;
 static ULONG menuMusicNextOffsetBytes = 0;
@@ -504,11 +467,6 @@ static void CloseAiSelectMenu(void);
 static void OpenAiSelectMenu(WORD initialSelection);
 static void StartMatch(WORD players, WORD rivals);
 static void ClearMovementKeys(void);
-static BOOL LoadTitleMusic(void);
-static void FreeTitleMusic(void);
-static void StepTitleMusic(void);
-static void ServiceTitleMusicForState(void);
-static void StopTitleMusic(void);
 static BOOL LoadMenuMusicSample(void);
 static void FreeMenuMusicSample(void);
 static void StartMenuMusic(void);
@@ -1259,288 +1217,8 @@ static UWORD AudioDmaBit(WORD channel)
     }
 }
 
-static void ClearTitleAudioChannels(UWORD *safePtr, BOOL waitForDmaStop)
-{
-    WORD channel;
-
-    custom.dmacon = TITLE_MUSIC_DMA_MASK;
-    for (channel = 0; channel < MOD_CHANNELS; channel++) {
-        custom.aud[channel].ac_vol = 0;
-    }
-
-    if (waitForDmaStop && scr) {
-        WaitTOF();
-        WaitTOF();
-    }
-
-    for (channel = 0; channel < MOD_CHANNELS; channel++) {
-        custom.aud[channel].ac_ptr = safePtr;
-        custom.aud[channel].ac_len = 1;
-        custom.aud[channel].ac_per = TITLE_MUSIC_SILENCE_PERIOD;
-        custom.aud[channel].ac_vol = 0;
-    }
-    custom.dmacon = TITLE_MUSIC_DMA_MASK;
-}
-
-static void StopTitleMusic(void)
-{
-    BOOL hadAudio = titleMusic.loaded || titleMusic.playing;
-
-    if (hadAudio && titleMusic.moduleData) {
-        ClearTitleAudioChannels((UWORD *)titleMusic.moduleData, TRUE);
-    } else if (hadAudio) {
-        WORD channel;
-
-        custom.dmacon = TITLE_MUSIC_DMA_MASK;
-        for (channel = 0; channel < MOD_CHANNELS; channel++) {
-            custom.aud[channel].ac_vol = 0;
-        }
-        if (scr) {
-            WaitTOF();
-            WaitTOF();
-        }
-    }
-    titleMusic.playing = FALSE;
-    titleMusic.position = 0;
-    titleMusic.row = 0;
-    titleMusic.tick = 0;
-    titleMusic.speed = MOD_DEFAULT_SPEED;
-    titleMusic.lastSeconds = 0;
-    titleMusic.lastMicros = 0;
-    titleMusic.tickUsecAccumulator = 0;
-    titleMusic.clockPrimed = FALSE;
-}
-
-static BOOL LoadTitleMusic(void)
-{
-    BPTR fh;
-    LONG size;
-    LONG readSize;
-    UBYTE *data;
-    LONG sampleOffset;
-    WORD i;
-    UBYTE maxPattern = 0;
-
-    memset(&titleMusic, 0, sizeof(titleMusic));
-    titleMusic.speed = MOD_DEFAULT_SPEED;
-
-    fh = Open(TITLE_MUSIC_PATH, MODE_OLDFILE);
-    if (!fh) {
-        printf("Optional %s not loaded; title music disabled\n", TITLE_MUSIC_PATH);
-        return FALSE;
-    }
-
-    size = GetFileSize(fh);
-    if (size < MOD_HEADER_SIZE) {
-        Close(fh);
-        printf("%s is too small for a ProTracker module\n", TITLE_MUSIC_PATH);
-        return FALSE;
-    }
-
-    data = (UBYTE *)AllocMem(size, MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
-    if (!data) {
-        Close(fh);
-        printf("Could not allocate chip RAM for %s\n", TITLE_MUSIC_PATH);
-        return FALSE;
-    }
-
-    readSize = Read(fh, data, size);
-    Close(fh);
-    if (readSize != size) {
-        FreeMem(data, size);
-        printf("Could not read %s\n", TITLE_MUSIC_PATH);
-        return FALSE;
-    }
-
-    if (data[1080] != 'M' || data[1081] != '.' || data[1082] != 'K' || data[1083] != '.') {
-        FreeMem(data, size);
-        printf("%s is not a 4-channel M.K. ProTracker module\n", TITLE_MUSIC_PATH);
-        return FALSE;
-    }
-
-    titleMusic.songLength = data[950];
-    if (titleMusic.songLength == 0 || titleMusic.songLength > MOD_POSITION_COUNT) {
-        FreeMem(data, size);
-        printf("%s has an invalid song length\n", TITLE_MUSIC_PATH);
-        return FALSE;
-    }
-
-    for (i = 0; i < titleMusic.songLength; i++) {
-        if (data[952 + i] > maxPattern) maxPattern = data[952 + i];
-    }
-
-    sampleOffset = MOD_HEADER_SIZE + ((LONG)maxPattern + 1) * MOD_PATTERN_BYTES;
-    for (i = 0; i < MOD_SAMPLE_COUNT; i++) {
-        UBYTE *sampleInfo = data + 20 + (i * 30);
-        ULONG lengthBytes = (ULONG)ReadBE16(sampleInfo + 22) * 2;
-        ULONG loopStartBytes = (ULONG)ReadBE16(sampleInfo + 26) * 2;
-        ULONG loopLengthBytes = (ULONG)ReadBE16(sampleInfo + 28) * 2;
-
-        if (sampleOffset + (LONG)lengthBytes > size) {
-            FreeMem(data, size);
-            printf("%s sample data is truncated\n", TITLE_MUSIC_PATH);
-            return FALSE;
-        }
-
-        titleMusic.samples[i].data = (char *)(data + sampleOffset);
-        titleMusic.samples[i].lengthWords = (UWORD)(lengthBytes / 2);
-        titleMusic.samples[i].loopStartWords = (UWORD)(loopStartBytes / 2);
-        titleMusic.samples[i].loopLengthWords = (UWORD)(loopLengthBytes / 2);
-        titleMusic.samples[i].volume = sampleInfo[25];
-        sampleOffset += lengthBytes;
-    }
-
-    titleMusic.moduleData = data;
-    titleMusic.moduleSize = size;
-    titleMusic.loaded = TRUE;
-    return TRUE;
-}
-
-static void FreeTitleMusic(void)
-{
-    StopTitleMusic();
-    if (titleMusic.moduleData) {
-        FreeMem(titleMusic.moduleData, titleMusic.moduleSize);
-    }
-    memset(&titleMusic, 0, sizeof(titleMusic));
-    titleMusic.speed = MOD_DEFAULT_SPEED;
-}
-
-static void TriggerModNote(WORD channel, UBYTE sampleNumber, UWORD period)
-{
-    struct ModSample *sample;
-    UWORD dmaBit;
-
-    if (channel < 0 || channel >= MOD_CHANNELS) return;
-    if (sampleNumber == 0 || sampleNumber > MOD_SAMPLE_COUNT) return;
-    if (period == 0) return;
-
-    sample = &titleMusic.samples[sampleNumber - 1];
-    if (!sample->data || sample->lengthWords == 0) return;
-
-    dmaBit = AudioDmaBit(channel);
-    custom.dmacon = dmaBit;
-    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
-    custom.aud[channel].ac_len = sample->lengthWords;
-    custom.aud[channel].ac_per = period;
-    custom.aud[channel].ac_vol = (sample->volume > 64) ? 64 : sample->volume;
-    custom.dmacon = DMAF_SETCLR | dmaBit;
-}
-
-static void PlayCurrentModRow(void)
-{
-    UBYTE pattern;
-    UBYTE *patternData;
-    WORD channel;
-
-    if (!titleMusic.loaded || titleMusic.songLength == 0) return;
-    if (titleMusic.position >= titleMusic.songLength) titleMusic.position = 0;
-
-    pattern = titleMusic.moduleData[952 + titleMusic.position];
-    patternData = titleMusic.moduleData + MOD_HEADER_SIZE + ((LONG)pattern * MOD_PATTERN_BYTES) +
-                  ((LONG)titleMusic.row * MOD_CHANNELS * 4);
-
-    for (channel = 0; channel < MOD_CHANNELS; channel++) {
-        UBYTE *note = patternData + (channel * 4);
-        UWORD period = (UWORD)(((note[0] & 0x0F) << 8) | note[1]);
-        UBYTE sampleNumber = (UBYTE)((note[0] & 0xF0) | (note[2] >> 4));
-        UBYTE effect = (UBYTE)(note[2] & 0x0F);
-        UBYTE param = note[3];
-
-        if (effect == 0x0F && param > 0 && param <= MOD_MAX_SPEED) {
-            titleMusic.speed = param;
-        }
-        TriggerModNote(channel, sampleNumber, period);
-    }
-}
-
-static void AdvanceTitleMusicTick(void)
-{
-    if (titleMusic.tick == 0) {
-        PlayCurrentModRow();
-    }
-
-    titleMusic.tick++;
-    if (titleMusic.tick >= titleMusic.speed) {
-        titleMusic.tick = 0;
-        titleMusic.row++;
-        if (titleMusic.row >= MOD_ROWS) {
-            titleMusic.row = 0;
-            titleMusic.position++;
-            if (titleMusic.position >= titleMusic.songLength) {
-                titleMusic.position = 0;
-            }
-        }
-    }
-}
-
-static ULONG ElapsedUsecs(ULONG oldSeconds, ULONG oldMicros, ULONG newSeconds, ULONG newMicros)
-{
-    ULONG secondsDelta;
-
-    if (newSeconds < oldSeconds) return 0;
-
-    secondsDelta = newSeconds - oldSeconds;
-    if (newMicros < oldMicros) {
-        if (secondsDelta == 0) return 0;
-        secondsDelta--;
-        return (secondsDelta * 1000000UL) + (1000000UL - oldMicros) + newMicros;
-    }
-
-    return (secondsDelta * 1000000UL) + (newMicros - oldMicros);
-}
-
-static void PrimeTitleMusicClock(void)
-{
-    CurrentTime(&titleMusic.lastSeconds, &titleMusic.lastMicros);
-    titleMusic.tickUsecAccumulator = 0;
-    titleMusic.clockPrimed = TRUE;
-}
-
-static void StepTitleMusic(void)
-{
-    ULONG nowSeconds;
-    ULONG nowMicros;
-    ULONG elapsed;
-    WORD ticksDue = 0;
-    WORD ticks;
-
-    if (!titleMusic.loaded) return;
-
-    if (!titleMusic.playing) {
-        titleMusic.playing = TRUE;
-        titleMusic.position = 0;
-        titleMusic.row = 0;
-        titleMusic.tick = 0;
-        titleMusic.speed = MOD_DEFAULT_SPEED;
-        PrimeTitleMusicClock();
-        AdvanceTitleMusicTick();
-        return;
-    }
-
-    if (!titleMusic.clockPrimed) {
-        PrimeTitleMusicClock();
-        return;
-    }
-
-    CurrentTime(&nowSeconds, &nowMicros);
-    elapsed = ElapsedUsecs(titleMusic.lastSeconds, titleMusic.lastMicros, nowSeconds, nowMicros);
-    titleMusic.lastSeconds = nowSeconds;
-    titleMusic.lastMicros = nowMicros;
-
-    titleMusic.tickUsecAccumulator += elapsed;
-    while (titleMusic.tickUsecAccumulator >= MOD_TICK_USEC && ticksDue < MOD_MAX_CATCHUP_TICKS) {
-        titleMusic.tickUsecAccumulator -= MOD_TICK_USEC;
-        ticksDue++;
-    }
-    for (ticks = 0; ticks < ticksDue; ticks++) {
-        AdvanceTitleMusicTick();
-    }
-}
-
 static void ServiceTitleMusicForState(void)
 {
-    if (titleMusic.playing) StopTitleMusic();
     ServiceMenuMusicForState();
 }
 
@@ -2897,7 +2575,6 @@ static void ResetLevel(void)
     WORD x, y;
     const char **layout;
 
-    StopTitleMusic();
     StopMenuMusic();
     StopGameplaySamples();
     StopRoundStartSamples();
@@ -3239,8 +2916,10 @@ static void CheckEndState(void)
 
 static void EnterTitleScreen(void)
 {
-    StopGameplaySamples();
-    StopRoundStartSamples();
+    if (gameState != GAME_INTRO) {
+        StopGameplaySamples();
+        StopRoundStartSamples();
+    }
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
@@ -4018,7 +3697,6 @@ static BOOL HandlePauseMenuRawKey(UWORD code, BOOL keyUpEvent)
 static void StartMatch(WORD players, WORD rivals)
 {
     WORD i;
-    StopTitleMusic();
     StopMenuMusic();
     humanPlayers = players;
     if (humanPlayers < 1) humanPlayers = 1;
@@ -4463,7 +4141,6 @@ static void CloseGameScreen(void)
     FreeGameplaySamples();
     FreeRoundStartSamples();
     FreeMenuMusicSample();
-    FreeTitleMusic();
     FreeTitleCopperGradient();
 
     if (win) {
