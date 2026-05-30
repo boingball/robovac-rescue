@@ -150,7 +150,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define TITLE_MUSIC_PATH "PROGDIR:mods/robovac_startup.mod"
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
+#define COUNTDOWN_SAMPLE_PATH "PROGDIR:samples/countdown.8svx"
+#define GO_SAMPLE_PATH "PROGDIR:samples/go.8svx"
 #define GET_READY_AUDIO_CHANNEL 0
+#define COUNTDOWN_AUDIO_CHANNEL 1
 #define PAULA_CLOCK_HZ 3546895UL
 #define ROUND_COUNTDOWN_SECONDS 3
 #define ROUND_COUNTDOWN_STEP_FRAMES 17
@@ -214,6 +217,8 @@ struct OneShotSample {
     LONG dataSize;
     UWORD lengthWords;
     UWORD period;
+    UWORD playbackTicks;
+    WORD ticksRemaining;
     UBYTE volume;
     BOOL loaded;
     BOOL playing;
@@ -266,6 +271,8 @@ static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 static struct ModPlayer titleMusic;
 static struct OneShotSample getReadySample;
+static struct OneShotSample countdownSample;
+static struct OneShotSample goSample;
 
 static UBYTE map[MAP_H][MAP_W];
 
@@ -301,6 +308,8 @@ static BOOL aiSelectMenuOpen = FALSE;
 static WORD aiSelectMenuSelection = 0;
 static WORD roundCountdownTicks = 0;
 static WORD roundGoTicks = 0;
+static WORD roundCountdownSoundNumber = 0;
+static BOOL roundGoSoundPlayed = FALSE;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -463,10 +472,19 @@ static void FreeTitleMusic(void);
 static void StepTitleMusic(void);
 static void ServiceTitleMusicForState(void);
 static void StopTitleMusic(void);
-static BOOL LoadGetReadySample(void);
-static void FreeGetReadySample(void);
+static BOOL LoadRoundStartSamples(void);
+static void FreeRoundStartSamples(void);
 static void PlayGetReadySample(void);
+static void PlayCountdownSample(void);
+static void PlayGoSample(void);
 static void StopGetReadySample(void);
+static void StopCountdownSample(void);
+static void StopGoSample(void);
+static void StepRoundStartSamples(void);
+static UWORD AudioDmaBit(WORD channel);
+static UWORD ReadBE16(const UBYTE *p);
+static ULONG ReadBE32(const UBYTE *p);
+static LONG GetFileSize(BPTR fh);
 static BOOL RoundStartLocked(void);
 static void CloseGameScreen(void);
 
@@ -677,7 +695,207 @@ static void DrawTileIntoCache(UBYTE tileType)
 }
 
 
-static UWORD AudioDmaBit(WORD channel);
+static void StopOneShotSample(struct OneShotSample *sample, WORD channel)
+{
+    UWORD dmaBit = AudioDmaBit(channel);
+
+    if (!sample->loaded && !sample->playing) return;
+
+    custom.dmacon = dmaBit;
+    custom.aud[channel].ac_vol = 0;
+    sample->playing = FALSE;
+    sample->ticksRemaining = 0;
+}
+
+static void PlayOneShotSample(struct OneShotSample *sample, WORD channel)
+{
+    UWORD dmaBit;
+
+    if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
+
+    dmaBit = AudioDmaBit(channel);
+    custom.dmacon = dmaBit;
+    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+    custom.aud[channel].ac_len = sample->lengthWords;
+    custom.aud[channel].ac_per = sample->period;
+    custom.aud[channel].ac_vol = sample->volume;
+    custom.dmacon = DMAF_SETCLR | dmaBit;
+    sample->ticksRemaining = sample->playbackTicks;
+    sample->playing = TRUE;
+}
+
+static void StepOneShotSample(struct OneShotSample *sample, WORD channel)
+{
+    if (!sample->playing) return;
+    if (sample->ticksRemaining > 0) sample->ticksRemaining--;
+    if (sample->ticksRemaining <= 0) StopOneShotSample(sample, channel);
+}
+
+static void StopGetReadySample(void)
+{
+    StopOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
+}
+
+static void StopCountdownSample(void)
+{
+    StopOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+}
+
+static void StopGoSample(void)
+{
+    StopOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+}
+
+static void PlayGetReadySample(void)
+{
+    PlayOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
+}
+
+static void PlayCountdownSample(void)
+{
+    StopGoSample();
+    PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+}
+
+static void PlayGoSample(void)
+{
+    StopCountdownSample();
+    PlayOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+}
+
+static void StepRoundStartSamples(void)
+{
+    StepOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
+    StepOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+    StepOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+}
+
+static void FreeOneShotSample(struct OneShotSample *sample, WORD channel)
+{
+    StopOneShotSample(sample, channel);
+    if (sample->data) {
+        FreeMem(sample->data, sample->dataSize);
+    }
+    memset(sample, 0, sizeof(*sample));
+}
+
+static BOOL LoadOneShotSample(const char *path, struct OneShotSample *sample, const char *description)
+{
+    BPTR fh;
+    LONG size;
+    LONG readSize;
+    UBYTE *fileData;
+    LONG pos;
+    LONG bodyOffset = -1;
+    LONG bodySize = 0;
+    UWORD sampleRate = 0;
+    UBYTE compression = 0;
+    ULONG volume = 0x10000UL;
+    LONG allocSize;
+    ULONG playbackTicks;
+
+    memset(sample, 0, sizeof(*sample));
+
+    fh = Open((STRPTR)path, MODE_OLDFILE);
+    if (!fh) {
+        printf("Optional %s not loaded; %s disabled\n", path, description);
+        return FALSE;
+    }
+
+    size = GetFileSize(fh);
+    if (size < 20) {
+        Close(fh);
+        printf("%s is too small for an 8SVX sample\n", path);
+        return FALSE;
+    }
+
+    fileData = (UBYTE *)AllocMem(size, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!fileData) {
+        Close(fh);
+        printf("Could not allocate memory for %s\n", path);
+        return FALSE;
+    }
+
+    readSize = Read(fh, fileData, size);
+    Close(fh);
+    if (readSize != size) {
+        FreeMem(fileData, size);
+        printf("Could not read %s\n", path);
+        return FALSE;
+    }
+
+    if (memcmp(fileData, "FORM", 4) != 0 || memcmp(fileData + 8, "8SVX", 4) != 0) {
+        FreeMem(fileData, size);
+        printf("%s is not an IFF 8SVX sample\n", path);
+        return FALSE;
+    }
+
+    pos = 12;
+    while (pos + 8 <= size) {
+        ULONG chunkSize = ReadBE32(fileData + pos + 4);
+        LONG dataPos = pos + 8;
+        if (dataPos + (LONG)chunkSize > size) break;
+
+        if (memcmp(fileData + pos, "VHDR", 4) == 0 && chunkSize >= 20) {
+            sampleRate = ReadBE16(fileData + dataPos + 12);
+            compression = fileData[dataPos + 15];
+            volume = ReadBE32(fileData + dataPos + 16);
+        } else if (memcmp(fileData + pos, "BODY", 4) == 0) {
+            bodyOffset = dataPos;
+            bodySize = chunkSize;
+        }
+
+        pos = dataPos + (LONG)chunkSize + (chunkSize & 1);
+    }
+
+    if (bodyOffset < 0 || bodySize <= 1 || sampleRate == 0 || compression != 0) {
+        FreeMem(fileData, size);
+        printf("%s is not a playable uncompressed 8SVX sample\n", path);
+        return FALSE;
+    }
+
+    allocSize = bodySize + (bodySize & 1);
+    sample->data = (UBYTE *)AllocMem(allocSize, MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
+    if (!sample->data) {
+        FreeMem(fileData, size);
+        printf("Could not allocate chip RAM for %s\n", path);
+        return FALSE;
+    }
+
+    CopyMem(fileData + bodyOffset, sample->data, bodySize);
+    FreeMem(fileData, size);
+
+    sample->dataSize = allocSize;
+    sample->lengthWords = (UWORD)(allocSize / 2);
+    sample->period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
+    if (sample->period < 124) sample->period = 124;
+    playbackTicks = (((ULONG)bodySize * 50UL) + (ULONG)sampleRate - 1UL) / (ULONG)sampleRate;
+    if (playbackTicks < 1UL) playbackTicks = 1UL;
+    if (playbackTicks > 32767UL) playbackTicks = 32767UL;
+    sample->playbackTicks = (UWORD)playbackTicks;
+    sample->ticksRemaining = 0;
+    sample->volume = (volume >= 0x10000UL) ? 64 : (UBYTE)((volume * 64UL) / 0x10000UL);
+    if (sample->volume == 0) sample->volume = 64;
+    sample->loaded = TRUE;
+    return TRUE;
+}
+
+static BOOL LoadRoundStartSamples(void)
+{
+    BOOL loaded = FALSE;
+
+    loaded |= LoadOneShotSample(GET_READY_SAMPLE_PATH, &getReadySample, "round countdown voice");
+    loaded |= LoadOneShotSample(COUNTDOWN_SAMPLE_PATH, &countdownSample, "countdown number voice");
+    loaded |= LoadOneShotSample(GO_SAMPLE_PATH, &goSample, "go voice");
+    return loaded;
+}
+
+static void FreeRoundStartSamples(void)
+{
+    FreeOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
+    FreeOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+    FreeOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+}
 
 static UWORD ReadBE16(const UBYTE *p)
 {
@@ -704,137 +922,6 @@ static ULONG ReadBE32(const UBYTE *p)
 static BOOL RoundStartLocked(void)
 {
     return (gameState == GAME_PLAYING && roundCountdownTicks > 0) ? TRUE : FALSE;
-}
-
-static void StopGetReadySample(void)
-{
-    UWORD dmaBit = AudioDmaBit(GET_READY_AUDIO_CHANNEL);
-
-    if (!getReadySample.loaded && !getReadySample.playing) return;
-
-    custom.dmacon = dmaBit;
-    custom.aud[GET_READY_AUDIO_CHANNEL].ac_vol = 0;
-    getReadySample.playing = FALSE;
-}
-
-static void PlayGetReadySample(void)
-{
-    UWORD dmaBit;
-
-    if (!getReadySample.loaded || !getReadySample.data || getReadySample.lengthWords == 0) return;
-
-    dmaBit = AudioDmaBit(GET_READY_AUDIO_CHANNEL);
-    custom.dmacon = dmaBit;
-    custom.aud[GET_READY_AUDIO_CHANNEL].ac_ptr = (UWORD *)getReadySample.data;
-    custom.aud[GET_READY_AUDIO_CHANNEL].ac_len = getReadySample.lengthWords;
-    custom.aud[GET_READY_AUDIO_CHANNEL].ac_per = getReadySample.period;
-    custom.aud[GET_READY_AUDIO_CHANNEL].ac_vol = getReadySample.volume;
-    custom.dmacon = DMAF_SETCLR | dmaBit;
-    getReadySample.playing = TRUE;
-}
-
-static BOOL LoadGetReadySample(void)
-{
-    BPTR fh;
-    LONG size;
-    LONG readSize;
-    UBYTE *fileData;
-    LONG pos;
-    LONG bodyOffset = -1;
-    LONG bodySize = 0;
-    UWORD sampleRate = 0;
-    UBYTE compression = 0;
-    ULONG volume = 0x10000UL;
-    LONG allocSize;
-
-    memset(&getReadySample, 0, sizeof(getReadySample));
-
-    fh = Open(GET_READY_SAMPLE_PATH, MODE_OLDFILE);
-    if (!fh) {
-        printf("Optional %s not loaded; round countdown voice disabled\n", GET_READY_SAMPLE_PATH);
-        return FALSE;
-    }
-
-    size = GetFileSize(fh);
-    if (size < 20) {
-        Close(fh);
-        printf("%s is too small for an 8SVX sample\n", GET_READY_SAMPLE_PATH);
-        return FALSE;
-    }
-
-    fileData = (UBYTE *)AllocMem(size, MEMF_PUBLIC | MEMF_CLEAR);
-    if (!fileData) {
-        Close(fh);
-        printf("Could not allocate memory for %s\n", GET_READY_SAMPLE_PATH);
-        return FALSE;
-    }
-
-    readSize = Read(fh, fileData, size);
-    Close(fh);
-    if (readSize != size) {
-        FreeMem(fileData, size);
-        printf("Could not read %s\n", GET_READY_SAMPLE_PATH);
-        return FALSE;
-    }
-
-    if (memcmp(fileData, "FORM", 4) != 0 || memcmp(fileData + 8, "8SVX", 4) != 0) {
-        FreeMem(fileData, size);
-        printf("%s is not an IFF 8SVX sample\n", GET_READY_SAMPLE_PATH);
-        return FALSE;
-    }
-
-    pos = 12;
-    while (pos + 8 <= size) {
-        ULONG chunkSize = ReadBE32(fileData + pos + 4);
-        LONG dataPos = pos + 8;
-        if (dataPos + (LONG)chunkSize > size) break;
-
-        if (memcmp(fileData + pos, "VHDR", 4) == 0 && chunkSize >= 20) {
-            sampleRate = ReadBE16(fileData + dataPos + 12);
-            compression = fileData[dataPos + 15];
-            volume = ReadBE32(fileData + dataPos + 16);
-        } else if (memcmp(fileData + pos, "BODY", 4) == 0) {
-            bodyOffset = dataPos;
-            bodySize = chunkSize;
-        }
-
-        pos = dataPos + (LONG)chunkSize + (chunkSize & 1);
-    }
-
-    if (bodyOffset < 0 || bodySize <= 1 || sampleRate == 0 || compression != 0) {
-        FreeMem(fileData, size);
-        printf("%s is not a playable uncompressed 8SVX sample\n", GET_READY_SAMPLE_PATH);
-        return FALSE;
-    }
-
-    allocSize = bodySize + (bodySize & 1);
-    getReadySample.data = (UBYTE *)AllocMem(allocSize, MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
-    if (!getReadySample.data) {
-        FreeMem(fileData, size);
-        printf("Could not allocate chip RAM for %s\n", GET_READY_SAMPLE_PATH);
-        return FALSE;
-    }
-
-    CopyMem(fileData + bodyOffset, getReadySample.data, bodySize);
-    FreeMem(fileData, size);
-
-    getReadySample.dataSize = allocSize;
-    getReadySample.lengthWords = (UWORD)(allocSize / 2);
-    getReadySample.period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
-    if (getReadySample.period < 124) getReadySample.period = 124;
-    getReadySample.volume = (volume >= 0x10000UL) ? 64 : (UBYTE)((volume * 64UL) / 0x10000UL);
-    if (getReadySample.volume == 0) getReadySample.volume = 64;
-    getReadySample.loaded = TRUE;
-    return TRUE;
-}
-
-static void FreeGetReadySample(void)
-{
-    StopGetReadySample();
-    if (getReadySample.data) {
-        FreeMem(getReadySample.data, getReadySample.dataSize);
-    }
-    memset(&getReadySample, 0, sizeof(getReadySample));
 }
 
 static UWORD AudioDmaBit(WORD channel)
@@ -2365,6 +2452,8 @@ static void ResetLevel(void)
 
     StopTitleMusic();
     StopGetReadySample();
+    StopCountdownSample();
+    StopGoSample();
 
     roomType = RandRange(5);
     layout = roomLayouts[roomType];
@@ -2394,6 +2483,8 @@ static void ResetLevel(void)
     lastPowerTicks = 0;
     roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
     roundGoTicks = 0;
+    roundCountdownSoundNumber = 0;
+    roundGoSoundPlayed = FALSE;
     gameState = GAME_PLAYING;
     ClosePauseMenu();
 
@@ -2401,6 +2492,8 @@ static void ResetLevel(void)
     CountDirt();
     BuildRoomBuffer();
     PlayGetReadySample();
+    PlayCountdownSample();
+    roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
 }
 
 static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
@@ -2697,6 +2790,8 @@ static void CheckEndState(void)
 static void EnterTitleScreen(void)
 {
     StopGetReadySample();
+    StopCountdownSample();
+    StopGoSample();
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
@@ -2750,17 +2845,34 @@ static void StepGame(void)
     if (gameState != GAME_PLAYING) return;
     if (pauseMenuOpen) return;
 
+    StepRoundStartSamples();
+
     if (roundCountdownTicks > 0) {
         roundCountdownTicks--;
+        if (roundCountdownTicks > 0) {
+            WORD activeNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+            if (activeNumber != roundCountdownSoundNumber) {
+                PlayCountdownSample();
+                roundCountdownSoundNumber = activeNumber;
+            }
+        }
         if (roundCountdownTicks <= 0) {
             roundGoTicks = ROUND_GO_FRAMES;
             ClearMovementKeys();
+            if (!roundGoSoundPlayed) {
+                PlayGoSample();
+                roundGoSoundPlayed = TRUE;
+            }
         }
         return;
     }
     if (roundGoTicks > 0) {
         roundGoTicks--;
-        if (roundGoTicks <= 0) StopGetReadySample();
+        if (roundGoTicks <= 0) {
+            StopGetReadySample();
+            StopCountdownSample();
+            StopGoSample();
+        }
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -3836,7 +3948,7 @@ static BOOL OpenGameScreen(void)
     }
 
     LoadTitleMusic();
-    LoadGetReadySample();
+    LoadRoundStartSamples();
 
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
@@ -3862,7 +3974,7 @@ static BOOL OpenGameScreen(void)
 
 static void CloseGameScreen(void)
 {
-    FreeGetReadySample();
+    FreeRoundStartSamples();
     FreeTitleMusic();
     FreeTitleCopperGradient();
 
