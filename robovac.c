@@ -382,6 +382,7 @@ static void ClosePauseMenu(void);
 static BOOL LoadTitleMusic(void);
 static void FreeTitleMusic(void);
 static void StepTitleMusic(void);
+static void ServiceTitleMusicForState(void);
 static void StopTitleMusic(void);
 
 static const char *roomLayouts[5][MAP_H] = {
@@ -878,12 +879,17 @@ static void StepTitleMusic(void)
         titleMusic.tickUsecAccumulator -= MOD_TICK_USEC;
         ticksDue++;
     }
-    if (ticksDue == MOD_MAX_CATCHUP_TICKS) {
-        titleMusic.tickUsecAccumulator = 0;
-    }
-
     for (ticks = 0; ticks < ticksDue; ticks++) {
         AdvanceTitleMusicTick();
+    }
+}
+
+static void ServiceTitleMusicForState(void)
+{
+    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
+        StepTitleMusic();
+    } else if (titleMusic.playing) {
+        StopTitleMusic();
     }
 }
 
@@ -2101,6 +2107,8 @@ static void ResetLevel(void)
     WORD x, y;
     const char **layout;
 
+    StopTitleMusic();
+
     roomType = RandRange(5);
     layout = roomLayouts[roomType];
 
@@ -2448,9 +2456,7 @@ static void StepGame(void)
 {
     WORD i;
 
-    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
-        StepTitleMusic();
-    }
+    ServiceTitleMusicForState();
 
     if (gameState == GAME_INTRO) {
         StepIntro();
@@ -3229,6 +3235,7 @@ int main(void)
         DrawFrame();
         WaitTOF();
         PresentFrame();
+        ServiceTitleMusicForState();
     }
 
     CloseGameScreen();
