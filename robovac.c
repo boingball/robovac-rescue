@@ -153,7 +153,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define GET_READY_AUDIO_CHANNEL 0
 #define PAULA_CLOCK_HZ 3546895UL
 #define ROUND_COUNTDOWN_SECONDS 3
-#define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * 50)
+#define ROUND_COUNTDOWN_STEP_FRAMES 17
+#define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
 #define ROUND_GO_FRAMES 55
 #define MOD_HEADER_SIZE 1084
 #define MOD_SAMPLE_COUNT 31
@@ -3113,16 +3114,16 @@ static void DrawRoundStartOverlay(void)
     if (gameState != GAME_PLAYING) return;
     if (roundCountdownTicks <= 0 && roundGoTicks <= 0) return;
 
-    SetAPen(&renderRP, 1);
-    RectFill(&renderRP, left - 4, top - 4, right + 4, bottom + 4);
-    SetAPen(&renderRP, 13);
-    RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
-    SetAPen(&renderRP, 0);
-    RectFill(&renderRP, left, top, right, bottom);
-
     if (roundCountdownTicks > 0) {
-        WORD activeNumber = ((roundCountdownTicks - 1) / 50) + 1;
-        WORD phase = 49 - ((roundCountdownTicks - 1) % 50);
+        WORD activeNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        WORD phase = (ROUND_COUNTDOWN_STEP_FRAMES - 1) - ((roundCountdownTicks - 1) % ROUND_COUNTDOWN_STEP_FRAMES);
+
+        SetAPen(&renderRP, 1);
+        RectFill(&renderRP, left - 4, top - 4, right + 4, bottom + 4);
+        SetAPen(&renderRP, 13);
+        RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, left, top, right, bottom);
         MiniTextCentered(&renderRP, top + 14, "GET-READY", 7, 4);
         MiniTextCentered(&renderRP, top + 42, "HOVERS LOCKED", 8, 1);
 
@@ -3145,14 +3146,14 @@ static void DrawRoundStartOverlay(void)
                 RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxRight - 2, boxBottom - 2);
                 pen = 0;
             } else if (number == activeNumber) {
-                WORD greenFill = ((boxRight - boxLeft - 4) * phase) / 49;
+                WORD greenFill = ((boxRight - boxLeft - 4) * phase) / (ROUND_COUNTDOWN_STEP_FRAMES - 1);
                 SetAPen(&renderRP, 3);
                 RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxRight - 2, boxBottom - 2);
                 if (greenFill > 0) {
                     SetAPen(&renderRP, 10);
                     RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxLeft + 1 + greenFill, boxBottom - 2);
                 }
-                pen = (phase > 24) ? 0 : 7;
+                pen = (phase > (ROUND_COUNTDOWN_STEP_FRAMES / 2)) ? 0 : 7;
             } else {
                 pen = 8;
             }
@@ -3162,8 +3163,7 @@ static void DrawRoundStartOverlay(void)
             MiniTextScaled(&renderRP, boxLeft + 14, boxTop + 8, digit, pen, 3);
         }
     } else {
-        MiniTextCentered(&renderRP, top + 28, "GO", 10, 5);
-        MiniTextCentered(&renderRP, top + 76, "CLEAN CLEAN CLEAN", 13, 2);
+        MiniTextCentered(&renderRP, (SCREEN_H - (5 * 5)) / 2, "GO", 10, 5);
     }
 }
 
