@@ -87,7 +87,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_EMP_TICKS_PER_SECOND 50
 #define POWERUP_DIRT_DROP       5
 #define POWERUP_QUAD_RADIUS     1
-#define ROBOT_TURN_TICKS        5
+#define ROBOT_TURN_TICKS        1
 
 #define ROBOT_W     16
 #define ROBOT_H     16
@@ -2377,28 +2377,27 @@ static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection)
 {
     WORD x;
     WORD y;
-    WORD centreX = sx + (ROBOT_W / 2);
-    WORD centreY = sy + (ROBOT_H / 2);
 
     for (y = 0; y < ROBOT_H; y++) {
         for (x = 0; x < ROBOT_W; x++) {
-            LONG p = ReadPixel(&robotRP, srcX + x, y);
-            LONG rx;
-            LONG ry;
-            WORD dx;
-            WORD dy;
+            WORD dx = x - (ROBOT_W / 2);
+            WORD dy = y - (ROBOT_H / 2);
+            WORD sampleX;
+            WORD sampleY;
+            LONG p;
 
-            if (p <= 0) continue;
-            dx = x - (ROBOT_W / 2);
-            dy = y - (ROBOT_H / 2);
             if (turnDirection >= 0) {
-                rx = ((LONG)(dx - dy) * 181L) >> 8;
-                ry = ((LONG)(dx + dy) * 181L) >> 8;
+                sampleX = (WORD)((((LONG)dx + (LONG)dy) * 181L) >> 8) + (ROBOT_W / 2);
+                sampleY = (WORD)((((LONG)dy - (LONG)dx) * 181L) >> 8) + (ROBOT_H / 2);
             } else {
-                rx = ((LONG)(dx + dy) * 181L) >> 8;
-                ry = ((LONG)(dy - dx) * 181L) >> 8;
+                sampleX = (WORD)((((LONG)dx - (LONG)dy) * 181L) >> 8) + (ROBOT_W / 2);
+                sampleY = (WORD)((((LONG)dx + (LONG)dy) * 181L) >> 8) + (ROBOT_H / 2);
             }
-            PlotRobotPixel(centreX + (WORD)rx, centreY + (WORD)ry, (UBYTE)p);
+
+            if (sampleX < 0 || sampleY < 0 || sampleX >= ROBOT_W || sampleY >= ROBOT_H) continue;
+            p = ReadPixel(&robotRP, srcX + sampleX, sampleY);
+            if (p <= 0) continue;
+            PlotRobotPixel(sx + x, sy + y, (UBYTE)p);
         }
     }
 }
@@ -3116,11 +3115,7 @@ static void StepGame(void)
     if (roundCountdownTicks > 0) {
         roundCountdownTicks--;
         if (roundCountdownTicks > 0) {
-            WORD activeNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
-            if (activeNumber != roundCountdownSoundNumber) {
-                PlayCountdownSample();
-                roundCountdownSoundNumber = activeNumber;
-            }
+            roundCountdownSoundNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
         }
         if (roundCountdownTicks <= 0) {
             roundGoTicks = ROUND_GO_FRAMES;
