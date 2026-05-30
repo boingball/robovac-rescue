@@ -83,8 +83,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_CLEAN_TARGET_3  10
 #define POWERUP_DURATION_MOVES  20
 #define POWERUP_BOLT_MOVES      10
-#define POWERUP_EMP_TICKS       250
-#define POWERUP_EMP_TICKS_PER_SECOND 50
+#define POWERUP_EMP_STEP_FRAMES  17
+#define POWERUP_EMP_TICKS       (5 * POWERUP_EMP_STEP_FRAMES)
 #define POWERUP_DIRT_DROP       5
 #define POWERUP_QUAD_RADIUS     1
 #define ROBOT_TURN_TICKS        1
@@ -813,6 +813,7 @@ static void PlayCountdownSample(void)
 static void PlayGoSample(void)
 {
     if (goSample.playing) return;
+    StopGetReadySample();
     StopCountdownSample();
     PlayOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
 }
@@ -3133,6 +3134,7 @@ static void StepGame(void)
             StopGetReadySample();
             StopCountdownSample();
             StopGoSample();
+            roundGoTicks = 0;
             StartMainGameMusic();
         }
     }
@@ -3590,7 +3592,7 @@ static void DrawEmpCountdown(void)
 
     if (empCountdownTicks <= 0) return;
 
-    secondsLeft = ((empCountdownTicks - 1) / POWERUP_EMP_TICKS_PER_SECOND) + 1;
+    secondsLeft = ((empCountdownTicks - 1) / POWERUP_EMP_STEP_FRAMES) + 1;
     if (secondsLeft < 1) secondsLeft = 1;
     if (secondsLeft > 5) secondsLeft = 5;
     snprintf(b, sizeof(b), "EMP %d", secondsLeft);
