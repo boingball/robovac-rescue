@@ -504,6 +504,7 @@ static void PlayGoSample(void);
 static void StopGetReadySample(void);
 static void StopCountdownSample(void);
 static void StopGoSample(void);
+static void StopRoundStartSamples(void);
 static void StepRoundStartSamples(void);
 static BOOL LoadGameplaySamples(void);
 static void FreeGameplaySamples(void);
@@ -799,6 +800,13 @@ static void StopGoSample(void)
     StopOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
 }
 
+static void StopRoundStartSamples(void)
+{
+    StopGetReadySample();
+    StopCountdownSample();
+    StopGoSample();
+}
+
 static void PlayGetReadySample(void)
 {
     PlayOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
@@ -806,15 +814,17 @@ static void PlayGetReadySample(void)
 
 static void PlayCountdownSample(void)
 {
+    StopCountdownSample();
     StopGoSample();
     PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+    if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_FRAMES) {
+        countdownSample.ticksRemaining = ROUND_COUNTDOWN_FRAMES;
+    }
 }
 
 static void PlayGoSample(void)
 {
-    if (goSample.playing) return;
-    StopGetReadySample();
-    StopCountdownSample();
+    StopRoundStartSamples();
     PlayOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
 }
 
@@ -2711,9 +2721,7 @@ static void ResetLevel(void)
 
     StopTitleMusic();
     StopGameplaySamples();
-    StopGetReadySample();
-    StopCountdownSample();
-    StopGoSample();
+    StopRoundStartSamples();
 
     roomType = RandRange(5);
     layout = roomLayouts[roomType];
@@ -3052,9 +3060,7 @@ static void CheckEndState(void)
 static void EnterTitleScreen(void)
 {
     StopGameplaySamples();
-    StopGetReadySample();
-    StopCountdownSample();
-    StopGoSample();
+    StopRoundStartSamples();
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
@@ -3131,9 +3137,7 @@ static void StepGame(void)
     if (roundGoTicks > 0) {
         roundGoTicks--;
         if (!goSample.playing || roundGoTicks <= 0) {
-            StopGetReadySample();
-            StopCountdownSample();
-            StopGoSample();
+            StopRoundStartSamples();
             roundGoTicks = 0;
             StartMainGameMusic();
         }

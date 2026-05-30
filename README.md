@@ -90,8 +90,8 @@ When present, the module is loaded into chip RAM and played while the startup ti
 Round starts and gameplay also look for optional uncompressed 8SVX samples:
 
 - `PROGDIR:samples/getready.8svx` plays once on the first audio channel when the 3-2-1 overlay appears and is stopped when GO appears.
-- `PROGDIR:samples/countdown.8svx` plays the three 3-2-1 beeps on a second audio channel.
-- `PROGDIR:samples/go.8svx` plays once on that second audio channel when GO appears.
+- `PROGDIR:samples/countdown.8svx` plays the three 3-2-1 beeps on a second audio channel and is clamped to the 3-2-1 overlay length so any trailing audio is cut before GO.
+- All round-start samples are stopped when GO appears, then `PROGDIR:samples/go.8svx` plays once on that second audio channel.
 - `PROGDIR:samples/mainmusic-lo.8svx` starts after the GO voice has ended and loops using the 8SVX repeat section until the level ends, using Paula channels 1 and 4.
 - `PROGDIR:samples/boltfire.8svx` plays once whenever a player fires an energy bolt, using Paula channel 3.
 - `PROGDIR:samples/hoover-go-loop-low.8svx` loops while at least one hoover is moving and stops when all hoovers are stationary, using Paula channel 2.
