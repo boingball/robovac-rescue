@@ -157,7 +157,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define HOOVER_MOVE_SAMPLE_PATH "PROGDIR:samples/hoover-go-loop-low.8svx"
 #define GET_READY_AUDIO_CHANNEL 0
 #define COUNTDOWN_AUDIO_CHANNEL 1
-#define MAIN_MUSIC_AUDIO_CHANNEL 0
+#define MAIN_MUSIC_LEFT_AUDIO_CHANNEL 0
+#define MAIN_MUSIC_RIGHT_AUDIO_CHANNEL 3
 #define HOOVER_MOVE_AUDIO_CHANNEL 1
 #define BOLT_FIRE_AUDIO_CHANNEL 2
 #define PAULA_CLOCK_HZ 3546895UL
@@ -823,12 +824,15 @@ static BOOL AnyHooverMoving(void)
 
 static void StartMainGameMusic(void)
 {
-    if (!mainMusicSample.playing) PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_AUDIO_CHANNEL);
+    if (mainMusicSample.playing) return;
+    PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_LEFT_AUDIO_CHANNEL);
+    PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
 
 static void StopGameplaySamples(void)
 {
-    StopOneShotSample(&mainMusicSample, MAIN_MUSIC_AUDIO_CHANNEL);
+    StopOneShotSample(&mainMusicSample, MAIN_MUSIC_LEFT_AUDIO_CHANNEL);
+    StopOneShotSample(&mainMusicSample, MAIN_MUSIC_RIGHT_AUDIO_CHANNEL);
     StopOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
     StopOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
 }
@@ -1007,7 +1011,8 @@ static BOOL LoadGameplaySamples(void)
 
 static void FreeGameplaySamples(void)
 {
-    FreeOneShotSample(&mainMusicSample, MAIN_MUSIC_AUDIO_CHANNEL);
+    StopOneShotSample(&mainMusicSample, MAIN_MUSIC_RIGHT_AUDIO_CHANNEL);
+    FreeOneShotSample(&mainMusicSample, MAIN_MUSIC_LEFT_AUDIO_CHANNEL);
     FreeOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
     FreeOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
 }
