@@ -162,6 +162,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define HOOVER_MOVE_SAMPLE_PATH "PROGDIR:samples/hoover-go-loop-low.8svx"
 #define GET_READY_AUDIO_CHANNEL 0
 #define COUNTDOWN_AUDIO_CHANNEL 1
+#define GO_AUDIO_CHANNEL 2
 #define MAIN_MUSIC_LEFT_AUDIO_CHANNEL 0
 #define MAIN_MUSIC_RIGHT_AUDIO_CHANNEL 3
 #define MENU_MUSIC_LEFT_AUDIO_CHANNEL 0
@@ -336,6 +337,7 @@ static WORD roundCountdownTicks = 0;
 static WORD roundGoTicks = 0;
 static WORD roundCountdownSoundNumber = 0;
 static BOOL roundGoSoundPlayed = FALSE;
+static WORD roundCountdownLastSoundNumber = 0;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -511,6 +513,7 @@ static void FreeRoundStartSamples(void);
 static void PlayGetReadySample(void);
 static void PlayCountdownSample(void);
 static void PlayGoSample(void);
+static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
 static void StopGetReadySample(void);
 static void StopCountdownSample(void);
 static void StopGoSample(void);
@@ -801,6 +804,27 @@ static void PlayLoopedSample(struct OneShotSample *sample, WORD channel)
     sample->playing = TRUE;
 }
 
+static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel)
+{
+    UWORD dmaBit;
+
+    if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
+
+    dmaBit = AudioDmaBit(channel);
+    custom.dmacon = dmaBit;
+    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+    custom.aud[channel].ac_len = sample->lengthWords;
+    custom.aud[channel].ac_per = sample->period;
+    custom.aud[channel].ac_vol = sample->volume;
+    custom.dmacon = DMAF_SETCLR | dmaBit;
+
+    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+    custom.aud[channel].ac_len = sample->lengthWords;
+
+    sample->ticksRemaining = 0;
+    sample->playing = TRUE;
+}
+
 static void StopGetReadySample(void)
 {
     StopOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
@@ -813,7 +837,7 @@ static void StopCountdownSample(void)
 
 static void StopGoSample(void)
 {
-    StopOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+    StopOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
 static void StopRoundStartSamples(void)
@@ -831,24 +855,23 @@ static void PlayGetReadySample(void)
 static void PlayCountdownSample(void)
 {
     StopCountdownSample();
-    StopGoSample();
     PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
-    if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_FRAMES) {
-        countdownSample.ticksRemaining = ROUND_COUNTDOWN_FRAMES;
+    if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_STEP_FRAMES) {
+        countdownSample.ticksRemaining = ROUND_COUNTDOWN_STEP_FRAMES;
     }
 }
 
 static void PlayGoSample(void)
 {
     StopRoundStartSamples();
-    PlayOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+    PlayOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
 static void StepRoundStartSamples(void)
 {
     StepOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
     StepOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
-    StepOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+    StepOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
 static BOOL AnyHooverMoving(void)
@@ -1036,7 +1059,40 @@ static void FreeRoundStartSamples(void)
 {
     FreeOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
     FreeOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
-    FreeOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
+    FreeOneShotSample(&goSample, GO_AUDIO_CHANNEL);
+}
+
+static BOOL LoadMenuMusicSample(void)
+{
+    return LoadOneShotSample(MENU_MUSIC_SAMPLE_PATH, &menuMusicSample, "menu music");
+}
+
+static void StopMenuMusic(void)
+{
+    StopOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+}
+
+static void StartMenuMusic(void)
+{
+    if (menuMusicSample.playing) return;
+    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+}
+
+static void ServiceMenuMusicForState(void)
+{
+    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
+        StartMenuMusic();
+    } else if (menuMusicSample.playing) {
+        StopMenuMusic();
+    }
+}
+
+static void FreeMenuMusicSample(void)
+{
+    StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+    FreeOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
 }
 
 static BOOL LoadMenuMusicSample(void)
@@ -2798,7 +2854,8 @@ static void ResetLevel(void)
     lastPowerTicks = 0;
     roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
     roundGoTicks = 0;
-    roundCountdownSoundNumber = 0;
+    roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
+    roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
     empCountdownTicks = 0;
     empCountdownOwner = -1;
@@ -2810,7 +2867,7 @@ static void ResetLevel(void)
     BuildRoomBuffer();
     PlayGetReadySample();
     PlayCountdownSample();
-    roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
+    roundCountdownLastSoundNumber = ROUND_COUNTDOWN_SECONDS;
 }
 
 static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
@@ -3170,12 +3227,17 @@ static void StepGame(void)
         roundCountdownTicks--;
         if (roundCountdownTicks > 0) {
             roundCountdownSoundNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+            if (roundCountdownSoundNumber != roundCountdownLastSoundNumber) {
+                PlayCountdownSample();
+                roundCountdownLastSoundNumber = roundCountdownSoundNumber;
+            }
         }
         if (roundCountdownTicks <= 0) {
             roundGoTicks = ROUND_GO_FRAMES;
             ClearMovementKeys();
             if (!roundGoSoundPlayed) {
                 PlayGoSample();
+                StartMainGameMusic();
                 roundGoSoundPlayed = TRUE;
             }
         }
@@ -3183,10 +3245,8 @@ static void StepGame(void)
     }
     if (roundGoTicks > 0) {
         roundGoTicks--;
-        if (!goSample.playing || roundGoTicks <= 0) {
-            StopRoundStartSamples();
+        if (roundGoTicks <= 0) {
             roundGoTicks = 0;
-            StartMainGameMusic();
         }
     }
 
