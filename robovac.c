@@ -79,11 +79,15 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define EMERGENCY_DOCK_MOVES  5
 #define DOCK_CHARGE_TICKS     250
 #define POWERUP_CLEAN_TARGET    5
+#define POWERUP_CLEAN_TARGET_2  7
+#define POWERUP_CLEAN_TARGET_3  10
 #define POWERUP_DURATION_MOVES  20
 #define POWERUP_BOLT_MOVES      10
 #define POWERUP_EMP_TICKS       250
+#define POWERUP_EMP_TICKS_PER_SECOND 50
 #define POWERUP_DIRT_DROP       5
 #define POWERUP_QUAD_RADIUS     1
+#define ROBOT_TURN_TICKS        5
 
 #define ROBOT_W     16
 #define ROBOT_H     16
@@ -202,11 +206,16 @@ struct Robot {
     WORD emergencyMovesLeft;
     WORD chargeTicks;
     WORD cleanStreak;
+    WORD powerCleanTarget;
+    WORD powerUseCount;
     WORD powerMovesLeft;
     UBYTE powerType;
     BOOL ai;
     BOOL moving;
     UBYTE spriteIndex;
+    UBYTE prevSpriteIndex;
+    WORD turnTicks;
+    WORD turnDirection;
     UBYTE spriteVariant;
 };
 
@@ -337,6 +346,8 @@ static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
 static WORD lastPowerTicks = 0;
+static WORD empCountdownTicks = 0;
+static WORD empCountdownOwner = -1;
 
 struct Bolt {
     BOOL active;
@@ -472,6 +483,7 @@ static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolts(void);
 static void DrawTitleCarousel(void);
 static void TriggerRobotPower(WORD id);
+static WORD NextPowerCleanTarget(WORD useCount);
 static WORD SpawnDirtTiles(WORD count);
 static void EnterTitleScreen(void);
 static void ClosePauseMenu(void);
@@ -800,6 +812,7 @@ static void PlayCountdownSample(void)
 
 static void PlayGoSample(void)
 {
+    if (goSample.playing) return;
     StopCountdownSample();
     PlayOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
 }
@@ -2329,6 +2342,67 @@ static BOOL InitRobotBobs(void)
     return TRUE;
 }
 
+static void PlotRobotPixel(WORD x, WORD y, UBYTE pen)
+{
+    if (x < 0 || y < HUD_H || x >= SCREEN_W || y >= SCREEN_H) return;
+    SetAPen(&renderRP, pen);
+    WritePixel(&renderRP, x, y);
+}
+
+static void DrawRobotBobScaled2(WORD srcX, WORD sx, WORD sy)
+{
+    WORD x;
+    WORD y;
+    WORD drawX = sx - (ROBOT_W / 2);
+    WORD drawY = sy - (ROBOT_H / 2);
+
+    for (y = 0; y < ROBOT_H; y++) {
+        for (x = 0; x < ROBOT_W; x++) {
+            LONG p = ReadPixel(&robotRP, srcX + x, y);
+            WORD dx;
+            WORD dy;
+
+            if (p <= 0) continue;
+            dx = drawX + (x * 2);
+            dy = drawY + (y * 2);
+            PlotRobotPixel(dx, dy, (UBYTE)p);
+            PlotRobotPixel(dx + 1, dy, (UBYTE)p);
+            PlotRobotPixel(dx, dy + 1, (UBYTE)p);
+            PlotRobotPixel(dx + 1, dy + 1, (UBYTE)p);
+        }
+    }
+}
+
+static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection)
+{
+    WORD x;
+    WORD y;
+    WORD centreX = sx + (ROBOT_W / 2);
+    WORD centreY = sy + (ROBOT_H / 2);
+
+    for (y = 0; y < ROBOT_H; y++) {
+        for (x = 0; x < ROBOT_W; x++) {
+            LONG p = ReadPixel(&robotRP, srcX + x, y);
+            LONG rx;
+            LONG ry;
+            WORD dx;
+            WORD dy;
+
+            if (p <= 0) continue;
+            dx = x - (ROBOT_W / 2);
+            dy = y - (ROBOT_H / 2);
+            if (turnDirection >= 0) {
+                rx = ((LONG)(dx - dy) * 181L) >> 8;
+                ry = ((LONG)(dx + dy) * 181L) >> 8;
+            } else {
+                rx = ((LONG)(dx + dy) * 181L) >> 8;
+                ry = ((LONG)(dy - dx) * 181L) >> 8;
+            }
+            PlotRobotPixel(centreX + (WORD)rx, centreY + (WORD)ry, (UBYTE)p);
+        }
+    }
+}
+
 static void DrawRobotBob(WORD id)
 {
     WORD sx;
@@ -2342,14 +2416,25 @@ static void DrawRobotBob(WORD id)
     srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].spriteIndex) * ROBOT_W;
 
     SetAPen(&renderRP, 6);
-    RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
+    if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+        RectFill(&renderRP, sx, sy + 21, sx + 23, sy + 24);
+    } else {
+        RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
+    }
 
     if (robotCacheBM && robotMaskBM && robotMaskBM->Planes[0]) {
-        BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
-                              &renderRP, sx, sy,
-                              ROBOT_W, ROBOT_H,
-                              (ABC | ABNC | ANBC),
-                              robotMaskBM->Planes[0]);
+        if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+            DrawRobotBobScaled2(srcX, sx, sy);
+        } else if (robots[id].turnTicks > 0 && robots[id].prevSpriteIndex != robots[id].spriteIndex) {
+            WORD turnSrcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].prevSpriteIndex) * ROBOT_W;
+            DrawRobotBobTurn45(turnSrcX, sx, sy, robots[id].turnDirection);
+        } else {
+            BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
+                                  &renderRP, sx, sy,
+                                  ROBOT_W, ROBOT_H,
+                                  (ABC | ABNC | ANBC),
+                                  robotMaskBM->Planes[0]);
+        }
     } else {
         SetAPen(&renderRP, 16 + 1);
         RectFill(&renderRP, sx + 2, sy + 2, sx + 13, sy + 13);
@@ -2405,6 +2490,9 @@ static void SetRobotTile(WORD id, WORD tx, WORD ty)
     robots[id].py = TO_FP(ty * TILE_SIZE);
     robots[id].moving = FALSE;
     robots[id].spriteIndex = SPR_READY;
+    robots[id].prevSpriteIndex = SPR_READY;
+    robots[id].turnTicks = 0;
+    robots[id].turnDirection = 1;
     robots[id].spriteVariant = 0;
 }
 
@@ -2428,10 +2516,15 @@ static void InitRobots(void)
         robots[i].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
         robots[i].chargeTicks = 0;
         robots[i].cleanStreak = 0;
+        robots[i].powerCleanTarget = POWERUP_CLEAN_TARGET;
+        robots[i].powerUseCount = 0;
         robots[i].powerMovesLeft = 0;
         robots[i].powerType = POWER_NONE;
         robots[i].ai = (i >= humanPlayers) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
+        robots[i].prevSpriteIndex = SPR_READY;
+        robots[i].turnTicks = 0;
+        robots[i].turnDirection = 1;
         if (i < humanPlayers) {
             robots[i].spriteVariant = (UBYTE)selectedPlayerVariant[i];
         } else {
@@ -2474,6 +2567,45 @@ static void CleanQuadArea(WORD id)
     }
 }
 
+static WORD NextPowerCleanTarget(WORD useCount)
+{
+    if (useCount <= 0) return POWERUP_CLEAN_TARGET;
+    if (useCount == 1) return POWERUP_CLEAN_TARGET_2;
+    return POWERUP_CLEAN_TARGET_3;
+}
+
+static WORD SpriteDirectionIndex(UBYTE spriteIndex)
+{
+    if (spriteIndex == SPR_UP) return 0;
+    if (spriteIndex == SPR_RIGHT) return 1;
+    if (spriteIndex == SPR_DOWN) return 2;
+    if (spriteIndex == SPR_LEFT) return 3;
+    return -1;
+}
+
+static void SetRobotMoveSprite(WORD id, UBYTE newSpriteIndex)
+{
+    WORD oldDir;
+    WORD newDir;
+    WORD delta;
+
+    if (id < 0 || id >= robotCount) return;
+
+    oldDir = SpriteDirectionIndex(robots[id].spriteIndex);
+    newDir = SpriteDirectionIndex(newSpriteIndex);
+    robots[id].prevSpriteIndex = robots[id].spriteIndex;
+    robots[id].spriteIndex = newSpriteIndex;
+
+    if (oldDir >= 0 && newDir >= 0 && oldDir != newDir) {
+        delta = (newDir - oldDir + 4) & 3;
+        robots[id].turnDirection = (delta == 3) ? -1 : 1;
+        robots[id].turnTicks = ROBOT_TURN_TICKS;
+    } else {
+        robots[id].turnTicks = 0;
+        robots[id].turnDirection = 1;
+    }
+}
+
 static void TriggerRobotPower(WORD id)
 {
     WORD i;
@@ -2488,9 +2620,16 @@ static void TriggerRobotPower(WORD id)
     snprintf(lastPowerText, sizeof(lastPowerText), "%s: %s!", RobotTag(id), powerNames[variant]);
     lastPowerTicks = 180;
 
+    if (robots[id].powerType == POWER_EMP || robots[id].powerType == POWER_DIRT_DROP) {
+        robots[id].powerUseCount++;
+        robots[id].powerCleanTarget = NextPowerCleanTarget(robots[id].powerUseCount);
+    }
+
     if (robots[id].powerType == POWER_BOLT) {
         robots[id].powerMovesLeft = POWERUP_BOLT_MOVES;
     } else if (robots[id].powerType == POWER_EMP) {
+        empCountdownTicks = POWERUP_EMP_TICKS;
+        empCountdownOwner = id;
         for (i = 0; i < robotCount; i++) {
             if (i != id) {
                 robots[i].stunTicks = POWERUP_EMP_TICKS;
@@ -2507,7 +2646,7 @@ static void TriggerRobotPower(WORD id)
         robots[id].powerType = POWER_NONE;
     } else if (robots[id].powerType == POWER_DIRT_DROP) {
         WORD dropped = SpawnDirtTiles(POWERUP_DIRT_DROP);
-        snprintf(lastPowerText, sizeof(lastPowerText), "%s DIRT BOMB +%d", RobotTag(id), dropped);
+        snprintf(lastPowerText, sizeof(lastPowerText), "%s DIRT BOMB +%d NEXT %d", RobotTag(id), dropped, robots[id].powerCleanTarget);
         robots[id].powerMovesLeft = 0;
         robots[id].powerType = POWER_NONE;
     } else if (robots[id].powerType == POWER_BATTERY_BURST) {
@@ -2606,6 +2745,8 @@ static void ResetLevel(void)
     roundGoTicks = 0;
     roundCountdownSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
     gameState = GAME_PLAYING;
     ClosePauseMenu();
 
@@ -2651,10 +2792,10 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     robots[id].targetX = nx;
     robots[id].targetY = ny;
     robots[id].moving = TRUE;
-    if (dx < 0) robots[id].spriteIndex = SPR_LEFT;
-    else if (dx > 0) robots[id].spriteIndex = SPR_RIGHT;
-    else if (dy < 0) robots[id].spriteIndex = SPR_UP;
-    else if (dy > 0) robots[id].spriteIndex = SPR_DOWN;
+    if (dx < 0) SetRobotMoveSprite(id, SPR_LEFT);
+    else if (dx > 0) SetRobotMoveSprite(id, SPR_RIGHT);
+    else if (dy < 0) SetRobotMoveSprite(id, SPR_UP);
+    else if (dy > 0) SetRobotMoveSprite(id, SPR_DOWN);
     if (id >= 0 && id < humanPlayers) {
         playerFacingX[id] = dx;
         playerFacingY[id] = dy;
@@ -2699,7 +2840,7 @@ static void FinishRobotTileMove(WORD id)
 
     if (CleanTileForRobot(id, tx, ty)) {
         robots[id].cleanStreak++;
-        if (robots[id].cleanStreak >= POWERUP_CLEAN_TARGET) {
+        if (robots[id].cleanStreak >= robots[id].powerCleanTarget) {
             robots[id].cleanStreak = 0;
             TriggerRobotPower(id);
         }
@@ -3003,6 +3144,7 @@ static void StepGame(void)
 
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
         if (robots[i].stunTicks > 0) robots[i].stunTicks--;
         if (robots[i].powerType == POWER_BOLT && robots[i].powerMovesLeft > 0 && (RandRange(24) == 0)) {
             WORD j;
@@ -3024,6 +3166,10 @@ static void StepGame(void)
         }
     }
     StepPlayerBolts();
+    if (empCountdownTicks > 0) {
+        empCountdownTicks--;
+        if (empCountdownTicks <= 0) empCountdownOwner = -1;
+    }
     if (lastPowerTicks > 0) lastPowerTicks--;
 
     for (i = 0; i < humanPlayers; i++) {
@@ -3239,8 +3385,8 @@ static void DrawRobotHealthStrip(void)
         if (robots[i].powerMovesLeft > 0) {
             MiniText(&renderRP, x + 2, 26, "P", 14);
         } else if (robots[i].cleanStreak > 0) {
-            char streakText[2];
-            snprintf(streakText, sizeof(streakText), "%d", robots[i].cleanStreak);
+            char streakText[8];
+            snprintf(streakText, sizeof(streakText), "%d/%d", robots[i].cleanStreak, robots[i].powerCleanTarget);
             MiniText(&renderRP, x + 2, 26, streakText, 7);
         }
 
@@ -3442,6 +3588,27 @@ static void DrawPauseMenu(void)
     MiniTextCentered(&renderRP, bottom - 12, "ARROWS ENTER", 13, 1);
 }
 
+static void DrawEmpCountdown(void)
+{
+    WORD secondsLeft;
+    char b[16];
+
+    if (empCountdownTicks <= 0) return;
+
+    secondsLeft = ((empCountdownTicks - 1) / POWERUP_EMP_TICKS_PER_SECOND) + 1;
+    if (secondsLeft < 1) secondsLeft = 1;
+    if (secondsLeft > 5) secondsLeft = 5;
+    snprintf(b, sizeof(b), "EMP %d", secondsLeft);
+
+    SetAPen(&renderRP, 1);
+    RectFill(&renderRP, 106, 50, 214, 82);
+    SetAPen(&renderRP, 12);
+    RectFill(&renderRP, 108, 52, 212, 80);
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 110, 54, 210, 78);
+    MiniTextCentered(&renderRP, 60, b, 14, 3);
+}
+
 static void DrawAiSelectMenu(void)
 {
     static const char *items[4] = { "0 AI", "1 AI", "2 AI", "3 AI" };
@@ -3494,7 +3661,7 @@ static void DrawFrame(void)
         MiniTextCentered(&renderRP, 86, "A TINY AMIGA ROBOT CLEANER", 7, 2);
         MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
         MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
-        MiniTextCentered(&renderRP, 134, "EVERY 5 DIRT EARNS POWERS", 14, 2);
+        MiniTextCentered(&renderRP, 134, "EMP/DIRT NEED 5 7 10", 14, 2);
         DrawTitleCarousel();
         if (aiSelectMenuOpen) {
             DrawAiSelectMenu();
@@ -3526,6 +3693,7 @@ static void DrawFrame(void)
         DrawPlayerBolt(i);
     }
 
+    DrawEmpCountdown();
     DrawRoundStartOverlay();
 
     if (pauseMenuOpen) {
