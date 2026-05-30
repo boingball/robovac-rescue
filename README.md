@@ -4,10 +4,14 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
 
 ## Controls
 
-- Arrow keys: move your robot
-- Left/Right arrows on title screen: choose your player hoover in the robot carousel
+- Player 1: arrow keys move; `B` shoots a bolt. Joystick 1 stays disabled until joystick 1 fire is pressed, then `J1` appears and joystick 1 can move/fire.
+- Player 2: `Z` left, `X` down, `C` right, `S` up; `V` shoots a bolt. Joystick 2 stays disabled until joystick 2 fire is pressed, then `J2` appears and joystick 2 can move/fire.
+- Title carousel:
+  - By default this is a one-player game and Left/Right arrows choose Player 1's hoover.
+  - Player 2 joins by pressing joystick 2 fire or `V`; the carousel switches to Player 2 selection.
+  - Player 2 chooses with joystick 2 left/right or `Z`/`C`, then presses joystick 2 fire or `V` again to lock Player 2 and return the carousel to Player 1.
 - `R` / `Space`:
-  - On title: start match
+  - On title: start match (or lock Player 2 if Player 2 is currently selecting)
   - During match: reset current round
   - End of round: continue to next round
   - End of match: start new best-of-5 match
@@ -63,7 +67,7 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
 
 ## Robot, Battery, and Dock Rules
 
-- Supports player + up to 3 AI rivals.
+- Supports one or two human players plus configurable AI rivals.
 - Every robot has its own battery.
 - Player battery is managed manually by movement.
 - AI robots monitor their own battery and return to their own dock when low (<= 25), then resume cleaning after recharge.
