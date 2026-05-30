@@ -83,8 +83,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_CLEAN_TARGET_3  10
 #define POWERUP_DURATION_MOVES  20
 #define POWERUP_BOLT_MOVES      10
-#define POWERUP_EMP_TICKS       250
-#define POWERUP_EMP_TICKS_PER_SECOND 50
+#define POWERUP_EMP_STEP_FRAMES  17
+#define POWERUP_EMP_TICKS       (5 * POWERUP_EMP_STEP_FRAMES)
 #define POWERUP_DIRT_DROP       5
 #define POWERUP_QUAD_RADIUS     1
 #define ROBOT_TURN_TICKS        1
@@ -504,6 +504,7 @@ static void PlayGoSample(void);
 static void StopGetReadySample(void);
 static void StopCountdownSample(void);
 static void StopGoSample(void);
+static void StopRoundStartSamples(void);
 static void StepRoundStartSamples(void);
 static BOOL LoadGameplaySamples(void);
 static void FreeGameplaySamples(void);
@@ -799,6 +800,13 @@ static void StopGoSample(void)
     StopOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
 }
 
+static void StopRoundStartSamples(void)
+{
+    StopGetReadySample();
+    StopCountdownSample();
+    StopGoSample();
+}
+
 static void PlayGetReadySample(void)
 {
     PlayOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
@@ -806,14 +814,17 @@ static void PlayGetReadySample(void)
 
 static void PlayCountdownSample(void)
 {
+    StopCountdownSample();
     StopGoSample();
     PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+    if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_FRAMES) {
+        countdownSample.ticksRemaining = ROUND_COUNTDOWN_FRAMES;
+    }
 }
 
 static void PlayGoSample(void)
 {
-    if (goSample.playing) return;
-    StopCountdownSample();
+    StopRoundStartSamples();
     PlayOneShotSample(&goSample, COUNTDOWN_AUDIO_CHANNEL);
 }
 
@@ -2710,9 +2721,7 @@ static void ResetLevel(void)
 
     StopTitleMusic();
     StopGameplaySamples();
-    StopGetReadySample();
-    StopCountdownSample();
-    StopGoSample();
+    StopRoundStartSamples();
 
     roomType = RandRange(5);
     layout = roomLayouts[roomType];
@@ -3051,9 +3060,7 @@ static void CheckEndState(void)
 static void EnterTitleScreen(void)
 {
     StopGameplaySamples();
-    StopGetReadySample();
-    StopCountdownSample();
-    StopGoSample();
+    StopRoundStartSamples();
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
@@ -3130,9 +3137,8 @@ static void StepGame(void)
     if (roundGoTicks > 0) {
         roundGoTicks--;
         if (!goSample.playing || roundGoTicks <= 0) {
-            StopGetReadySample();
-            StopCountdownSample();
-            StopGoSample();
+            StopRoundStartSamples();
+            roundGoTicks = 0;
             StartMainGameMusic();
         }
     }
@@ -3590,7 +3596,7 @@ static void DrawEmpCountdown(void)
 
     if (empCountdownTicks <= 0) return;
 
-    secondsLeft = ((empCountdownTicks - 1) / POWERUP_EMP_TICKS_PER_SECOND) + 1;
+    secondsLeft = ((empCountdownTicks - 1) / POWERUP_EMP_STEP_FRAMES) + 1;
     if (secondsLeft < 1) secondsLeft = 1;
     if (secondsLeft > 5) secondsLeft = 5;
     snprintf(b, sizeof(b), "EMP %d", secondsLeft);

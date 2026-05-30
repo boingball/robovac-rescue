@@ -27,7 +27,7 @@ Every robot tracks a five-dirt clean streak. Whenever a robot cleans its fifth d
 - Dust Viper: double speed for 20 moves.
 - Crumb Comet: storm bolt for 10 moves, letting the robot zap nearby rivals.
 - Neon Nibbler: quad ghost for 20 moves, cleaning a 3x3 area and passing through walls/tables.
-- Mote Marauder: EMP blast that stuns every other robot.
+- Mote Marauder: EMP blast that briefly stuns every other robot while a fast 5-4-3-2-1 warning plays.
 - Pixel Prowler: dirt bomb that drops up to 5 new dirt tiles onto open floor.
 - Bristle Blitz: battery burst that instantly refills the robot.
 - Static Sweep: wall smash for 20 moves, breaking interior wall tiles while moving.
@@ -89,9 +89,9 @@ When present, the module is loaded into chip RAM and played while the startup ti
 
 Round starts and gameplay also look for optional uncompressed 8SVX samples:
 
-- `PROGDIR:samples/getready.8svx` plays once on the first audio channel when the 3-2-1 overlay appears.
-- `PROGDIR:samples/countdown.8svx` plays once on a second audio channel for each of the 3, 2, and 1 countdown steps.
-- `PROGDIR:samples/go.8svx` plays once on that second audio channel when GO appears.
+- `PROGDIR:samples/getready.8svx` plays once on the first audio channel when the 3-2-1 overlay appears and is stopped when GO appears.
+- `PROGDIR:samples/countdown.8svx` plays the three 3-2-1 beeps on a second audio channel and is clamped to the 3-2-1 overlay length so any trailing audio is cut before GO.
+- All round-start samples are stopped when GO appears, then `PROGDIR:samples/go.8svx` plays once on that second audio channel.
 - `PROGDIR:samples/mainmusic-lo.8svx` starts after the GO voice has ended and loops using the 8SVX repeat section until the level ends, using Paula channels 1 and 4.
 - `PROGDIR:samples/boltfire.8svx` plays once whenever a player fires an energy bolt, using Paula channel 3.
 - `PROGDIR:samples/hoover-go-loop-low.8svx` loops while at least one hoover is moving and stops when all hoovers are stationary, using Paula channel 2.
