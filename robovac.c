@@ -149,6 +149,12 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_COPPER_BANDS 32
 
 #define TITLE_MUSIC_PATH "PROGDIR:mods/robovac_startup.mod"
+#define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
+#define GET_READY_AUDIO_CHANNEL 0
+#define PAULA_CLOCK_HZ 3546895UL
+#define ROUND_COUNTDOWN_SECONDS 3
+#define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * 50)
+#define ROUND_GO_FRAMES 55
 #define MOD_HEADER_SIZE 1084
 #define MOD_SAMPLE_COUNT 31
 #define MOD_POSITION_COUNT 128
@@ -202,6 +208,16 @@ struct ModSample {
     UBYTE volume;
 };
 
+struct OneShotSample {
+    UBYTE *data;
+    LONG dataSize;
+    UWORD lengthWords;
+    UWORD period;
+    UBYTE volume;
+    BOOL loaded;
+    BOOL playing;
+};
+
 struct ModPlayer {
     UBYTE *moduleData;
     LONG moduleSize;
@@ -248,6 +264,7 @@ static BOOL titleCopperActive = FALSE;
 static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 static struct ModPlayer titleMusic;
+static struct OneShotSample getReadySample;
 
 static UBYTE map[MAP_H][MAP_W];
 
@@ -281,6 +298,8 @@ static BOOL pauseMenuOpen = FALSE;
 static WORD pauseMenuSelection = 0;
 static BOOL aiSelectMenuOpen = FALSE;
 static WORD aiSelectMenuSelection = 0;
+static WORD roundCountdownTicks = 0;
+static WORD roundGoTicks = 0;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -443,6 +462,11 @@ static void FreeTitleMusic(void);
 static void StepTitleMusic(void);
 static void ServiceTitleMusicForState(void);
 static void StopTitleMusic(void);
+static BOOL LoadGetReadySample(void);
+static void FreeGetReadySample(void);
+static void PlayGetReadySample(void);
+static void StopGetReadySample(void);
+static BOOL RoundStartLocked(void);
 static void CloseGameScreen(void);
 
 static const char *roomLayouts[5][MAP_H] = {
@@ -652,6 +676,8 @@ static void DrawTileIntoCache(UBYTE tileType)
 }
 
 
+static UWORD AudioDmaBit(WORD channel);
+
 static UWORD ReadBE16(const UBYTE *p)
 {
     return (UWORD)(((UWORD)p[0] << 8) | p[1]);
@@ -666,6 +692,148 @@ static LONG GetFileSize(BPTR fh)
     if (size == -1) return -1;
     if (Seek(fh, 0, OFFSET_BEGINNING) == -1) return -1;
     return size;
+}
+
+
+static ULONG ReadBE32(const UBYTE *p)
+{
+    return ((ULONG)p[0] << 24) | ((ULONG)p[1] << 16) | ((ULONG)p[2] << 8) | p[3];
+}
+
+static BOOL RoundStartLocked(void)
+{
+    return (gameState == GAME_PLAYING && roundCountdownTicks > 0) ? TRUE : FALSE;
+}
+
+static void StopGetReadySample(void)
+{
+    UWORD dmaBit = AudioDmaBit(GET_READY_AUDIO_CHANNEL);
+
+    if (!getReadySample.loaded && !getReadySample.playing) return;
+
+    custom.dmacon = dmaBit;
+    custom.aud[GET_READY_AUDIO_CHANNEL].ac_vol = 0;
+    getReadySample.playing = FALSE;
+}
+
+static void PlayGetReadySample(void)
+{
+    UWORD dmaBit;
+
+    if (!getReadySample.loaded || !getReadySample.data || getReadySample.lengthWords == 0) return;
+
+    dmaBit = AudioDmaBit(GET_READY_AUDIO_CHANNEL);
+    custom.dmacon = dmaBit;
+    custom.aud[GET_READY_AUDIO_CHANNEL].ac_ptr = (UWORD *)getReadySample.data;
+    custom.aud[GET_READY_AUDIO_CHANNEL].ac_len = getReadySample.lengthWords;
+    custom.aud[GET_READY_AUDIO_CHANNEL].ac_per = getReadySample.period;
+    custom.aud[GET_READY_AUDIO_CHANNEL].ac_vol = getReadySample.volume;
+    custom.dmacon = DMAF_SETCLR | dmaBit;
+    getReadySample.playing = TRUE;
+}
+
+static BOOL LoadGetReadySample(void)
+{
+    BPTR fh;
+    LONG size;
+    LONG readSize;
+    UBYTE *fileData;
+    LONG pos;
+    LONG bodyOffset = -1;
+    LONG bodySize = 0;
+    UWORD sampleRate = 0;
+    UBYTE compression = 0;
+    ULONG volume = 0x10000UL;
+    LONG allocSize;
+
+    memset(&getReadySample, 0, sizeof(getReadySample));
+
+    fh = Open(GET_READY_SAMPLE_PATH, MODE_OLDFILE);
+    if (!fh) {
+        printf("Optional %s not loaded; round countdown voice disabled\n", GET_READY_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    size = GetFileSize(fh);
+    if (size < 20) {
+        Close(fh);
+        printf("%s is too small for an 8SVX sample\n", GET_READY_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    fileData = (UBYTE *)AllocMem(size, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!fileData) {
+        Close(fh);
+        printf("Could not allocate memory for %s\n", GET_READY_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    readSize = Read(fh, fileData, size);
+    Close(fh);
+    if (readSize != size) {
+        FreeMem(fileData, size);
+        printf("Could not read %s\n", GET_READY_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    if (memcmp(fileData, "FORM", 4) != 0 || memcmp(fileData + 8, "8SVX", 4) != 0) {
+        FreeMem(fileData, size);
+        printf("%s is not an IFF 8SVX sample\n", GET_READY_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    pos = 12;
+    while (pos + 8 <= size) {
+        ULONG chunkSize = ReadBE32(fileData + pos + 4);
+        LONG dataPos = pos + 8;
+        if (dataPos + (LONG)chunkSize > size) break;
+
+        if (memcmp(fileData + pos, "VHDR", 4) == 0 && chunkSize >= 20) {
+            sampleRate = ReadBE16(fileData + dataPos + 12);
+            compression = fileData[dataPos + 15];
+            volume = ReadBE32(fileData + dataPos + 16);
+        } else if (memcmp(fileData + pos, "BODY", 4) == 0) {
+            bodyOffset = dataPos;
+            bodySize = chunkSize;
+        }
+
+        pos = dataPos + (LONG)chunkSize + (chunkSize & 1);
+    }
+
+    if (bodyOffset < 0 || bodySize <= 1 || sampleRate == 0 || compression != 0) {
+        FreeMem(fileData, size);
+        printf("%s is not a playable uncompressed 8SVX sample\n", GET_READY_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    allocSize = bodySize + (bodySize & 1);
+    getReadySample.data = (UBYTE *)AllocMem(allocSize, MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
+    if (!getReadySample.data) {
+        FreeMem(fileData, size);
+        printf("Could not allocate chip RAM for %s\n", GET_READY_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    CopyMem(fileData + bodyOffset, getReadySample.data, bodySize);
+    FreeMem(fileData, size);
+
+    getReadySample.dataSize = allocSize;
+    getReadySample.lengthWords = (UWORD)(allocSize / 2);
+    getReadySample.period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
+    if (getReadySample.period < 124) getReadySample.period = 124;
+    getReadySample.volume = (volume >= 0x10000UL) ? 64 : (UBYTE)((volume * 64UL) / 0x10000UL);
+    if (getReadySample.volume == 0) getReadySample.volume = 64;
+    getReadySample.loaded = TRUE;
+    return TRUE;
+}
+
+static void FreeGetReadySample(void)
+{
+    StopGetReadySample();
+    if (getReadySample.data) {
+        FreeMem(getReadySample.data, getReadySample.dataSize);
+    }
+    memset(&getReadySample, 0, sizeof(getReadySample));
 }
 
 static UWORD AudioDmaBit(WORD channel)
@@ -2195,6 +2363,7 @@ static void ResetLevel(void)
     const char **layout;
 
     StopTitleMusic();
+    StopGetReadySample();
 
     roomType = RandRange(5);
     layout = roomLayouts[roomType];
@@ -2222,12 +2391,15 @@ static void ResetLevel(void)
     playerBolts[1].active = FALSE;
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
+    roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
+    roundGoTicks = 0;
     gameState = GAME_PLAYING;
     ClosePauseMenu();
 
     InitRobots();
     CountDirt();
     BuildRoomBuffer();
+    PlayGetReadySample();
 }
 
 static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
@@ -2523,6 +2695,7 @@ static void CheckEndState(void)
 
 static void EnterTitleScreen(void)
 {
+    StopGetReadySample();
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
@@ -2575,6 +2748,19 @@ static void StepGame(void)
 
     if (gameState != GAME_PLAYING) return;
     if (pauseMenuOpen) return;
+
+    if (roundCountdownTicks > 0) {
+        roundCountdownTicks--;
+        if (roundCountdownTicks <= 0) {
+            roundGoTicks = ROUND_GO_FRAMES;
+            ClearMovementKeys();
+        }
+        return;
+    }
+    if (roundGoTicks > 0) {
+        roundGoTicks--;
+        if (roundGoTicks <= 0) StopGetReadySample();
+    }
 
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
@@ -2916,6 +3102,71 @@ static void DrawIntroTitleImage(void)
 }
 
 
+static void DrawRoundStartOverlay(void)
+{
+    WORD left = 48;
+    WORD top = 70;
+    WORD right = 272;
+    WORD bottom = 176;
+    WORD i;
+
+    if (gameState != GAME_PLAYING) return;
+    if (roundCountdownTicks <= 0 && roundGoTicks <= 0) return;
+
+    SetAPen(&renderRP, 1);
+    RectFill(&renderRP, left - 4, top - 4, right + 4, bottom + 4);
+    SetAPen(&renderRP, 13);
+    RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, left, top, right, bottom);
+
+    if (roundCountdownTicks > 0) {
+        WORD activeNumber = ((roundCountdownTicks - 1) / 50) + 1;
+        WORD phase = 49 - ((roundCountdownTicks - 1) % 50);
+        MiniTextCentered(&renderRP, top + 14, "GET-READY", 7, 4);
+        MiniTextCentered(&renderRP, top + 42, "HOVERS LOCKED", 8, 1);
+
+        for (i = 0; i < ROUND_COUNTDOWN_SECONDS; i++) {
+            WORD number = ROUND_COUNTDOWN_SECONDS - i;
+            WORD boxLeft = 78 + (i * 58);
+            WORD boxTop = top + 62;
+            WORD boxRight = boxLeft + 40;
+            WORD boxBottom = boxTop + 30;
+            char digit[2];
+            UBYTE pen = 8;
+
+            SetAPen(&renderRP, 8);
+            RectFill(&renderRP, boxLeft - 2, boxTop - 2, boxRight + 2, boxBottom + 2);
+            SetAPen(&renderRP, 0);
+            RectFill(&renderRP, boxLeft, boxTop, boxRight, boxBottom);
+
+            if (number > activeNumber) {
+                SetAPen(&renderRP, 10);
+                RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxRight - 2, boxBottom - 2);
+                pen = 0;
+            } else if (number == activeNumber) {
+                WORD greenFill = ((boxRight - boxLeft - 4) * phase) / 49;
+                SetAPen(&renderRP, 3);
+                RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxRight - 2, boxBottom - 2);
+                if (greenFill > 0) {
+                    SetAPen(&renderRP, 10);
+                    RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxLeft + 1 + greenFill, boxBottom - 2);
+                }
+                pen = (phase > 24) ? 0 : 7;
+            } else {
+                pen = 8;
+            }
+
+            digit[0] = (char)('0' + number);
+            digit[1] = '\0';
+            MiniTextScaled(&renderRP, boxLeft + 14, boxTop + 8, digit, pen, 3);
+        }
+    } else {
+        MiniTextCentered(&renderRP, top + 28, "GO", 10, 5);
+        MiniTextCentered(&renderRP, top + 76, "CLEAN CLEAN CLEAN", 13, 2);
+    }
+}
+
 static void DrawPauseMenu(void)
 {
     static const char *items[2] = { "RESTART LEVEL", "MAIN MENU" };
@@ -3034,6 +3285,8 @@ static void DrawFrame(void)
     for (i = 0; i < humanPlayers; i++) {
         DrawPlayerBolt(i);
     }
+
+    DrawRoundStartOverlay();
 
     if (pauseMenuOpen) {
         DrawPauseMenu();
@@ -3241,6 +3494,7 @@ static void FirePlayerBolt(WORD id)
     struct Bolt *bolt;
 
     if (gameState != GAME_PLAYING) return;
+    if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
     bolt = &playerBolts[id];
     if (robots[id].battery < 2 && !(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) return;
@@ -3582,6 +3836,7 @@ static BOOL OpenGameScreen(void)
     }
 
     LoadTitleMusic();
+    LoadGetReadySample();
 
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
@@ -3607,6 +3862,7 @@ static BOOL OpenGameScreen(void)
 
 static void CloseGameScreen(void)
 {
+    FreeGetReadySample();
     FreeTitleMusic();
     FreeTitleCopperGradient();
 
