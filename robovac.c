@@ -3615,7 +3615,7 @@ static void DrawRoundStartOverlay(void)
         SetAPen(&renderRP, 0);
         RectFill(&renderRP, left, top, right, bottom);
         MiniTextCentered(&renderRP, top + 14, "GET-READY", 7, 4);
-        MiniTextCentered(&renderRP, top + 42, "HOVERS LOCKED", 8, 1);
+        MiniTextCentered(&renderRP, top + 42, "HOOVERS LOCKED", 8, 1);
 
         for (i = 0; i < ROUND_COUNTDOWN_SECONDS; i++) {
             WORD number = ROUND_COUNTDOWN_SECONDS - i;
