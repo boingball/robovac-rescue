@@ -3284,8 +3284,6 @@ static void StepGame(void)
 {
     WORD i;
 
-    ServiceTitleMusicForState();
-
     if (gameState == GAME_INTRO) {
         StepIntro();
         return;
