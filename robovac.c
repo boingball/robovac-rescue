@@ -196,6 +196,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD3 0x0008
 #endif
 #define TITLE_MUSIC_DMA_MASK (DMAF_AUD0 | DMAF_AUD1 | DMAF_AUD2 | DMAF_AUD3)
+#define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
+#define MENU_MUSIC_STREAM_PREROLL_FRAMES 0
 
 struct Robot {
     WORD tileX;
@@ -293,6 +295,10 @@ static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 static struct ModPlayer titleMusic;
 static struct OneShotSample menuMusicSample;
+static BOOL menuMusicStreaming = FALSE;
+static ULONG menuMusicNextOffsetBytes = 0;
+static WORD menuMusicCurrentChunkTicks = 0;
+static WORD menuMusicQueuedChunkTicks = 0;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
@@ -507,6 +513,9 @@ static BOOL LoadMenuMusicSample(void);
 static void FreeMenuMusicSample(void);
 static void StartMenuMusic(void);
 static void StopMenuMusic(void);
+static WORD QueueMenuMusicChunk(ULONG offsetBytes);
+static WORD MenuMusicChunkTicks(ULONG chunkBytes);
+static void ServiceMenuMusicStream(void);
 static void ServiceMenuMusicForState(void);
 static BOOL LoadRoundStartSamples(void);
 static void FreeRoundStartSamples(void);
@@ -1069,21 +1078,118 @@ static BOOL LoadMenuMusicSample(void)
 
 static void StopMenuMusic(void)
 {
+    menuMusicStreaming = FALSE;
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentChunkTicks = 0;
+    menuMusicQueuedChunkTicks = 0;
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
 
+static WORD MenuMusicChunkTicks(ULONG chunkBytes)
+{
+    ULONG ticks;
+
+    if (menuMusicSample.dataSize <= 0 || menuMusicSample.playbackTicks == 0) return 1;
+    ticks = (chunkBytes * (ULONG)menuMusicSample.playbackTicks + (ULONG)menuMusicSample.dataSize - 1UL) /
+            (ULONG)menuMusicSample.dataSize;
+    if (ticks < 1UL) ticks = 1UL;
+    if (ticks > 32767UL) ticks = 32767UL;
+    return (WORD)ticks;
+}
+
+static WORD QueueMenuMusicChunk(ULONG offsetBytes)
+{
+    ULONG bytesRemaining;
+    ULONG chunkBytes;
+    UWORD chunkWords;
+
+    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return 1;
+    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
+
+    bytesRemaining = (ULONG)menuMusicSample.dataSize - offsetBytes;
+    chunkBytes = (bytesRemaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ? MENU_MUSIC_STREAM_CHUNK_BYTES : bytesRemaining;
+    chunkBytes &= ~1UL;
+    if (chunkBytes < 2UL) {
+        offsetBytes = 0;
+        chunkBytes = ((ULONG)menuMusicSample.dataSize > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
+                     MENU_MUSIC_STREAM_CHUNK_BYTES : (ULONG)menuMusicSample.dataSize;
+        chunkBytes &= ~1UL;
+    }
+    if (chunkBytes < 2UL) return 1;
+
+    chunkWords = (UWORD)(chunkBytes / 2UL);
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = chunkWords;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = chunkWords;
+
+    offsetBytes += chunkBytes;
+    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
+    menuMusicNextOffsetBytes = offsetBytes;
+    return MenuMusicChunkTicks(chunkBytes);
+}
+
+static void ServiceMenuMusicStream(void)
+{
+    ULONG offsetBytes;
+
+    if (!menuMusicStreaming || !menuMusicSample.playing) return;
+
+    if (menuMusicCurrentChunkTicks > 0) menuMusicCurrentChunkTicks--;
+    if (menuMusicCurrentChunkTicks > MENU_MUSIC_STREAM_PREROLL_FRAMES) return;
+
+    offsetBytes = menuMusicNextOffsetBytes;
+    menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
+    if (menuMusicCurrentChunkTicks < 1) menuMusicCurrentChunkTicks = 1;
+    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(offsetBytes);
+}
+
 static void StartMenuMusic(void)
 {
+    UWORD leftDmaBit;
+    UWORD rightDmaBit;
+    ULONG firstChunkBytes;
+
     if (menuMusicSample.playing) return;
-    PlayLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-    PlayLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
+
+    if ((ULONG)menuMusicSample.dataSize <= 131070UL) {
+        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+        return;
+    }
+
+    firstChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
+    if (firstChunkBytes > (ULONG)menuMusicSample.dataSize) firstChunkBytes = (ULONG)menuMusicSample.dataSize;
+    firstChunkBytes &= ~1UL;
+    if (firstChunkBytes < 2UL) return;
+
+    leftDmaBit = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+    custom.dmacon = leftDmaBit | rightDmaBit;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
+    custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
+
+    menuMusicSample.playing = TRUE;
+    menuMusicStreaming = TRUE;
+    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
+    menuMusicNextOffsetBytes = firstChunkBytes;
+    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
 }
 
 static void ServiceMenuMusicForState(void)
 {
     if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
         StartMenuMusic();
+        ServiceMenuMusicStream();
     } else if (menuMusicSample.playing) {
         StopMenuMusic();
     }
@@ -1091,8 +1197,11 @@ static void ServiceMenuMusicForState(void)
 
 static void FreeMenuMusicSample(void)
 {
-    StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-    FreeOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    StopMenuMusic();
+    if (menuMusicSample.data) {
+        FreeMem(menuMusicSample.data, menuMusicSample.dataSize);
+    }
+    memset(&menuMusicSample, 0, sizeof(menuMusicSample));
 }
 
 static BOOL LoadGameplaySamples(void)
@@ -3912,6 +4021,7 @@ static void StartMatch(WORD players, WORD rivals)
 {
     WORD i;
     StopTitleMusic();
+    StopMenuMusic();
     humanPlayers = players;
     if (humanPlayers < 1) humanPlayers = 1;
     if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;

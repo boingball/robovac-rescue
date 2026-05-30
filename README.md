@@ -81,11 +81,11 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
 
 ## Startup Title Image
 
-The startup/title screens also look for a 4-channel ProTracker module at:
+The startup/title screens look for an optional uncompressed 8SVX menu-music sample at:
 
-- `PROGDIR:mods/robovac_startup.mod`
+- `PROGDIR:samples/RoboVacRescueMenuShort.8svx`
 
-When present, the module is loaded into chip RAM and played while the startup title image or main title menu is visible. Playback is clocked from elapsed time at a fixed 120 BPM target so heavy title rendering does not drag the module tempo around. Playback stops as soon as a match starts.
+When present, the sample is streamed from chip RAM across Paula channels 1 and 4 while the startup title image or main title menu is visible. Oversized samples are split into safe DMA chunks so the whole track plays before it loops, instead of looping only the first Paula-length block. Playback stops as soon as a match starts.
 
 Round starts and gameplay also look for optional uncompressed 8SVX samples:
 
