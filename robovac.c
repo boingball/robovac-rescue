@@ -15,9 +15,10 @@
  *   m68k-amigaos-gcc -s -Os -o robovac robovac.c
  *
  * Controls:
- *   Arrow keys / joystick 1 - move player 1 robot; B / joy 1 fire bolts
- *   Z/X/C/S / joystick 2   - move player 2 robot; V / joy 2 fire bolts
- *   V          - arm/lock two-player carousel selection from title screen
+ *   Arrow keys / B - move player 1 robot / fire bolts
+ *   Z/X/C/S / V   - move player 2 robot / fire bolts
+ *   Joysticks     - disabled until that joystick fire is pressed (J1/J2 shown)
+ *   P2 fire/V     - arm/lock two-player carousel selection from title screen
  *   R/Space    - start/reset
  *   Q          - open in-game restart/quit menu
  *   1/2/3      - start with 1/2/3 AI rivals from title screen
@@ -257,6 +258,7 @@ static WORD humanPlayers = 1;
 static WORD selectedPlayerVariant[MAX_HUMAN_PLAYERS] = {0, 1};
 static WORD titleSelectPlayer = 0;
 static BOOL titleTwoPlayerArmed = FALSE;
+static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 
 static WORD dirtLeft = 0;
@@ -285,6 +287,7 @@ static BOOL joyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyFirePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -2466,6 +2469,9 @@ static void EnterTitleScreen(void)
     humanPlayers = 1;
     titleSelectPlayer = 0;
     titleTwoPlayerArmed = FALSE;
+    titlePlayer2Locked = FALSE;
+    joyEnabled[0] = FALSE;
+    joyEnabled[1] = FALSE;
     ClearMovementKeys();
     LoadGamePalette();
 }
@@ -2715,10 +2721,12 @@ static void DrawTitleCarousel(void)
 
     snprintf(b, sizeof(b), "P%d %s", titleSelectPlayer + 1, robotVariantNames[selectedPlayerVariant[titleSelectPlayer]]);
     MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 50, b, 7, 2);
-    if (titleTwoPlayerArmed) {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 ARROWS P2 Z/C V LOCK", 13, 2);
+    if (!titleTwoPlayerArmed) {
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  P2 FIRE JOINS", 13, 2);
+    } else if (!titlePlayer2Locked) {
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2 SELECT  P2 FIRE LOCK", 13, 2);
     } else {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "ARROWS CHOOSE V 2P", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  SPACE START", 13, 2);
     }
 }
 
@@ -2761,6 +2769,23 @@ static void DrawRobotHealthStrip(void)
     }
 }
 
+static void DrawJoystickIcons(void)
+{
+    WORD i;
+
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        WORD x = SCREEN_W - 38 + (i * 18);
+        WORD y = 4;
+
+        if (!joyEnabled[i]) continue;
+        SetAPen(&renderRP, 4);
+        RectFill(&renderRP, x, y, x + 14, y + 10);
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, x + 1, y + 1, x + 13, y + 9);
+        MiniText(&renderRP, x + 3, y + 3, (i == 0) ? "J1" : "J2", 14);
+    }
+}
+
 static void DrawHud(void)
 {
     char b[160];
@@ -2768,10 +2793,12 @@ static void DrawHud(void)
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
 
+    DrawJoystickIcons();
+
     if (gameState == GAME_TITLE) {
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
-        MiniTextCentered(&renderRP, 20, "ARROWS P1  Z/X/C/S P2", 13, 2);
-        MiniTextCentered(&renderRP, 32, "V: 2P/P2 LOCK  B/V BOLT", 13, 2);
+        MiniTextCentered(&renderRP, 20, "ARROWS P1  P2 FIRE JOINS", 13, 2);
+        MiniTextCentered(&renderRP, 32, "P2 Z/C SELECT  V LOCK", 13, 2);
         MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/R START", 14, 2);
         return;
     }
@@ -3002,6 +3029,7 @@ static void StartMatch(WORD players, WORD rivals)
     roundIndex = 0;
     for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
     titleTwoPlayerArmed = FALSE;
+    titlePlayer2Locked = FALSE;
     titleSelectPlayer = 0;
     ResetLevel();
 }
@@ -3019,15 +3047,31 @@ static void TitleChooseVariant(WORD playerId, WORD delta)
     while (selectedPlayerVariant[playerId] >= ROBOT_VARIANTS) selectedPlayerVariant[playerId] -= ROBOT_VARIANTS;
 }
 
-static void TitleArmOrStartTwoPlayer(void)
+static void TitleArmTwoPlayer(void)
+{
+    humanPlayers = 2;
+    titleTwoPlayerArmed = TRUE;
+    titlePlayer2Locked = FALSE;
+    titleSelectPlayer = 1;
+}
+
+static void TitleLockPlayer2(void)
 {
     if (!titleTwoPlayerArmed) {
-        humanPlayers = 2;
-        titleTwoPlayerArmed = TRUE;
-        titleSelectPlayer = 1;
+        TitleArmTwoPlayer();
         return;
     }
-    StartMatch(2, aiRivals);
+    titlePlayer2Locked = TRUE;
+    titleSelectPlayer = 0;
+}
+
+static void TitlePlayer2Fire(void)
+{
+    if (!titleTwoPlayerArmed || titlePlayer2Locked) {
+        TitleArmTwoPlayer();
+    } else {
+        TitleLockPlayer2();
+    }
 }
 
 static void FirePlayerBolt(WORD id)
@@ -3130,11 +3174,11 @@ static void HandleRawKey(UWORD rawCode)
     }
 
     if (!keyUpEvent && gameState == GAME_TITLE) {
-        if (code == RAW_LEFT) { titleSelectPlayer = 0; TitleChooseVariant(0, -1); return; }
-        if (code == RAW_RIGHT) { titleSelectPlayer = 0; TitleChooseVariant(0, 1); return; }
-        if (code == RAW_Z) { titleSelectPlayer = 1; TitleChooseVariant(1, -1); titleTwoPlayerArmed = TRUE; humanPlayers = 2; return; }
-        if (code == RAW_C) { titleSelectPlayer = 1; TitleChooseVariant(1, 1); titleTwoPlayerArmed = TRUE; humanPlayers = 2; return; }
-        if (code == RAW_V) { TitleArmOrStartTwoPlayer(); return; }
+        if (code == RAW_LEFT) { if (!titleTwoPlayerArmed || titlePlayer2Locked) { titleSelectPlayer = 0; TitleChooseVariant(0, -1); } return; }
+        if (code == RAW_RIGHT) { if (!titleTwoPlayerArmed || titlePlayer2Locked) { titleSelectPlayer = 0; TitleChooseVariant(0, 1); } return; }
+        if (code == RAW_Z) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; TitleChooseVariant(1, -1); return; }
+        if (code == RAW_C) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; TitleChooseVariant(1, 1); return; }
+        if (code == RAW_V) { TitlePlayer2Fire(); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
         if (code == RAW_3) { StartWithRivals(3); return; }
@@ -3150,6 +3194,7 @@ static void HandleRawKey(UWORD rawCode)
     if (!keyUpEvent && (code == RAW_R || code == RAW_SPACE)) {
         if (gameState == GAME_PLAYING) { ResetLevel(); }
         else if (gameState == GAME_ROUND_END) { roundIndex++; ResetLevel(); }
+        else if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); }
         else { WORD i; roundIndex = 0; for (i=0;i<MAX_ROBOTS;i++){roundWins[i]=0; totalScores[i]=0;} ResetLevel(); }
         return;
     }
@@ -3184,7 +3229,6 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
 {
     static BOOL prevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
     static BOOL prevRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
-    BOOL wasArmed;
 
     if (gameState != GAME_TITLE) {
         prevLeft[id] = left;
@@ -3192,28 +3236,25 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
         return;
     }
 
-    wasArmed = titleTwoPlayerArmed;
-    if (id == 0) {
-        titleSelectPlayer = 0;
-    } else {
-        titleSelectPlayer = 1;
-        if (left || right || fire) {
-            titleTwoPlayerArmed = TRUE;
-            humanPlayers = 2;
-        }
+    if (!joyEnabled[id]) {
+        prevLeft[id] = left;
+        prevRight[id] = right;
+        return;
     }
 
-    if (left && !prevLeft[id]) TitleChooseVariant(id, -1);
-    if (right && !prevRight[id]) TitleChooseVariant(id, 1);
-    if (fire && !joyFirePrev[id]) {
-        if (id == 0 && !titleTwoPlayerArmed) {
-            StartMatch(1, aiRivals);
-        } else if (!wasArmed) {
-            humanPlayers = 2;
-            titleTwoPlayerArmed = TRUE;
+    if (id == 0) {
+        if (!titleTwoPlayerArmed || titlePlayer2Locked) {
+            titleSelectPlayer = 0;
+            if (left && !prevLeft[id]) TitleChooseVariant(0, -1);
+            if (right && !prevRight[id]) TitleChooseVariant(0, 1);
+        }
+    } else {
+        if (fire && !joyFirePrev[id]) {
+            TitlePlayer2Fire();
+        } else if (titleTwoPlayerArmed && !titlePlayer2Locked) {
             titleSelectPlayer = 1;
-        } else {
-            StartMatch(2, aiRivals);
+            if (left && !prevLeft[id]) TitleChooseVariant(1, -1);
+            if (right && !prevRight[id]) TitleChooseVariant(1, 1);
         }
     }
 
@@ -3235,17 +3276,22 @@ static void PollJoysticks(void)
         BOOL up = JOY_UP(dat[i]);
         BOOL down = JOY_DOWN(dat[i]);
         BOOL fire = ReadJoystickFire(i);
+        BOOL firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
+
+        if (firePressed) {
+            joyEnabled[i] = TRUE;
+        }
 
         if (gameState == GAME_TITLE) {
             HandleTitleJoystick(i, left, right, fire);
         }
 
-        joyLeft[i] = left;
-        joyRight[i] = right;
-        joyUp[i] = up;
-        joyDown[i] = down;
+        joyLeft[i] = joyEnabled[i] ? left : FALSE;
+        joyRight[i] = joyEnabled[i] ? right : FALSE;
+        joyUp[i] = joyEnabled[i] ? up : FALSE;
+        joyDown[i] = joyEnabled[i] ? down : FALSE;
 
-        if (gameState == GAME_PLAYING && fire && !joyFirePrev[i]) {
+        if (gameState == GAME_PLAYING && joyEnabled[i] && firePressed) {
             FirePlayerBolt(i);
         }
         joyFirePrev[i] = fire;
