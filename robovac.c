@@ -145,7 +145,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MOD_PATTERN_BYTES (MOD_ROWS * MOD_CHANNELS * 4)
 #define MOD_DEFAULT_SPEED 6
 #define MOD_MAX_SPEED 31
-#define TITLE_MUSIC_TICKS_PER_FRAME 3
+#define MOD_TARGET_BPM 120
+#define MOD_TICK_USEC (2500000UL / MOD_TARGET_BPM)
+#define MOD_MAX_CATCHUP_TICKS 16
 #define TITLE_MUSIC_SILENCE_PERIOD 428
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -196,6 +198,10 @@ struct ModPlayer {
     UBYTE row;
     UBYTE tick;
     UBYTE speed;
+    ULONG lastSeconds;
+    ULONG lastMicros;
+    ULONG tickUsecAccumulator;
+    BOOL clockPrimed;
     BOOL loaded;
     BOOL playing;
     struct ModSample samples[MOD_SAMPLE_COUNT];
@@ -376,6 +382,7 @@ static void ClosePauseMenu(void);
 static BOOL LoadTitleMusic(void);
 static void FreeTitleMusic(void);
 static void StepTitleMusic(void);
+static void ServiceTitleMusicForState(void);
 static void StopTitleMusic(void);
 
 static const char *roomLayouts[5][MAP_H] = {
@@ -644,6 +651,10 @@ static void StopTitleMusic(void)
     titleMusic.row = 0;
     titleMusic.tick = 0;
     titleMusic.speed = MOD_DEFAULT_SPEED;
+    titleMusic.lastSeconds = 0;
+    titleMusic.lastMicros = 0;
+    titleMusic.tickUsecAccumulator = 0;
+    titleMusic.clockPrimed = FALSE;
 }
 
 static BOOL LoadTitleMusic(void)
@@ -789,8 +800,55 @@ static void PlayCurrentModRow(void)
     }
 }
 
+static void AdvanceTitleMusicTick(void)
+{
+    if (titleMusic.tick == 0) {
+        PlayCurrentModRow();
+    }
+
+    titleMusic.tick++;
+    if (titleMusic.tick >= titleMusic.speed) {
+        titleMusic.tick = 0;
+        titleMusic.row++;
+        if (titleMusic.row >= MOD_ROWS) {
+            titleMusic.row = 0;
+            titleMusic.position++;
+            if (titleMusic.position >= titleMusic.songLength) {
+                titleMusic.position = 0;
+            }
+        }
+    }
+}
+
+static ULONG ElapsedUsecs(ULONG oldSeconds, ULONG oldMicros, ULONG newSeconds, ULONG newMicros)
+{
+    ULONG secondsDelta;
+
+    if (newSeconds < oldSeconds) return 0;
+
+    secondsDelta = newSeconds - oldSeconds;
+    if (newMicros < oldMicros) {
+        if (secondsDelta == 0) return 0;
+        secondsDelta--;
+        return (secondsDelta * 1000000UL) + (1000000UL - oldMicros) + newMicros;
+    }
+
+    return (secondsDelta * 1000000UL) + (newMicros - oldMicros);
+}
+
+static void PrimeTitleMusicClock(void)
+{
+    CurrentTime(&titleMusic.lastSeconds, &titleMusic.lastMicros);
+    titleMusic.tickUsecAccumulator = 0;
+    titleMusic.clockPrimed = TRUE;
+}
+
 static void StepTitleMusic(void)
 {
+    ULONG nowSeconds;
+    ULONG nowMicros;
+    ULONG elapsed;
+    WORD ticksDue = 0;
     WORD ticks;
 
     if (!titleMusic.loaded) return;
@@ -801,30 +859,37 @@ static void StepTitleMusic(void)
         titleMusic.row = 0;
         titleMusic.tick = 0;
         titleMusic.speed = MOD_DEFAULT_SPEED;
+        PrimeTitleMusicClock();
+        AdvanceTitleMusicTick();
+        return;
     }
 
-    /*
-     * Rendering the full title/intro scene is heavier than a plain VBlank
-     * replay interrupt on the target machines, so advance a few ProTracker
-     * ticks per rendered frame to keep the startup module near authored tempo.
-     */
-    for (ticks = 0; ticks < TITLE_MUSIC_TICKS_PER_FRAME; ticks++) {
-        if (titleMusic.tick == 0) {
-            PlayCurrentModRow();
-        }
+    if (!titleMusic.clockPrimed) {
+        PrimeTitleMusicClock();
+        return;
+    }
 
-        titleMusic.tick++;
-        if (titleMusic.tick >= titleMusic.speed) {
-            titleMusic.tick = 0;
-            titleMusic.row++;
-            if (titleMusic.row >= MOD_ROWS) {
-                titleMusic.row = 0;
-                titleMusic.position++;
-                if (titleMusic.position >= titleMusic.songLength) {
-                    titleMusic.position = 0;
-                }
-            }
-        }
+    CurrentTime(&nowSeconds, &nowMicros);
+    elapsed = ElapsedUsecs(titleMusic.lastSeconds, titleMusic.lastMicros, nowSeconds, nowMicros);
+    titleMusic.lastSeconds = nowSeconds;
+    titleMusic.lastMicros = nowMicros;
+
+    titleMusic.tickUsecAccumulator += elapsed;
+    while (titleMusic.tickUsecAccumulator >= MOD_TICK_USEC && ticksDue < MOD_MAX_CATCHUP_TICKS) {
+        titleMusic.tickUsecAccumulator -= MOD_TICK_USEC;
+        ticksDue++;
+    }
+    for (ticks = 0; ticks < ticksDue; ticks++) {
+        AdvanceTitleMusicTick();
+    }
+}
+
+static void ServiceTitleMusicForState(void)
+{
+    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
+        StepTitleMusic();
+    } else if (titleMusic.playing) {
+        StopTitleMusic();
     }
 }
 
@@ -2042,6 +2107,8 @@ static void ResetLevel(void)
     WORD x, y;
     const char **layout;
 
+    StopTitleMusic();
+
     roomType = RandRange(5);
     layout = roomLayouts[roomType];
 
@@ -2389,9 +2456,7 @@ static void StepGame(void)
 {
     WORD i;
 
-    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
-        StepTitleMusic();
-    }
+    ServiceTitleMusicForState();
 
     if (gameState == GAME_INTRO) {
         StepIntro();
@@ -3170,6 +3235,7 @@ int main(void)
         DrawFrame();
         WaitTOF();
         PresentFrame();
+        ServiceTitleMusicForState();
     }
 
     CloseGameScreen();

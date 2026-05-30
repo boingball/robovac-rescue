@@ -80,7 +80,7 @@ The startup/title screens also look for a 4-channel ProTracker module at:
 
 - `PROGDIR:mods/robovac_startup.mod`
 
-When present, the module is loaded into chip RAM and played while the startup title image or main title menu is visible. Playback stops as soon as a match starts.
+When present, the module is loaded into chip RAM and played while the startup title image or main title menu is visible. Playback is clocked from elapsed time at a fixed 120 BPM target so heavy title rendering does not drag the module tempo around. Playback stops as soon as a match starts.
 
 On startup, the game looks for a 32-colour ILBM title image at:
 
