@@ -1076,39 +1076,6 @@ static void StopMenuMusic(void)
 static void StartMenuMusic(void)
 {
     if (menuMusicSample.playing) return;
-    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-}
-
-static void ServiceMenuMusicForState(void)
-{
-    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
-        StartMenuMusic();
-    } else if (menuMusicSample.playing) {
-        StopMenuMusic();
-    }
-}
-
-static void FreeMenuMusicSample(void)
-{
-    StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-    FreeOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-}
-
-static BOOL LoadMenuMusicSample(void)
-{
-    return LoadOneShotSample(MENU_MUSIC_SAMPLE_PATH, &menuMusicSample, "menu music");
-}
-
-static void StopMenuMusic(void)
-{
-    StopOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-    StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-}
-
-static void StartMenuMusic(void)
-{
-    if (menuMusicSample.playing) return;
     PlayLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     PlayLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
