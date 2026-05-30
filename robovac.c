@@ -15,7 +15,9 @@
  *   m68k-amigaos-gcc -s -Os -o robovac robovac.c
  *
  * Controls:
- *   Arrow keys - move player robot
+ *   Arrow keys / joystick 1 - move player 1 robot; B / joy 1 fire bolts
+ *   Z/X/C/S / joystick 2   - move player 2 robot; V / joy 2 fire bolts
+ *   V          - arm/lock two-player carousel selection from title screen
  *   R/Space    - start/reset
  *   Q          - open in-game restart/quit menu
  *   1/2/3      - start with 1/2/3 AI rivals from title screen
@@ -40,6 +42,7 @@
 #include <datatypes/pictureclass.h>
 #include <datatypes/datatypes.h>
 #include <hardware/custom.h>
+#include <hardware/cia.h>
 #include <hardware/dmabits.h>
 #include <utility/tagitem.h>
 
@@ -47,6 +50,7 @@
 #include <string.h>
 
 extern struct Custom custom;
+extern struct CIA ciaa;
 
 static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
@@ -82,6 +86,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROBOT_W     16
 #define ROBOT_H     16
 #define MAX_ROBOTS  10
+#define MAX_HUMAN_PLAYERS 2
 #define ROBOT_VARIANTS 7
 
 #define START_X     1
@@ -120,6 +125,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_E       0x12
 #define RAW_S       0x21
 #define RAW_H       0x25
+#define RAW_Z       0x31
+#define RAW_X       0x32
+#define RAW_C       0x33
+#define RAW_V       0x34
 
 #define TITLE_CAROUSEL_Y 172
 #define TITLE_ROBOT_SCALE 2
@@ -244,7 +253,10 @@ static WORD aiPrevTileX[MAX_ROBOTS];
 static WORD aiPrevTileY[MAX_ROBOTS];
 static WORD robotCount = 2;
 static WORD aiRivals = 1;
-static WORD selectedPlayerVariant = 0;
+static WORD humanPlayers = 1;
+static WORD selectedPlayerVariant[MAX_HUMAN_PLAYERS] = {0, 1};
+static WORD titleSelectPlayer = 0;
+static BOOL titleTwoPlayerArmed = FALSE;
 static WORD titleSpinPhase = 0;
 
 static WORD dirtLeft = 0;
@@ -264,12 +276,17 @@ static BOOL running = TRUE;
 static BOOL pauseMenuOpen = FALSE;
 static WORD pauseMenuSelection = 0;
 
-static BOOL keyLeft = FALSE;
-static BOOL keyRight = FALSE;
-static BOOL keyUp = FALSE;
-static BOOL keyDown = FALSE;
-static WORD playerFacingX = 0;
-static WORD playerFacingY = -1;
+static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL keyUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL keyDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyFirePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
+static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
 static WORD lastPowerTicks = 0;
 
@@ -281,7 +298,10 @@ struct Bolt {
     LONG py;
     WORD ttl;
 };
-static struct Bolt playerBolt = {FALSE, 0, -1, 0, 0, 0};
+static struct Bolt playerBolts[MAX_HUMAN_PLAYERS] = {
+    {FALSE, 0, -1, 0, 0, 0},
+    {FALSE, 0, -1, 0, 0, 0}
+};
 
 static ULONG rng = 0x1234ABCD;
 
@@ -373,12 +393,13 @@ static const char *RobotTag(WORD id)
 }
 
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
-static void StepPlayerBolt(void);
+static void StepPlayerBolts(void);
 static void DrawTitleCarousel(void);
 static void TriggerRobotPower(WORD id);
 static WORD SpawnDirtTiles(WORD count);
 static void EnterTitleScreen(void);
 static void ClosePauseMenu(void);
+static void ClearMovementKeys(void);
 static BOOL LoadTitleMusic(void);
 static void FreeTitleMusic(void);
 static void StepTitleMusic(void);
@@ -1902,18 +1923,21 @@ static void DrawRobotBob(WORD id)
     }
 }
 
-static void DrawPlayerBolt(void)
+static void DrawPlayerBolt(WORD playerId)
 {
     WORD sx, sy, x, y;
     WORD srcBaseX;
+    struct Bolt *bolt;
 
-    if (!playerBolt.active || !robotCacheBM) return;
+    if (playerId < 0 || playerId >= MAX_HUMAN_PLAYERS) return;
+    bolt = &playerBolts[playerId];
+    if (!bolt->active || !robotCacheBM) return;
 
-    sx = MAP_X + FP_TO_INT(playerBolt.px);
-    sy = MAP_Y + FP_TO_INT(playerBolt.py);
+    sx = MAP_X + FP_TO_INT(bolt->px);
+    sy = MAP_Y + FP_TO_INT(bolt->py);
     srcBaseX = SPR_ENERGY_BOLT * ROBOT_W;
 
-    if (playerBolt.dirY != 0) {
+    if (bolt->dirY != 0) {
         for (y = 0; y < ROBOT_H; y++) {
             for (x = 0; x < ROBOT_W; x++) {
                 LONG p = ReadPixel(&robotRP, srcBaseX + x, y);
@@ -1955,8 +1979,10 @@ static void InitRobots(void)
 {
     WORD i;
 
-    robotCount = 1 + aiRivals;
-    if (robotCount < 1) robotCount = 1;
+    robotCount = humanPlayers + aiRivals;
+    if (humanPlayers < 1) humanPlayers = 1;
+    if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
+    if (robotCount < humanPlayers) robotCount = humanPlayers;
     if (robotCount > MAX_ROBOTS) robotCount = MAX_ROBOTS;
 
     for (i = 0; i < robotCount; i++) {
@@ -1971,9 +1997,13 @@ static void InitRobots(void)
         robots[i].cleanStreak = 0;
         robots[i].powerMovesLeft = 0;
         robots[i].powerType = POWER_NONE;
-        robots[i].ai = (i != 0) ? TRUE : FALSE;
+        robots[i].ai = (i >= humanPlayers) ? TRUE : FALSE;
         robots[i].spriteIndex = SPR_READY;
-        robots[i].spriteVariant = (i == 0) ? (UBYTE)selectedPlayerVariant : (UBYTE)((selectedPlayerVariant + i) % ROBOT_VARIANTS);
+        if (i < humanPlayers) {
+            robots[i].spriteVariant = (UBYTE)selectedPlayerVariant[i];
+        } else {
+            robots[i].spriteVariant = (UBYTE)((selectedPlayerVariant[0] + i) % ROBOT_VARIANTS);
+        }
     }
 
     moves = 0;
@@ -2125,8 +2155,9 @@ static void ResetLevel(void)
     }
 
     SpawnRoundDirt(roundDirtTargets[roundIndex]);
-    keyLeft = keyRight = keyUp = keyDown = FALSE;
-    playerBolt.active = FALSE;
+    ClearMovementKeys();
+    playerBolts[0].active = FALSE;
+    playerBolts[1].active = FALSE;
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
     gameState = GAME_PLAYING;
@@ -2175,9 +2206,9 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     else if (dx > 0) robots[id].spriteIndex = SPR_RIGHT;
     else if (dy < 0) robots[id].spriteIndex = SPR_UP;
     else if (dy > 0) robots[id].spriteIndex = SPR_DOWN;
-    if (id == 0) {
-        playerFacingX = dx;
-        playerFacingY = dy;
+    if (id >= 0 && id < humanPlayers) {
+        playerFacingX[id] = dx;
+        playerFacingY[id] = dy;
     }
     if (robots[id].battery >= batteryCostPerMove) {
         robots[id].battery -= batteryCostPerMove;
@@ -2191,7 +2222,7 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         if (robots[id].powerMovesLeft <= 0) robots[id].powerType = POWER_NONE;
     }
 
-    if (id == 0) {
+    if (id >= 0 && id < humanPlayers) {
         moves++;
     }
 
@@ -2237,7 +2268,7 @@ static void FinishRobotTileMove(WORD id)
             robots[id].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
             robots[id].chargeTicks = 0;
         }
-        if (id == 0) robots[id].spriteIndex = SPR_CHARGING;
+        if (id >= 0 && id < humanPlayers) robots[id].spriteIndex = SPR_CHARGING;
     }
 }
 
@@ -2296,7 +2327,7 @@ static void ChooseAiMove(WORD id)
     static const WORD dirY[4] = {0, 1, 0, -1};
     WORD dir;
 
-    if (id <= 0 || id >= robotCount) return;
+    if (id < humanPlayers || id >= robotCount) return;
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
 
@@ -2358,19 +2389,28 @@ static void ChooseAiMove(WORD id)
     }
 }
 
-static void ChoosePlayerMove(void)
+static void ChoosePlayerMove(WORD id)
 {
-    if (robots[0].moving) return;
-    if (robots[0].stunTicks > 0) return;
+    if (id < 0 || id >= humanPlayers) return;
+    if (robots[id].moving) return;
+    if (robots[id].stunTicks > 0) return;
 
-    if (keyLeft) {
-        StartRobotMove(0, -1, 0);
-    } else if (keyRight) {
-        StartRobotMove(0, 1, 0);
-    } else if (keyUp) {
-        StartRobotMove(0, 0, -1);
-    } else if (keyDown) {
-        StartRobotMove(0, 0, 1);
+    if (keyLeft[id]) {
+        StartRobotMove(id, -1, 0);
+    } else if (keyRight[id]) {
+        StartRobotMove(id, 1, 0);
+    } else if (keyUp[id]) {
+        StartRobotMove(id, 0, -1);
+    } else if (keyDown[id]) {
+        StartRobotMove(id, 0, 1);
+    } else if (joyLeft[id]) {
+        StartRobotMove(id, -1, 0);
+    } else if (joyRight[id]) {
+        StartRobotMove(id, 1, 0);
+    } else if (joyUp[id]) {
+        StartRobotMove(id, 0, -1);
+    } else if (joyDown[id]) {
+        StartRobotMove(id, 0, 1);
     }
 }
 
@@ -2423,6 +2463,10 @@ static void EnterTitleScreen(void)
 {
     gameState = GAME_TITLE;
     introTicks = 0;
+    humanPlayers = 1;
+    titleSelectPlayer = 0;
+    titleTwoPlayerArmed = FALSE;
+    ClearMovementKeys();
     LoadGamePalette();
 }
 
@@ -2488,19 +2532,23 @@ static void StepGame(void)
             }
         }
     }
-    StepPlayerBolt();
+    StepPlayerBolts();
     if (lastPowerTicks > 0) lastPowerTicks--;
 
-    ChoosePlayerMove();
+    for (i = 0; i < humanPlayers; i++) {
+        ChoosePlayerMove(i);
+    }
 
-    for (i = 1; i < robotCount; i++) {
+    for (i = humanPlayers; i < robotCount; i++) {
         ChooseAiMove(i);
     }
 
-    if (!robots[0].moving && robots[0].battery <= 25) {
-        robots[0].spriteIndex = SPR_LOW_BATTERY;
-    } else if (!robots[0].moving && map[robots[0].tileY][robots[0].tileX] == TILE_DOCK) {
-        robots[0].spriteIndex = SPR_CHARGING;
+    for (i = 0; i < humanPlayers; i++) {
+        if (!robots[i].moving && robots[i].battery <= 25) {
+            robots[i].spriteIndex = SPR_LOW_BATTERY;
+        } else if (!robots[i].moving && map[robots[i].tileY][robots[i].tileX] == TILE_DOCK) {
+            robots[i].spriteIndex = SPR_CHARGING;
+        }
     }
 
     CheckEndState();
@@ -2644,7 +2692,7 @@ static void DrawTitleCarousel(void)
     MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y - 24, "SELECT YOUR ROBOVAC", 7, 2);
 
     for (slot = 0; slot < ROBOT_VARIANTS; slot++) {
-        WORD variant = selectedPlayerVariant + slot - (ROBOT_VARIANTS / 2);
+        WORD variant = selectedPlayerVariant[titleSelectPlayer] + slot - (ROBOT_VARIANTS / 2);
         WORD x = slotX[slot];
         WORD y = TITLE_CAROUSEL_Y;
         while (variant < 0) variant += ROBOT_VARIANTS;
@@ -2665,9 +2713,13 @@ static void DrawTitleCarousel(void)
         }
     }
 
-    snprintf(b, sizeof(b), "PLAYER %s", robotVariantNames[selectedPlayerVariant]);
+    snprintf(b, sizeof(b), "P%d %s", titleSelectPlayer + 1, robotVariantNames[selectedPlayerVariant[titleSelectPlayer]]);
     MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 50, b, 7, 2);
-    MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "<- ARROWS CHOOSE ->", 13, 2);
+    if (titleTwoPlayerArmed) {
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 ARROWS P2 Z/C V LOCK", 13, 2);
+    } else {
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "ARROWS CHOOSE V 2P", 13, 2);
+    }
 }
 
 static void DrawRobotHealthStrip(void)
@@ -2681,12 +2733,12 @@ static void DrawRobotHealthStrip(void)
         char scoreText[4];
         UBYTE pen = robots[i].battery > 25 ? 13 : 12;
 
-        SetAPen(&renderRP, (i == 0) ? 4 : 8);
+        SetAPen(&renderRP, (i < humanPlayers) ? 4 : 8);
         RectFill(&renderRP, x, 12, x + slotW - 2, 29);
         SetAPen(&renderRP, 0);
         RectFill(&renderRP, x + 1, 13, x + slotW - 3, 28);
 
-        MiniText(&renderRP, x + 2, 14, RobotTag(i), (i == 0) ? 14 : 7);
+        MiniText(&renderRP, x + 2, 14, RobotTag(i), (i < humanPlayers) ? 14 : 7);
         snprintf(scoreText, sizeof(scoreText), "%d", robots[i].score);
         MiniText(&renderRP, x + 21, 14, scoreText, 13);
         if (robots[i].powerMovesLeft > 0) {
@@ -2718,9 +2770,9 @@ static void DrawHud(void)
 
     if (gameState == GAME_TITLE) {
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
-        MiniTextCentered(&renderRP, 20, "LEFT/RIGHT: SELECT VAC", 13, 2);
-        MiniTextCentered(&renderRP, 32, "1/2/3: AI RIVALS SPACE/R: START", 13, 2);
-        MiniTextCentered(&renderRP, 44, "E/S/H DIFFICULTY B FIRES BOLT", 14, 2);
+        MiniTextCentered(&renderRP, 20, "ARROWS P1  Z/X/C/S P2", 13, 2);
+        MiniTextCentered(&renderRP, 32, "V: 2P/P2 LOCK  B/V BOLT", 13, 2);
+        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/R START", 14, 2);
         return;
     }
 
@@ -2848,11 +2900,15 @@ static void DrawFrame(void)
 
     DrawHud();
 
-    for (i = 1; i < robotCount; i++) {
+    for (i = humanPlayers; i < robotCount; i++) {
         DrawRobotBob(i);
     }
-    DrawRobotBob(0);
-    DrawPlayerBolt();
+    for (i = 0; i < humanPlayers; i++) {
+        DrawRobotBob(i);
+    }
+    for (i = 0; i < humanPlayers; i++) {
+        DrawPlayerBolt(i);
+    }
 
     if (pauseMenuOpen) {
         DrawPauseMenu();
@@ -2874,10 +2930,17 @@ static void PresentFrame(void)
 
 static void ClearMovementKeys(void)
 {
-    keyLeft = FALSE;
-    keyRight = FALSE;
-    keyUp = FALSE;
-    keyDown = FALSE;
+    WORD i;
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        keyLeft[i] = FALSE;
+        keyRight[i] = FALSE;
+        keyUp[i] = FALSE;
+        keyDown[i] = FALSE;
+        joyLeft[i] = FALSE;
+        joyRight[i] = FALSE;
+        joyUp[i] = FALSE;
+        joyDown[i] = FALSE;
+    }
 }
 
 static void OpenPauseMenu(void)
@@ -2926,72 +2989,119 @@ static BOOL HandlePauseMenuRawKey(UWORD code, BOOL keyUpEvent)
     return TRUE;
 }
 
-static void StartWithRivals(WORD rivals)
+static void StartMatch(WORD players, WORD rivals)
 {
     WORD i;
     StopTitleMusic();
+    humanPlayers = players;
+    if (humanPlayers < 1) humanPlayers = 1;
+    if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
     aiRivals = rivals;
-    if (aiRivals < 1) aiRivals = 1;
-    if (aiRivals > 9) aiRivals = 9;
+    if (aiRivals < 0) aiRivals = 0;
+    if (aiRivals > MAX_ROBOTS - humanPlayers) aiRivals = MAX_ROBOTS - humanPlayers;
     roundIndex = 0;
     for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
+    titleTwoPlayerArmed = FALSE;
+    titleSelectPlayer = 0;
     ResetLevel();
 }
 
-
-static void FirePlayerBolt(void)
+static void StartWithRivals(WORD rivals)
 {
-    WORD dirX = 0, dirY = 0;
-
-    if (gameState != GAME_PLAYING) return;
-    if (robots[0].battery < 2 && !(robots[0].powerType == POWER_BOLT && robots[0].powerMovesLeft > 0)) return;
-    if (playerBolt.active) return;
-
-    if (robots[0].moving) {
-        dirX = robots[0].targetX - robots[0].tileX;
-        dirY = robots[0].targetY - robots[0].tileY;
-    } else if (keyLeft) dirX = -1;
-    else if (keyRight) dirX = 1;
-    else if (keyUp) dirY = -1;
-    else if (keyDown) dirY = 1;
-    else { dirX = playerFacingX; dirY = playerFacingY; }
-    if (dirX == 0 && dirY == 0) dirY = -1;
-
-    if (!(robots[0].powerType == POWER_BOLT && robots[0].powerMovesLeft > 0)) {
-        robots[0].battery -= 2;
-    }
-    playerFacingX = dirX;
-    playerFacingY = dirY;
-    playerBolt.active = TRUE;
-    playerBolt.dirX = dirX;
-    playerBolt.dirY = dirY;
-    playerBolt.px = TO_FP(robots[0].tileX * TILE_SIZE);
-    playerBolt.py = TO_FP(robots[0].tileY * TILE_SIZE);
-    playerBolt.ttl = 24;
+    StartMatch(humanPlayers, rivals);
 }
 
-static void StepPlayerBolt(void)
+static void TitleChooseVariant(WORD playerId, WORD delta)
+{
+    if (playerId < 0 || playerId >= MAX_HUMAN_PLAYERS) return;
+    selectedPlayerVariant[playerId] += delta;
+    while (selectedPlayerVariant[playerId] < 0) selectedPlayerVariant[playerId] += ROBOT_VARIANTS;
+    while (selectedPlayerVariant[playerId] >= ROBOT_VARIANTS) selectedPlayerVariant[playerId] -= ROBOT_VARIANTS;
+}
+
+static void TitleArmOrStartTwoPlayer(void)
+{
+    if (!titleTwoPlayerArmed) {
+        humanPlayers = 2;
+        titleTwoPlayerArmed = TRUE;
+        titleSelectPlayer = 1;
+        return;
+    }
+    StartMatch(2, aiRivals);
+}
+
+static void FirePlayerBolt(WORD id)
+{
+    WORD dirX = 0, dirY = 0;
+    struct Bolt *bolt;
+
+    if (gameState != GAME_PLAYING) return;
+    if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
+    bolt = &playerBolts[id];
+    if (robots[id].battery < 2 && !(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) return;
+    if (bolt->active) return;
+
+    if (robots[id].moving) {
+        dirX = robots[id].targetX - robots[id].tileX;
+        dirY = robots[id].targetY - robots[id].tileY;
+    } else if (keyLeft[id]) dirX = -1;
+    else if (keyRight[id]) dirX = 1;
+    else if (keyUp[id]) dirY = -1;
+    else if (keyDown[id]) dirY = 1;
+    else if (joyLeft[id]) dirX = -1;
+    else if (joyRight[id]) dirX = 1;
+    else if (joyUp[id]) dirY = -1;
+    else if (joyDown[id]) dirY = 1;
+    else { dirX = playerFacingX[id]; dirY = playerFacingY[id]; }
+    if (dirX == 0 && dirY == 0) dirY = -1;
+
+    if (!(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) {
+        robots[id].battery -= 2;
+    }
+    playerFacingX[id] = dirX;
+    playerFacingY[id] = dirY;
+    bolt->active = TRUE;
+    bolt->dirX = dirX;
+    bolt->dirY = dirY;
+    bolt->px = TO_FP(robots[id].tileX * TILE_SIZE);
+    bolt->py = TO_FP(robots[id].tileY * TILE_SIZE);
+    bolt->ttl = 24;
+}
+
+static void StepPlayerBolt(WORD ownerId)
 {
     WORD tx, ty, i;
+    struct Bolt *bolt;
 
-    if (!playerBolt.active) return;
-    if (playerBolt.ttl-- <= 0) { playerBolt.active = FALSE; return; }
+    if (ownerId < 0 || ownerId >= humanPlayers || ownerId >= MAX_HUMAN_PLAYERS) return;
+    bolt = &playerBolts[ownerId];
+    if (!bolt->active) return;
+    if (bolt->ttl-- <= 0) { bolt->active = FALSE; return; }
 
-    playerBolt.px += playerBolt.dirX * (5 * FP_ONE);
-    playerBolt.py += playerBolt.dirY * (5 * FP_ONE);
-    tx = FP_TO_INT(playerBolt.px) / TILE_SIZE;
-    ty = FP_TO_INT(playerBolt.py) / TILE_SIZE;
+    bolt->px += bolt->dirX * (5 * FP_ONE);
+    bolt->py += bolt->dirY * (5 * FP_ONE);
+    tx = FP_TO_INT(bolt->px) / TILE_SIZE;
+    ty = FP_TO_INT(bolt->py) / TILE_SIZE;
 
-    if (IsBlocked(tx, ty)) { playerBolt.active = FALSE; return; }
+    if (IsBlocked(tx, ty)) { bolt->active = FALSE; return; }
 
-    for (i = 1; i < robotCount; i++) {
+    for (i = 0; i < robotCount; i++) {
+        if (i == ownerId) continue;
         if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
             robots[i].stunTicks = 250;
             robots[i].battery -= 5;
             if (robots[i].battery < 0) robots[i].battery = 0;
-            playerBolt.active = FALSE;
+            bolt->active = FALSE;
             return;
         }
+    }
+}
+
+static void StepPlayerBolts(void)
+{
+    WORD i;
+    for (i = 0; i < humanPlayers; i++) {
+        StepPlayerBolt(i);
     }
 }
 
@@ -3020,8 +3130,11 @@ static void HandleRawKey(UWORD rawCode)
     }
 
     if (!keyUpEvent && gameState == GAME_TITLE) {
-        if (code == RAW_LEFT) { selectedPlayerVariant--; if (selectedPlayerVariant < 0) selectedPlayerVariant = ROBOT_VARIANTS - 1; return; }
-        if (code == RAW_RIGHT) { selectedPlayerVariant++; if (selectedPlayerVariant >= ROBOT_VARIANTS) selectedPlayerVariant = 0; return; }
+        if (code == RAW_LEFT) { titleSelectPlayer = 0; TitleChooseVariant(0, -1); return; }
+        if (code == RAW_RIGHT) { titleSelectPlayer = 0; TitleChooseVariant(0, 1); return; }
+        if (code == RAW_Z) { titleSelectPlayer = 1; TitleChooseVariant(1, -1); titleTwoPlayerArmed = TRUE; humanPlayers = 2; return; }
+        if (code == RAW_C) { titleSelectPlayer = 1; TitleChooseVariant(1, 1); titleTwoPlayerArmed = TRUE; humanPlayers = 2; return; }
+        if (code == RAW_V) { TitleArmOrStartTwoPlayer(); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
         if (code == RAW_3) { StartWithRivals(3); return; }
@@ -3031,7 +3144,8 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_H) { maxBattery = 36; batteryCostPerMove = 3; return; }
     }
 
-    if (!keyUpEvent && code == RAW_B) { FirePlayerBolt(); return; }
+    if (!keyUpEvent && code == RAW_B) { FirePlayerBolt(0); return; }
+    if (!keyUpEvent && code == RAW_V) { FirePlayerBolt(1); return; }
 
     if (!keyUpEvent && (code == RAW_R || code == RAW_SPACE)) {
         if (gameState == GAME_PLAYING) { ResetLevel(); }
@@ -3041,11 +3155,100 @@ static void HandleRawKey(UWORD rawCode)
     }
 
     switch (code) {
-        case RAW_LEFT:  keyLeft  = !keyUpEvent; break;
-        case RAW_RIGHT: keyRight = !keyUpEvent; break;
-        case RAW_UP:    keyUp    = !keyUpEvent; break;
-        case RAW_DOWN:  keyDown  = !keyUpEvent; break;
+        case RAW_LEFT:  keyLeft[0]  = !keyUpEvent; break;
+        case RAW_RIGHT: keyRight[0] = !keyUpEvent; break;
+        case RAW_UP:    keyUp[0]    = !keyUpEvent; break;
+        case RAW_DOWN:  keyDown[0]  = !keyUpEvent; break;
+        case RAW_Z:     keyLeft[1]  = !keyUpEvent; break;
+        case RAW_C:     keyRight[1] = !keyUpEvent; break;
+        case RAW_S:     keyUp[1]    = !keyUpEvent; break;
+        case RAW_X:     keyDown[1]  = !keyUpEvent; break;
         default: break;
+    }
+}
+
+#define JOY_UP(dat)    (((dat) & 0x0100) != 0)
+#define JOY_DOWN(dat)  ((((dat) & 0x0001) ^ (((dat) & 0x0100) >> 8)) != 0)
+#define JOY_LEFT(dat)  (((dat) & 0x0200) != 0)
+#define JOY_RIGHT(dat) ((((dat) & 0x0002) ^ (((dat) & 0x0200) >> 8)) != 0)
+
+static BOOL ReadJoystickFire(WORD id)
+{
+    UBYTE pra = ciaa.ciapra;
+
+    if (id == 0) return (pra & 0x40) ? FALSE : TRUE;
+    return (pra & 0x80) ? FALSE : TRUE;
+}
+
+static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
+{
+    static BOOL prevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+    static BOOL prevRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+    BOOL wasArmed;
+
+    if (gameState != GAME_TITLE) {
+        prevLeft[id] = left;
+        prevRight[id] = right;
+        return;
+    }
+
+    wasArmed = titleTwoPlayerArmed;
+    if (id == 0) {
+        titleSelectPlayer = 0;
+    } else {
+        titleSelectPlayer = 1;
+        if (left || right || fire) {
+            titleTwoPlayerArmed = TRUE;
+            humanPlayers = 2;
+        }
+    }
+
+    if (left && !prevLeft[id]) TitleChooseVariant(id, -1);
+    if (right && !prevRight[id]) TitleChooseVariant(id, 1);
+    if (fire && !joyFirePrev[id]) {
+        if (id == 0 && !titleTwoPlayerArmed) {
+            StartMatch(1, aiRivals);
+        } else if (!wasArmed) {
+            humanPlayers = 2;
+            titleTwoPlayerArmed = TRUE;
+            titleSelectPlayer = 1;
+        } else {
+            StartMatch(2, aiRivals);
+        }
+    }
+
+    prevLeft[id] = left;
+    prevRight[id] = right;
+}
+
+static void PollJoysticks(void)
+{
+    UWORD dat[MAX_HUMAN_PLAYERS];
+    WORD i;
+
+    dat[0] = custom.joy0dat;
+    dat[1] = custom.joy1dat;
+
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        BOOL left = JOY_LEFT(dat[i]);
+        BOOL right = JOY_RIGHT(dat[i]);
+        BOOL up = JOY_UP(dat[i]);
+        BOOL down = JOY_DOWN(dat[i]);
+        BOOL fire = ReadJoystickFire(i);
+
+        if (gameState == GAME_TITLE) {
+            HandleTitleJoystick(i, left, right, fire);
+        }
+
+        joyLeft[i] = left;
+        joyRight[i] = right;
+        joyUp[i] = up;
+        joyDown[i] = down;
+
+        if (gameState == GAME_PLAYING && fire && !joyFirePrev[i]) {
+            FirePlayerBolt(i);
+        }
+        joyFirePrev[i] = fire;
     }
 }
 
@@ -3231,6 +3434,7 @@ int main(void)
 
     while (running) {
         PollWindowMessages();
+        PollJoysticks();
         StepGame();
         DrawFrame();
         WaitTOF();
