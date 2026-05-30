@@ -88,6 +88,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_DIRT_DROP       5
 #define POWERUP_QUAD_RADIUS     1
 #define ROBOT_TURN_TICKS        1
+#define BONUS_SCORE_THRESHOLD    50
+#define BONUS_BOSS_MAX_HEALTH    80
+#define BONUS_BOSS_HIT_POINTS    2
+#define BONUS_BOSS_SCALE         3
 
 #define ROBOT_W     16
 #define ROBOT_H     16
@@ -113,6 +117,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define GAME_PLAYING    2
 #define GAME_ROUND_END  3
 #define GAME_MATCH_END  4
+#define GAME_BONUS_PLAYING 5
+#define GAME_BONUS_END 6
 
 #define RAW_ESC     0x45
 #define RAW_LEFT    0x4F
@@ -296,6 +302,13 @@ static WORD totalScores[MAX_ROBOTS] = {0,0,0,0};
 static WORD roundScores[MAX_ROBOTS] = {0,0,0,0};
 static WORD roundWinner = -1;
 static WORD finalWinner = -1;
+static BOOL bonusAvailable = FALSE;
+static WORD bonusBossHealth = 0;
+static WORD bonusBossX = 0;
+static WORD bonusBossY = 0;
+static WORD bonusBossDx = 1;
+static WORD bonusBossDy = 1;
+static WORD bonusBossPhase = 0;
 static WORD roomType = 0;
 static BOOL running = TRUE;
 static BOOL pauseMenuOpen = FALSE;
@@ -466,6 +479,8 @@ static void ClosePauseMenu(void);
 static void CloseAiSelectMenu(void);
 static void OpenAiSelectMenu(WORD initialSelection);
 static void StartMatch(WORD players, WORD rivals);
+static void StartBonusRound(void);
+static void FinishBonusRound(void);
 static void ClearMovementKeys(void);
 static BOOL LoadMenuMusicSample(void);
 static void FreeMenuMusicSample(void);
@@ -845,7 +860,7 @@ static BOOL AnyHooverMoving(void)
 {
     WORD i;
 
-    if (gameState != GAME_PLAYING || roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) return FALSE;
+    if ((gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) || roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) return FALSE;
     for (i = 0; i < robotCount; i++) {
         if (robots[i].moving) return TRUE;
     }
@@ -1204,7 +1219,7 @@ static ULONG ReadBE32(const UBYTE *p)
 
 static BOOL RoundStartLocked(void)
 {
-    return (gameState == GAME_PLAYING && roundCountdownTicks > 0) ? TRUE : FALSE;
+    return ((gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) && roundCountdownTicks > 0) ? TRUE : FALSE;
 }
 
 static UWORD AudioDmaBit(WORD channel)
@@ -2886,6 +2901,12 @@ static void CheckEndState(void)
     WORD i;
     WORD best = -1;
 
+    if (gameState == GAME_BONUS_PLAYING) {
+        if (bonusBossHealth > 0) return;
+        FinishBonusRound();
+        return;
+    }
+
     if (gameState != GAME_PLAYING) return;
     if (dirtLeft > 0 && AnyRobotCanMove()) return;
 
@@ -2902,10 +2923,13 @@ static void CheckEndState(void)
     if (roundIndex >= 4) {
         finalWinner = 0;
         for (i = 1; i < robotCount; i++) {
-            if (roundWins[i] > roundWins[finalWinner] ||
-                (roundWins[i] == roundWins[finalWinner] && totalScores[i] > totalScores[finalWinner])) {
+            if (totalScores[i] > totalScores[finalWinner]) {
                 finalWinner = i;
             }
+        }
+        bonusAvailable = FALSE;
+        for (i = 0; i < robotCount; i++) {
+            if (totalScores[i] > BONUS_SCORE_THRESHOLD) bonusAvailable = TRUE;
         }
         gameState = GAME_MATCH_END;
     } else {
@@ -2913,6 +2937,118 @@ static void CheckEndState(void)
     }
 }
 
+
+
+static void ResetBonusBoss(void)
+{
+    bonusBossHealth = BONUS_BOSS_MAX_HEALTH;
+    bonusBossX = (SCREEN_W - (ROBOT_W * BONUS_BOSS_SCALE)) / 2;
+    bonusBossY = MAP_Y + ((MAP_H * TILE_SIZE) - (ROBOT_H * BONUS_BOSS_SCALE)) / 2;
+    bonusBossDx = 1;
+    bonusBossDy = 1;
+    bonusBossPhase = 0;
+}
+
+static void StepBonusBoss(void)
+{
+    WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
+    WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+    WORD minY = MAP_Y + TILE_SIZE;
+    WORD maxY = SCREEN_H - TILE_SIZE - bossH;
+
+    if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
+
+    bonusBossPhase = (bonusBossPhase + 1) & 31;
+    bonusBossX += bonusBossDx;
+    bonusBossY += bonusBossDy;
+
+    if (bonusBossX <= TILE_SIZE || bonusBossX >= SCREEN_W - TILE_SIZE - bossW) {
+        bonusBossDx = -bonusBossDx;
+        bonusBossX += bonusBossDx;
+    }
+    if (bonusBossY <= minY || bonusBossY >= maxY) {
+        bonusBossDy = -bonusBossDy;
+        bonusBossY += bonusBossDy;
+    }
+}
+
+static void FinishBonusRound(void)
+{
+    WORD i;
+
+    finalWinner = 0;
+    for (i = 1; i < robotCount; i++) {
+        if (totalScores[i] > totalScores[finalWinner]) finalWinner = i;
+    }
+    bonusAvailable = FALSE;
+    bonusBossHealth = 0;
+    gameState = GAME_BONUS_END;
+    StopGameplaySamples();
+    ClearMovementKeys();
+}
+
+static void StartBonusRound(void)
+{
+    WORD x;
+    WORD y;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    roundIndex = 5;
+    roomType = 0;
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            if (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) {
+                map[y][x] = TILE_WALL;
+            } else {
+                map[y][x] = TILE_FLOOR;
+            }
+        }
+    }
+
+    for (x = 2; x < MAP_W - 2; x += 3) {
+        map[1][x] = TILE_DOCK;
+        map[MAP_H - 2][x] = TILE_DOCK;
+    }
+    for (y = 2; y < MAP_H - 2; y += 3) {
+        map[y][1] = TILE_DOCK;
+        map[y][MAP_W - 2] = TILE_DOCK;
+    }
+    map[RobotDockY(0)][RobotDockX(0)] = TILE_DOCK;
+    map[RobotDockY(1)][RobotDockX(1)] = TILE_DOCK;
+    map[RobotDockY(2)][RobotDockX(2)] = TILE_DOCK;
+    map[RobotDockY(3)][RobotDockX(3)] = TILE_DOCK;
+
+    ClearMovementKeys();
+    playerBolts[0].active = FALSE;
+    playerBolts[1].active = FALSE;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+    roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
+    roundGoTicks = 0;
+    roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
+    roundCountdownLastSoundNumber = 0;
+    roundGoSoundPlayed = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    gameState = GAME_BONUS_PLAYING;
+    ClosePauseMenu();
+
+    InitRobots();
+    for (x = 0; x < robotCount; x++) {
+        robots[x].score = 0;
+        robots[x].cleanStreak = 0;
+        robots[x].powerMovesLeft = 0;
+        robots[x].powerType = POWER_NONE;
+    }
+    CountDirt();
+    ResetBonusBoss();
+    BuildRoomBuffer();
+    PlayGetReadySample();
+    PlayCountdownSample();
+    roundCountdownLastSoundNumber = ROUND_COUNTDOWN_SECONDS;
+}
 
 static void EnterTitleScreen(void)
 {
@@ -2968,7 +3104,7 @@ static void StepGame(void)
         return;
     }
 
-    if (gameState != GAME_PLAYING) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     if (pauseMenuOpen) {
         ServiceHooverMoveSample();
         return;
@@ -3002,6 +3138,8 @@ static void StepGame(void)
             roundGoTicks = 0;
         }
     }
+
+    StepBonusBoss();
 
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
@@ -3051,7 +3189,7 @@ static void StepGame(void)
 
     ServiceHooverMoveSample();
     CheckEndState();
-    if (gameState != GAME_PLAYING) StopGameplaySamples();
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) StopGameplaySamples();
 }
 
 /* -------------------------------------------------------------------------
@@ -3280,6 +3418,110 @@ static void DrawJoystickIcons(void)
     }
 }
 
+
+static void DrawRobotLarge(WORD robotId, WORD x, WORD y, WORD scale, WORD phase)
+{
+    WORD px;
+    WORD py;
+    WORD dx;
+    WORD dy;
+    WORD variant;
+    WORD state;
+    WORD srcX;
+
+    if (!robotCacheBM || robotId < 0 || robotId >= robotCount) return;
+    variant = robots[robotId].spriteVariant;
+    state = SPR_DOWN;
+    switch ((phase >> 3) & 3) {
+        case 0: state = SPR_DOWN; break;
+        case 1: state = SPR_RIGHT; break;
+        case 2: state = SPR_UP; break;
+        default: state = SPR_LEFT; break;
+    }
+    srcX = (variant * SPR_STATE_COUNT + state) * ROBOT_W;
+
+    for (py = 0; py < ROBOT_H; py++) {
+        for (px = 0; px < ROBOT_W; px++) {
+            LONG pen = ReadPixel(&robotRP, srcX + px, py);
+            if (pen <= 0) continue;
+            SetAPen(&renderRP, (UBYTE)pen);
+            dx = x + px * scale;
+            dy = y + py * scale;
+            RectFill(&renderRP, dx, dy, dx + scale - 1, dy + scale - 1);
+        }
+    }
+}
+
+static void BuildRankOrder(WORD *order)
+{
+    WORD i;
+    WORD pass;
+
+    for (i = 0; i < robotCount; i++) order[i] = i;
+    for (pass = 0; pass < robotCount - 1; pass++) {
+        for (i = 0; i < robotCount - 1 - pass; i++) {
+            WORD a = order[i];
+            WORD b = order[i + 1];
+            if (totalScores[b] > totalScores[a]) {
+                order[i] = b;
+                order[i + 1] = a;
+            }
+        }
+    }
+}
+
+static void DrawLeaderboardScreen(BOOL finalBoard)
+{
+    WORD order[MAX_ROBOTS];
+    WORD i;
+    char b[80];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
+
+    BuildRankOrder(order);
+    finalWinner = order[0];
+    titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
+
+    MiniTextCentered(&renderRP, 8, finalBoard ? "FINAL SCORE BOARD" : "CONGRATS WINNER", finalBoard ? 7 : 14, 2);
+    snprintf(b, sizeof(b), "1ST %s", RobotTag(order[0]));
+    MiniTextCentered(&renderRP, 30, b, 13, 2);
+    DrawRobotLarge(order[0], (SCREEN_W - ROBOT_W * 4) / 2, 48, 4, titleSpinPhase);
+
+    if (robotCount > 1) {
+        snprintf(b, sizeof(b), "2ND %s  %d", RobotTag(order[1]), totalScores[order[1]]);
+        MiniText(&renderRP, 28, 120, b, 7);
+    }
+    if (robotCount > 2) {
+        snprintf(b, sizeof(b), "3RD %s  %d", RobotTag(order[2]), totalScores[order[2]]);
+        MiniText(&renderRP, 172, 120, b, 7);
+    }
+
+    MiniTextCentered(&renderRP, 136, "BOARD", 8, 1);
+    for (i = 0; i < robotCount && i < 10; i++) {
+        WORD id = order[i];
+        WORD y = 150 + i * 9;
+        snprintf(b, sizeof(b), "%d %s PTS:%d W:%d", i + 1, RobotTag(id), totalScores[id], roundWins[id]);
+        MiniText(&renderRP, 72, y, b, (i == 0) ? 14 : 7);
+    }
+
+    if (!finalBoard && bonusAvailable) {
+        MiniTextCentered(&renderRP, 238, "OVER 50! SPACE BONUS ROUND", 13, 1);
+    } else {
+        MiniTextCentered(&renderRP, 238, "SPACE/R TITLE", 13, 1);
+    }
+}
+
+static void DrawBonusBoss(void)
+{
+    char b[32];
+
+    if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
+    DrawRobotLarge(finalWinner >= 0 ? finalWinner : 0, bonusBossX, bonusBossY, BONUS_BOSS_SCALE, bonusBossPhase);
+    snprintf(b, sizeof(b), "BOSS HP:%d", bonusBossHealth);
+    MiniTextCentered(&renderRP, 40, b, 14, 1);
+}
+
 static void DrawHud(void)
 {
     char b[160];
@@ -3305,18 +3547,19 @@ static void DrawHud(void)
         return;
     }
 
-    if (gameState == GAME_MATCH_END) {
+    if (gameState == GAME_MATCH_END || gameState == GAME_BONUS_END) {
         snprintf(b, sizeof(b), "MATCH WINNER: %s", RobotName(finalWinner));
         PutText(&renderRP, 42, 10, b, 12);
         DrawRobotHealthStrip();
-        PutText(&renderRP, 82, 30, "Press R/Space", 7);
+        PutText(&renderRP, 82, 30, bonusAvailable ? "Space bonus" : "Press R/Space", 7);
         return;
     }
 
     if (lastPowerTicks > 0 && lastPowerText[0]) {
         PutText(&renderRP, 4, 8, lastPowerText, 14);
     } else {
-        snprintf(b, sizeof(b), "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
+        if (gameState == GAME_BONUS_PLAYING) snprintf(b, sizeof(b), "R6 BONUS BOSS:%d MOVE:%d", bonusBossHealth, batteryCostPerMove);
+        else snprintf(b, sizeof(b), "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
         PutText(&renderRP, 4, 8, b, 7);
     }
     DrawRobotHealthStrip();
@@ -3358,7 +3601,7 @@ static void DrawRoundStartOverlay(void)
     WORD bottom = 176;
     WORD i;
 
-    if (gameState != GAME_PLAYING) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     if (roundCountdownTicks <= 0 && roundGoTicks <= 0) return;
 
     if (roundCountdownTicks > 0) {
@@ -3515,6 +3758,16 @@ static void DrawFrame(void)
         return;
     }
 
+    if (gameState == GAME_MATCH_END) {
+        DrawLeaderboardScreen(FALSE);
+        return;
+    }
+
+    if (gameState == GAME_BONUS_END) {
+        DrawLeaderboardScreen(TRUE);
+        return;
+    }
+
     if (gameState == GAME_TITLE) {
         SetAPen(&renderRP, 0);
         RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
@@ -3554,6 +3807,7 @@ static void DrawFrame(void)
         DrawPlayerBolt(i);
     }
 
+    DrawBonusBoss();
     DrawEmpCountdown();
     DrawRoundStartOverlay();
 
@@ -3592,7 +3846,7 @@ static void ClearMovementKeys(void)
 
 static void OpenPauseMenu(void)
 {
-    if (gameState != GAME_PLAYING) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     pauseMenuOpen = TRUE;
     pauseMenuSelection = 0;
     ClearMovementKeys();
@@ -3666,7 +3920,8 @@ static BOOL HandleAiSelectMenuRawKey(UWORD code, BOOL keyUpEvent)
 static void ActivatePauseMenuSelection(void)
 {
     if (pauseMenuSelection == 0) {
-        ResetLevel();
+        if (gameState == GAME_BONUS_PLAYING) StartBonusRound();
+        else ResetLevel();
     } else {
         ClosePauseMenu();
         EnterTitleScreen();
@@ -3705,6 +3960,8 @@ static void StartMatch(WORD players, WORD rivals)
     if (aiRivals < 0) aiRivals = 0;
     if (aiRivals > MAX_ROBOTS - humanPlayers) aiRivals = MAX_ROBOTS - humanPlayers;
     roundIndex = 0;
+    bonusAvailable = FALSE;
+    bonusBossHealth = 0;
     for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
@@ -3762,7 +4019,7 @@ static void FirePlayerBolt(WORD id)
     WORD dirX = 0, dirY = 0;
     struct Bolt *bolt;
 
-    if (gameState != GAME_PLAYING) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
     bolt = &playerBolts[id];
@@ -3814,12 +4071,34 @@ static void StepPlayerBolt(WORD ownerId)
 
     if (IsBlocked(tx, ty)) { bolt->active = FALSE; return; }
 
+    if (gameState == GAME_BONUS_PLAYING && bonusBossHealth > 0) {
+        WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
+        WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+        WORD boltX = MAP_X + FP_TO_INT(bolt->px);
+        WORD boltY = MAP_Y + FP_TO_INT(bolt->py);
+        if (boltX >= bonusBossX && boltX <= bonusBossX + bossW &&
+            boltY >= bonusBossY && boltY <= bonusBossY + bossH) {
+            bonusBossHealth--;
+            robots[ownerId].score += BONUS_BOSS_HIT_POINTS;
+            totalScores[ownerId] += BONUS_BOSS_HIT_POINTS;
+            snprintf(lastPowerText, sizeof(lastPowerText), "%s BOSS HIT +%d HP:%d", RobotTag(ownerId), BONUS_BOSS_HIT_POINTS, bonusBossHealth);
+            lastPowerTicks = 80;
+            bolt->active = FALSE;
+            if (bonusBossHealth <= 0) FinishBonusRound();
+            return;
+        }
+    }
+
     for (i = 0; i < robotCount; i++) {
         if (i == ownerId) continue;
         if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
             robots[i].stunTicks = 250;
             robots[i].battery -= 5;
             if (robots[i].battery < 0) robots[i].battery = 0;
+            robots[ownerId].score += BONUS_BOSS_HIT_POINTS;
+            if (gameState == GAME_BONUS_PLAYING) totalScores[ownerId] += BONUS_BOSS_HIT_POINTS;
+            snprintf(lastPowerText, sizeof(lastPowerText), "%s BOLT +%d", RobotTag(ownerId), BONUS_BOSS_HIT_POINTS);
+            lastPowerTicks = 80;
             bolt->active = FALSE;
             return;
         }
@@ -3852,7 +4131,7 @@ static void HandleRawKey(UWORD rawCode)
         return;
     }
 
-    if (!keyUpEvent && code == RAW_Q && gameState == GAME_PLAYING) {
+    if (!keyUpEvent && code == RAW_Q && (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING)) {
         OpenPauseMenu();
         return;
     }
@@ -3883,7 +4162,10 @@ static void HandleRawKey(UWORD rawCode)
 
     if (!keyUpEvent && (code == RAW_R || code == RAW_SPACE)) {
         if (gameState == GAME_PLAYING) { ResetLevel(); }
+        else if (gameState == GAME_BONUS_PLAYING) { FinishBonusRound(); }
         else if (gameState == GAME_ROUND_END) { roundIndex++; ResetLevel(); }
+        else if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); }
+        else if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); }
         else if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); }
         else if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(aiRivals); }
         else { WORD i; roundIndex = 0; for (i=0;i<MAX_ROBOTS;i++){roundWins[i]=0; totalScores[i]=0;} ResetLevel(); }
