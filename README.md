@@ -38,10 +38,15 @@ The HUD shows each robot's current clean-streak count, flashes `P` while a timed
 
 - A match is 5 rounds.
 - Each round picks a random room type.
-- Round winner = robot with most dirt cleaned that round.
-- After round 5, final winner is decided by:
-  1. Most round wins
-  2. Tie-breaker: highest total dirt cleaned across all rounds
+- Dirt cleaned is scored as points.
+- Hitting another robot with an energy bolt is worth 2 points.
+- Round winner = robot with the most points that round.
+- After round 5, the final winner is the robot with the highest total points.
+- The match-end screen celebrates the winner with a large rotating robot image, then shows 2nd place, 3rd place, and the full leaderboard.
+
+## Bonus Round
+
+If any robot has more than 50 total points after round 5, the leaderboard offers an optional round 6 bonus battle. All robots enter a clean room with charging docks around the edges. A giant 3x rotating hover boss moves around the middle of the room. Human players recharge on docks and shoot bolts at the boss; each boss hit adds 2 points to the shooter. The boss disappears after 80 hits, then the final scoreboard is shown and the winner is recalculated from the final totals.
 
 ## Room Types
 
