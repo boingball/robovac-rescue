@@ -2395,13 +2395,21 @@ static void ChoosePlayerMove(WORD id)
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
 
-    if (keyLeft[id] || joyLeft[id]) {
+    if (keyLeft[id]) {
         StartRobotMove(id, -1, 0);
-    } else if (keyRight[id] || joyRight[id]) {
+    } else if (keyRight[id]) {
         StartRobotMove(id, 1, 0);
-    } else if (keyUp[id] || joyUp[id]) {
+    } else if (keyUp[id]) {
         StartRobotMove(id, 0, -1);
-    } else if (keyDown[id] || joyDown[id]) {
+    } else if (keyDown[id]) {
+        StartRobotMove(id, 0, 1);
+    } else if (joyLeft[id]) {
+        StartRobotMove(id, -1, 0);
+    } else if (joyRight[id]) {
+        StartRobotMove(id, 1, 0);
+    } else if (joyUp[id]) {
+        StartRobotMove(id, 0, -1);
+    } else if (joyDown[id]) {
         StartRobotMove(id, 0, 1);
     }
 }
@@ -2708,7 +2716,7 @@ static void DrawTitleCarousel(void)
     snprintf(b, sizeof(b), "P%d %s", titleSelectPlayer + 1, robotVariantNames[selectedPlayerVariant[titleSelectPlayer]]);
     MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 50, b, 7, 2);
     if (titleTwoPlayerArmed) {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2 Z/C CHOOSE V LOCK", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 ARROWS P2 Z/C V LOCK", 13, 2);
     } else {
         MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "ARROWS CHOOSE V 2P", 13, 2);
     }
@@ -3036,10 +3044,14 @@ static void FirePlayerBolt(WORD id)
     if (robots[id].moving) {
         dirX = robots[id].targetX - robots[id].tileX;
         dirY = robots[id].targetY - robots[id].tileY;
-    } else if (keyLeft[id] || joyLeft[id]) dirX = -1;
-    else if (keyRight[id] || joyRight[id]) dirX = 1;
-    else if (keyUp[id] || joyUp[id]) dirY = -1;
-    else if (keyDown[id] || joyDown[id]) dirY = 1;
+    } else if (keyLeft[id]) dirX = -1;
+    else if (keyRight[id]) dirX = 1;
+    else if (keyUp[id]) dirY = -1;
+    else if (keyDown[id]) dirY = 1;
+    else if (joyLeft[id]) dirX = -1;
+    else if (joyRight[id]) dirX = 1;
+    else if (joyUp[id]) dirY = -1;
+    else if (joyDown[id]) dirY = 1;
     else { dirX = playerFacingX[id]; dirY = playerFacingY[id]; }
     if (dirX == 0 && dirY == 0) dirY = -1;
 
@@ -3118,8 +3130,8 @@ static void HandleRawKey(UWORD rawCode)
     }
 
     if (!keyUpEvent && gameState == GAME_TITLE) {
-        if (code == RAW_LEFT) { titleSelectPlayer = titleTwoPlayerArmed ? titleSelectPlayer : 0; TitleChooseVariant(titleSelectPlayer, -1); return; }
-        if (code == RAW_RIGHT) { titleSelectPlayer = titleTwoPlayerArmed ? titleSelectPlayer : 0; TitleChooseVariant(titleSelectPlayer, 1); return; }
+        if (code == RAW_LEFT) { titleSelectPlayer = 0; TitleChooseVariant(0, -1); return; }
+        if (code == RAW_RIGHT) { titleSelectPlayer = 0; TitleChooseVariant(0, 1); return; }
         if (code == RAW_Z) { titleSelectPlayer = 1; TitleChooseVariant(1, -1); titleTwoPlayerArmed = TRUE; humanPlayers = 2; return; }
         if (code == RAW_C) { titleSelectPlayer = 1; TitleChooseVariant(1, 1); titleTwoPlayerArmed = TRUE; humanPlayers = 2; return; }
         if (code == RAW_V) { TitleArmOrStartTwoPlayer(); return; }
@@ -3182,7 +3194,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
 
     wasArmed = titleTwoPlayerArmed;
     if (id == 0) {
-        titleSelectPlayer = titleTwoPlayerArmed ? titleSelectPlayer : 0;
+        titleSelectPlayer = 0;
     } else {
         titleSelectPlayer = 1;
         if (left || right || fire) {
@@ -3191,8 +3203,8 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
         }
     }
 
-    if (left && !prevLeft[id]) TitleChooseVariant(titleSelectPlayer, -1);
-    if (right && !prevRight[id]) TitleChooseVariant(titleSelectPlayer, 1);
+    if (left && !prevLeft[id]) TitleChooseVariant(id, -1);
+    if (right && !prevRight[id]) TitleChooseVariant(id, 1);
     if (fire && !joyFirePrev[id]) {
         if (id == 0 && !titleTwoPlayerArmed) {
             StartMatch(1, aiRivals);
