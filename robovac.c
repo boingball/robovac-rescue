@@ -408,6 +408,7 @@ static void FreeTitleMusic(void);
 static void StepTitleMusic(void);
 static void ServiceTitleMusicForState(void);
 static void StopTitleMusic(void);
+static void CloseGameScreen(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -669,7 +670,20 @@ static void StopTitleMusic(void)
 {
     BOOL hadAudio = titleMusic.loaded || titleMusic.playing;
 
-    ClearTitleAudioChannels((UWORD *)titleMusic.moduleData, hadAudio);
+    if (hadAudio && titleMusic.moduleData) {
+        ClearTitleAudioChannels((UWORD *)titleMusic.moduleData, TRUE);
+    } else if (hadAudio) {
+        WORD channel;
+
+        custom.dmacon = TITLE_MUSIC_DMA_MASK;
+        for (channel = 0; channel < MOD_CHANNELS; channel++) {
+            custom.aud[channel].ac_vol = 0;
+        }
+        if (scr) {
+            WaitTOF();
+            WaitTOF();
+        }
+    }
     titleMusic.playing = FALSE;
     titleMusic.position = 0;
     titleMusic.row = 0;
@@ -773,7 +787,7 @@ static void FreeTitleMusic(void)
         FreeMem(titleMusic.moduleData, titleMusic.moduleSize);
     }
     memset(&titleMusic, 0, sizeof(titleMusic));
-    ClearTitleAudioChannels(NULL, FALSE);
+    titleMusic.speed = MOD_DEFAULT_SPEED;
 }
 
 static void TriggerModNote(WORD channel, UBYTE sampleNumber, UWORD period)
@@ -1576,6 +1590,7 @@ static void FreeIntroTitleImage(void)
         FreeBitMap(introTitleBM);
         introTitleBM = NULL;
     }
+    introTitleRP.BitMap = NULL;
     introTitleW = 0;
     introTitleH = 0;
 }
@@ -1747,6 +1762,7 @@ static void FreeTitleCarouselCache(void)
         titleCarouselMaskBM = NULL;
     }
 
+    titleCarouselRP.BitMap = NULL;
     titleCarouselFrameCount = 0;
 }
 
@@ -1871,6 +1887,7 @@ static BOOL InitRobotBobs(void)
             FreeBitMap(robotMaskBM);
             robotMaskBM = NULL;
         }
+        robotRP.BitMap = NULL;
         return FALSE;
     }
 
@@ -1883,6 +1900,7 @@ static BOOL InitRobotBobs(void)
         FreeBitMap(robotMaskBM);
         robotCacheBM = NULL;
         robotMaskBM = NULL;
+        robotRP.BitMap = NULL;
         return FALSE;
     }
 
@@ -1891,6 +1909,7 @@ static BOOL InitRobotBobs(void)
         FreeBitMap(robotMaskBM);
         robotCacheBM = NULL;
         robotMaskBM = NULL;
+        robotRP.BitMap = NULL;
         return FALSE;
     }
 
@@ -3302,6 +3321,8 @@ static void PollWindowMessages(void)
 {
     struct IntuiMessage *msg;
 
+    if (!win || !win->UserPort) return;
+
     while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
         ULONG cls = msg->Class;
         UWORD code = msg->Code;
@@ -3315,6 +3336,17 @@ static void PollWindowMessages(void)
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
             if (code == SELECTDOWN && gameState == GAME_TITLE) StartWithRivals(aiRivals);
         }
+    }
+}
+
+static void DrainWindowMessages(void)
+{
+    struct IntuiMessage *msg;
+
+    if (!win || !win->UserPort) return;
+
+    while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+        ReplyMsg((struct Message *)msg);
     }
 }
 
@@ -3356,6 +3388,7 @@ static BOOL OpenGameScreen(void)
         printf("Could not allocate room bitmap\n");
         FreeBitMap(renderBM);
         renderBM = NULL;
+        renderRP.BitMap = NULL;
         CloseScreen(scr);
         scr = NULL;
         return FALSE;
@@ -3370,8 +3403,10 @@ static BOOL OpenGameScreen(void)
     if (!InitTileCache()) {
         FreeBitMap(roomBM);
         roomBM = NULL;
+        roomRP.BitMap = NULL;
         FreeBitMap(renderBM);
         renderBM = NULL;
+        renderRP.BitMap = NULL;
         CloseScreen(scr);
         scr = NULL;
         return FALSE;
@@ -3402,21 +3437,7 @@ static BOOL OpenGameScreen(void)
 
     if (!win) {
         printf("Could not open game window\n");
-        FreeTitleMusic();
-        FreeIntroTitleImage();
-        FreeTitleCarouselCache();
-        if (robotCacheBM) FreeBitMap(robotCacheBM);
-        if (robotMaskBM) FreeBitMap(robotMaskBM);
-        if (tileCacheBM) FreeBitMap(tileCacheBM);
-        if (roomBM) FreeBitMap(roomBM);
-        if (renderBM) FreeBitMap(renderBM);
-        robotCacheBM = NULL;
-        robotMaskBM = NULL;
-        tileCacheBM = NULL;
-        roomBM = NULL;
-        renderBM = NULL;
-        CloseScreen(scr);
-        scr = NULL;
+        CloseGameScreen();
         return FALSE;
     }
 
@@ -3429,13 +3450,13 @@ static void CloseGameScreen(void)
     FreeTitleCopperGradient();
 
     if (win) {
+        DrainWindowMessages();
         CloseWindow(win);
         win = NULL;
     }
 
     FreeIntroTitleImage();
     FreeTitleCarouselCache();
-    FreeTitleMusic();
 
     if (robotCacheBM) {
         FreeBitMap(robotCacheBM);
@@ -3446,21 +3467,25 @@ static void CloseGameScreen(void)
         FreeBitMap(robotMaskBM);
         robotMaskBM = NULL;
     }
+    robotRP.BitMap = NULL;
 
     if (tileCacheBM) {
         FreeBitMap(tileCacheBM);
         tileCacheBM = NULL;
     }
+    tileRP.BitMap = NULL;
 
     if (roomBM) {
         FreeBitMap(roomBM);
         roomBM = NULL;
     }
+    roomRP.BitMap = NULL;
 
     if (renderBM) {
         FreeBitMap(renderBM);
         renderBM = NULL;
     }
+    renderRP.BitMap = NULL;
 
     if (scr) {
         CloseScreen(scr);
