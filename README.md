@@ -4,7 +4,7 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
 
 ## Controls
 
-- Player 1: arrow keys move; `B` shoots a bolt. Joystick 1 stays disabled until joystick 1 fire is pressed, then `J1` appears and joystick 1 can move/fire on menus; mouse/joystick port 1 movement is ignored during gameplay so the mouse cannot steer Player 1.
+- Player 1: arrow keys move; `B` shoots a bolt. Joystick 1 stays disabled until joystick 1 fire is pressed, then `J1` appears and joystick 1 can move/fire on menus and during gameplay.
 - Player 2: `Z` left, `X` down, `C` right, `S` up; `V` shoots a bolt. Joystick 2 stays disabled until joystick 2 fire is pressed, then `J2` appears and joystick 2 can move/fire.
 - Title carousel:
   - By default this is a one-player game and Left/Right arrows choose Player 1's hoover.
