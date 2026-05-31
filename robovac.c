@@ -45,6 +45,7 @@
 #include <proto/dos.h>
 #include <proto/datatypes.h>
 
+#include <dos/dos.h>
 #include <datatypes/pictureclass.h>
 #include <datatypes/datatypes.h>
 #include <hardware/custom.h>
@@ -204,6 +205,12 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
 #define ROUND_COUNTDOWN_TOTAL_FRAMES ROUND_COUNTDOWN_FRAMES
 #define ROUND_GO_FRAMES 20
+#define ROUND_START_OVERLAY_LEFT 44
+#define ROUND_START_OVERLAY_TOP 66
+#define ROUND_START_OVERLAY_W 233
+#define ROUND_START_OVERLAY_H 115
+#define ROUND_START_OVERLAY_COUNT 4
+#define ROUND_START_MAX_ELAPSED_TICKS 5
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -271,6 +278,9 @@ static struct BitMap *roomBM = NULL;
 
 static struct RastPort tileRP;
 static struct BitMap *tileCacheBM = NULL;
+
+static struct RastPort roundOverlayRP;
+static struct BitMap *roundOverlayBM = NULL;
 
 static struct RastPort robotRP;
 static struct BitMap *robotCacheBM = NULL;
@@ -370,6 +380,7 @@ static WORD roundGoTicks = 0;
 static WORD roundCountdownSoundNumber = 0;
 static BOOL roundGoSoundPlayed = FALSE;
 static WORD roundCountdownLastSoundNumber = 0;
+static ULONG roundStartClockTicks = 0;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -567,7 +578,11 @@ static void StopGetReadySample(void);
 static void StopCountdownSample(void);
 static void StopGoSample(void);
 static void StopRoundStartSamples(void);
-static void StepRoundStartSamples(void);
+static void StepRoundStartSamples(WORD ticks);
+static ULONG ReadFrameClockTicks(void);
+static WORD ConsumeRoundStartFrameTicks(void);
+static BOOL InitRoundStartOverlayCache(void);
+static void FreeRoundStartOverlayCache(void);
 static BOOL LoadGameplaySamples(void);
 static void FreeGameplaySamples(void);
 static void StartMainGameMusic(void);
@@ -1020,11 +1035,16 @@ static void PlayGoSample(void)
     PlayOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
-static void StepRoundStartSamples(void)
+static void StepRoundStartSamples(WORD ticks)
 {
-    StepOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
-    StepOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
-    StepOneShotSample(&goSample, GO_AUDIO_CHANNEL);
+    WORD i;
+
+    if (ticks < 1) ticks = 1;
+    for (i = 0; i < ticks; i++) {
+        StepOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
+        StepOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+        StepOneShotSample(&goSample, GO_AUDIO_CHANNEL);
+    }
 }
 
 static BOOL AnyHooverMoving(void)
@@ -2850,6 +2870,7 @@ static void ResetLevel(void)
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
+    roundStartClockTicks = ReadFrameClockTicks();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
     gameState = GAME_PLAYING;
@@ -3357,6 +3378,7 @@ static void StartBonusRound(void)
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
+    roundStartClockTicks = ReadFrameClockTicks();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
     bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
@@ -3427,6 +3449,7 @@ static void StepIntro(void)
 static void StepGame(void)
 {
     WORD i;
+    WORD frameTicks = 1;
 
     if (gameState == GAME_INTRO) {
         StepIntro();
@@ -3439,14 +3462,16 @@ static void StepGame(void)
         return;
     }
 
-    StepRoundStartSamples();
+    if (roundCountdownTicks > 0 || roundGoTicks > 0) {
+        frameTicks = ConsumeRoundStartFrameTicks();
+    } else {
+        roundStartClockTicks = 0;
+    }
+    StepRoundStartSamples(frameTicks);
 
     if (roundCountdownTicks > 0) {
-        roundCountdownTicks--;
-        if (roundCountdownTicks > ROUND_COUNTDOWN_FRAMES) {
-            return;
-        }
-        if (roundCountdownTicks > 0) {
+        if (frameTicks < roundCountdownTicks) {
+            roundCountdownTicks -= frameTicks;
             roundCountdownSoundNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
             if (roundCountdownSoundNumber != roundCountdownLastSoundNumber) {
                 PlayCountdownSample();
@@ -3455,17 +3480,21 @@ static void StepGame(void)
             return;
         }
 
+        frameTicks -= roundCountdownTicks;
+        roundCountdownTicks = 0;
         roundGoTicks = ROUND_GO_FRAMES;
         if (!roundGoSoundPlayed) {
             PlayGoSample();
             roundGoSoundPlayed = TRUE;
         }
         StartMainGameMusic();
+        if (frameTicks < 1) frameTicks = 1;
     }
     if (roundGoTicks > 0) {
-        roundGoTicks--;
-        if (roundGoTicks <= 0) {
+        if (frameTicks >= roundGoTicks) {
             roundGoTicks = 0;
+        } else {
+            roundGoTicks -= frameTicks;
         }
     }
 
@@ -3609,6 +3638,88 @@ static void MiniTextCentered(struct RastPort *rp, WORD y, const char *s, UBYTE p
     MiniTextScaled(rp, (SCREEN_W - MiniTextWidth(s, scale)) / 2, y, s, pen, scale);
 }
 
+
+static void MiniTextCenteredIn(struct RastPort *rp, WORD left, WORD width, WORD y, const char *s, UBYTE pen, WORD scale)
+{
+    MiniTextScaled(rp, left + ((width - MiniTextWidth(s, scale)) / 2), y, s, pen, scale);
+}
+
+static ULONG ReadFrameClockTicks(void)
+{
+    struct DateStamp ds;
+
+    DateStamp(&ds);
+    return ((ULONG)ds.ds_Days * 72000UL) + ((ULONG)ds.ds_Minute * 3000UL) + (ULONG)ds.ds_Tick;
+}
+
+static WORD ConsumeRoundStartFrameTicks(void)
+{
+    ULONG now = ReadFrameClockTicks();
+    ULONG elapsed;
+
+    if (roundStartClockTicks == 0) {
+        roundStartClockTicks = now;
+        return 1;
+    }
+
+    elapsed = now - roundStartClockTicks;
+    if (elapsed < 1UL) elapsed = 1UL;
+    if (elapsed > ROUND_START_MAX_ELAPSED_TICKS) elapsed = ROUND_START_MAX_ELAPSED_TICKS;
+    roundStartClockTicks += elapsed;
+    return (WORD)elapsed;
+}
+
+static void BuildRoundStartOverlay(WORD index, const char *label)
+{
+    WORD left = index * ROUND_START_OVERLAY_W;
+    WORD right = left + ROUND_START_OVERLAY_W - 1;
+    WORD bottom = ROUND_START_OVERLAY_H - 1;
+
+    SetAPen(&roundOverlayRP, 1);
+    RectFill(&roundOverlayRP, left, 0, right, bottom);
+    SetAPen(&roundOverlayRP, 13);
+    RectFill(&roundOverlayRP, left + 2, 2, right - 2, bottom - 2);
+    SetAPen(&roundOverlayRP, 0);
+    RectFill(&roundOverlayRP, left + 4, 4, right - 4, bottom - 4);
+
+    MiniTextCenteredIn(&roundOverlayRP, left, ROUND_START_OVERLAY_W, 18, "GET-READY", 7, 3);
+    MiniTextCenteredIn(&roundOverlayRP, left, ROUND_START_OVERLAY_W, 46, "HOOVERS LOCKED", 8, 1);
+    if (label[0] == 'G') {
+        MiniTextCenteredIn(&roundOverlayRP, left, ROUND_START_OVERLAY_W, 63, label, 10, 6);
+    } else {
+        MiniTextCenteredIn(&roundOverlayRP, left, ROUND_START_OVERLAY_W, 58, label, 10, 8);
+    }
+}
+
+static BOOL InitRoundStartOverlayCache(void)
+{
+    static const char *labels[ROUND_START_OVERLAY_COUNT] = { "3", "2", "1", "GO" };
+    WORD i;
+
+    roundOverlayBM = AllocBitMap(ROUND_START_OVERLAY_W * ROUND_START_OVERLAY_COUNT,
+                                 ROUND_START_OVERLAY_H, DEPTH,
+                                 BMF_CLEAR | BMF_DISPLAYABLE,
+                                 scr ? scr->RastPort.BitMap : NULL);
+    if (!roundOverlayBM) return FALSE;
+
+    InitRastPort(&roundOverlayRP);
+    roundOverlayRP.BitMap = roundOverlayBM;
+
+    for (i = 0; i < ROUND_START_OVERLAY_COUNT; i++) {
+        BuildRoundStartOverlay(i, labels[i]);
+    }
+    return TRUE;
+}
+
+static void FreeRoundStartOverlayCache(void)
+{
+    if (roundOverlayBM) {
+        FreeBitMap(roundOverlayBM);
+        roundOverlayBM = NULL;
+    }
+    roundOverlayRP.BitMap = NULL;
+}
+
 static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD dstY)
 {
     WORD frame;
@@ -3634,6 +3745,7 @@ static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD d
  * carousel path blits these frames as a masked BOB; this helper scales the
  * same cached frames for the larger winner presentation.
  */
+
 static void DrawCachedTitleRobotSpinScaled(WORD variant, WORD phase, WORD dstX, WORD dstY, WORD scale)
 {
     WORD frame;
@@ -4027,65 +4139,38 @@ static void DrawIntroTitleImage(void)
 
 static void DrawRoundStartOverlay(void)
 {
-    WORD left = 48;
-    WORD top = 70;
-    WORD right = 272;
-    WORD bottom = 176;
-    WORD i;
+    WORD index;
 
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     if (roundCountdownTicks <= 0 && roundGoTicks <= 0) return;
 
     if (roundCountdownTicks > 0) {
         WORD activeNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
-        WORD phase = (ROUND_COUNTDOWN_STEP_FRAMES - 1) - ((roundCountdownTicks - 1) % ROUND_COUNTDOWN_STEP_FRAMES);
-
-        SetAPen(&renderRP, 1);
-        RectFill(&renderRP, left - 4, top - 4, right + 4, bottom + 4);
-        SetAPen(&renderRP, 13);
-        RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
-        SetAPen(&renderRP, 0);
-        RectFill(&renderRP, left, top, right, bottom);
-        MiniTextCentered(&renderRP, top + 14, "GET-READY", 7, 4);
-        MiniTextCentered(&renderRP, top + 42, "HOOVERS LOCKED", 8, 1);
-
-        for (i = 0; i < ROUND_COUNTDOWN_SECONDS; i++) {
-            WORD number = ROUND_COUNTDOWN_SECONDS - i;
-            WORD boxLeft = 78 + (i * 58);
-            WORD boxTop = top + 62;
-            WORD boxRight = boxLeft + 40;
-            WORD boxBottom = boxTop + 30;
-            char digit[2];
-            UBYTE pen = 8;
-
-            SetAPen(&renderRP, 8);
-            RectFill(&renderRP, boxLeft - 2, boxTop - 2, boxRight + 2, boxBottom + 2);
-            SetAPen(&renderRP, 0);
-            RectFill(&renderRP, boxLeft, boxTop, boxRight, boxBottom);
-
-            if (number > activeNumber) {
-                SetAPen(&renderRP, 10);
-                RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxRight - 2, boxBottom - 2);
-                pen = 0;
-            } else if (number == activeNumber) {
-                WORD greenFill = ((boxRight - boxLeft - 4) * phase) / (ROUND_COUNTDOWN_STEP_FRAMES - 1);
-                SetAPen(&renderRP, 3);
-                RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxRight - 2, boxBottom - 2);
-                if (greenFill > 0) {
-                    SetAPen(&renderRP, 10);
-                    RectFill(&renderRP, boxLeft + 2, boxTop + 2, boxLeft + 1 + greenFill, boxBottom - 2);
-                }
-                pen = (phase > (ROUND_COUNTDOWN_STEP_FRAMES / 2)) ? 0 : 7;
-            } else {
-                pen = 8;
-            }
-
-            digit[0] = (char)('0' + number);
-            digit[1] = '\0';
-            MiniTextScaled(&renderRP, boxLeft + 14, boxTop + 8, digit, pen, 3);
-        }
+        index = ROUND_COUNTDOWN_SECONDS - activeNumber;
     } else {
-        MiniTextCentered(&renderRP, (SCREEN_H - (5 * 5)) / 2, "GO", 10, 5);
+        index = ROUND_START_OVERLAY_COUNT - 1;
+    }
+
+    if (index < 0) index = 0;
+    if (index >= ROUND_START_OVERLAY_COUNT) index = ROUND_START_OVERLAY_COUNT - 1;
+
+    if (roundOverlayBM) {
+        BltBitMapRastPort(roundOverlayBM, index * ROUND_START_OVERLAY_W, 0,
+                          &renderRP, ROUND_START_OVERLAY_LEFT, ROUND_START_OVERLAY_TOP,
+                          ROUND_START_OVERLAY_W, ROUND_START_OVERLAY_H,
+                          0xC0);
+        return;
+    }
+
+    if (roundCountdownTicks > 0) {
+        char digit[2];
+        WORD activeNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        digit[0] = (char)('0' + activeNumber);
+        digit[1] = '\0';
+        MiniTextCentered(&renderRP, 88, "GET-READY", 7, 3);
+        MiniTextCentered(&renderRP, 116, digit, 10, 8);
+    } else {
+        MiniTextCentered(&renderRP, 110, "GO", 10, 6);
     }
 }
 
@@ -5209,7 +5294,12 @@ static BOOL OpenGameScreen(void)
     InitRastPort(&roomRP);
     roomRP.BitMap = roomBM;
 
+    if (!InitRoundStartOverlayCache()) {
+        printf("Round-start overlay cache allocation failed; simple countdown text fallback enabled\n");
+    }
+
     if (!InitTileCache()) {
+        FreeRoundStartOverlayCache();
         FreeBitMap(roomBM);
         roomBM = NULL;
         roomRP.BitMap = NULL;
@@ -5281,6 +5371,8 @@ static void CloseGameScreen(void)
         robotMaskBM = NULL;
     }
     robotRP.BitMap = NULL;
+
+    FreeRoundStartOverlayCache();
 
     if (tileCacheBM) {
         FreeBitMap(tileCacheBM);
