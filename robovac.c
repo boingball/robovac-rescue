@@ -92,12 +92,14 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_QUAD_RADIUS     1
 #define ROBOT_TURN_TICKS        1
 #define BONUS_SCORE_THRESHOLD    50
-#define BONUS_BOSS_MAX_HEALTH    80
+#define BONUS_BOSS_MAX_HEALTH    50
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
 #define BONUS_BOSS_TOUCH_STUN_TICKS 150
 #define BONUS_BOSS_FIRE_INTERVAL_TICKS 50
 #define MAX_BOSS_BOLTS 12
+#define BONUS_AI_FIRE_INTERVAL_TICKS 25
+#define BONUS_BOSS_EXPLOSION_TICKS 70
 
 #define ROBOT_W     16
 #define ROBOT_H     16
@@ -316,6 +318,10 @@ static WORD bonusBossDx = 1;
 static WORD bonusBossDy = 1;
 static WORD bonusBossPhase = 0;
 static WORD bonusBossFireTicks = 0;
+static WORD bonusAiFireTicks = 0;
+static WORD bonusBossExplosionTicks = 0;
+static WORD bonusBossExplosionX = 0;
+static WORD bonusBossExplosionY = 0;
 static WORD roomType = 0;
 static BOOL running = TRUE;
 static BOOL pauseMenuOpen = FALSE;
@@ -353,10 +359,7 @@ struct Bolt {
     LONG py;
     WORD ttl;
 };
-static struct Bolt playerBolts[MAX_HUMAN_PLAYERS] = {
-    {FALSE, 0, -1, 0, 0, 0},
-    {FALSE, 0, -1, 0, 0, 0}
-};
+static struct Bolt playerBolts[MAX_ROBOTS];
 static struct Bolt bossBolts[MAX_BOSS_BOLTS];
 
 static ULONG rng = 0x1234ABCD;
@@ -486,6 +489,7 @@ static const char *RobotControlLabel(WORD id)
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolts(void);
 static void StepBossBolts(void);
+static void StepBonusAiFire(void);
 static BOOL ActivateSpaceOrFireAction(void);
 static void DrawTitleCarousel(void);
 static void TriggerRobotPower(WORD id);
@@ -498,6 +502,7 @@ static void OpenAiSelectMenu(WORD initialSelection);
 static void StartMatch(WORD players, WORD rivals);
 static void StartBonusRound(void);
 static void FinishBonusRound(void);
+static void StartBonusBossExplosion(void);
 static void ClearMovementKeys(void);
 static BOOL LoadMenuMusicSample(void);
 static void FreeMenuMusicSample(void);
@@ -2373,7 +2378,7 @@ static void DrawBoltSprite(struct Bolt *bolt)
 
 static void DrawPlayerBolt(WORD playerId)
 {
-    if (playerId < 0 || playerId >= MAX_HUMAN_PLAYERS) return;
+    if (playerId < 0 || playerId >= robotCount) return;
     DrawBoltSprite(&playerBolts[playerId]);
 }
 
@@ -2644,11 +2649,11 @@ static void ResetLevel(void)
 
     SpawnRoundDirt(roundDirtTargets[roundIndex]);
     ClearMovementKeys();
-    playerBolts[0].active = FALSE;
-    playerBolts[1].active = FALSE;
+    { WORD bi; for (bi = 0; bi < MAX_ROBOTS; bi++) playerBolts[bi].active = FALSE; }
     { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
+    bonusBossExplosionTicks = 0;
     roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
     roundGoTicks = 0;
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
@@ -2931,7 +2936,7 @@ static void CheckEndState(void)
     WORD best = -1;
 
     if (gameState == GAME_BONUS_PLAYING) {
-        if (bonusBossHealth > 0) return;
+        if (bonusBossHealth > 0 || bonusBossExplosionTicks > 0) return;
         FinishBonusRound();
         return;
     }
@@ -2977,6 +2982,8 @@ static void ResetBonusBoss(void)
     bonusBossDy = 1;
     bonusBossPhase = 0;
     bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
+    bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
+    bonusBossExplosionTicks = 0;
 }
 
 static void BossStunRobot(WORD id, const char *label)
@@ -3066,6 +3073,23 @@ static void StepBonusBoss(void)
     }
 }
 
+
+static void StartBonusBossExplosion(void)
+{
+    WORD i;
+
+    if (gameState != GAME_BONUS_PLAYING || bonusBossExplosionTicks > 0) return;
+
+    bonusBossExplosionX = bonusBossX;
+    bonusBossExplosionY = bonusBossY;
+    bonusBossHealth = 0;
+    bonusBossExplosionTicks = BONUS_BOSS_EXPLOSION_TICKS;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
+    for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
+    snprintf(lastPowerText, sizeof(lastPowerText), "BOSS DEFEATED!");
+    lastPowerTicks = BONUS_BOSS_EXPLOSION_TICKS;
+}
+
 static void FinishBonusRound(void)
 {
     WORD i;
@@ -3076,6 +3100,7 @@ static void FinishBonusRound(void)
     }
     bonusAvailable = FALSE;
     bonusBossHealth = 0;
+    bonusBossExplosionTicks = 0;
     gameState = GAME_BONUS_END;
     StopGameplaySamples();
     ClearMovementKeys();
@@ -3115,8 +3140,7 @@ static void StartBonusRound(void)
     map[RobotDockY(3)][RobotDockX(3)] = TILE_DOCK;
 
     ClearMovementKeys();
-    playerBolts[0].active = FALSE;
-    playerBolts[1].active = FALSE;
+    { WORD bi; for (bi = 0; bi < MAX_ROBOTS; bi++) playerBolts[bi].active = FALSE; }
     { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
@@ -3127,6 +3151,8 @@ static void StartBonusRound(void)
     roundGoSoundPlayed = FALSE;
     empCountdownTicks = 0;
     empCountdownOwner = -1;
+    bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
+    bonusBossExplosionTicks = 0;
     gameState = GAME_BONUS_PLAYING;
     ClosePauseMenu();
 
@@ -3259,8 +3285,10 @@ static void StepGame(void)
             }
         }
     }
+    StepBonusAiFire();
     StepPlayerBolts();
     StepBossBolts();
+    if (bonusBossExplosionTicks > 0) bonusBossExplosionTicks--;
     if (empCountdownTicks > 0) {
         empCountdownTicks--;
         if (empCountdownTicks <= 0) empCountdownOwner = -1;
@@ -3548,6 +3576,24 @@ static void DrawRobotLarge(WORD robotId, WORD x, WORD y, WORD scale, WORD phase)
     }
 }
 
+static void DrawRobotIcon(WORD robotId, WORD x, WORD y, UBYTE state)
+{
+    WORD variant;
+    WORD srcX;
+
+    if (!robotCacheBM || !robotMaskBM || !robotMaskBM->Planes[0]) return;
+    if (robotId < 0 || robotId >= robotCount) return;
+
+    variant = robots[robotId].spriteVariant;
+    if (variant >= ROBOT_VARIANTS) variant = 0;
+    srcX = (variant * SPR_STATE_COUNT + state) * ROBOT_W;
+    BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
+                          &renderRP, x, y,
+                          ROBOT_W, ROBOT_H,
+                          (ABC | ABNC | ANBC),
+                          robotMaskBM->Planes[0]);
+}
+
 static void BuildRankOrder(WORD *order)
 {
     WORD i;
@@ -3585,12 +3631,12 @@ static void DrawLeaderboardScreen(BOOL finalBoard)
     DrawRobotLarge(order[0], (SCREEN_W - ROBOT_W * 4) / 2, 48, 4, titleSpinPhase);
 
     if (robotCount > 1) {
-        DrawRobotLarge(order[1], 12, 112, 1, titleSpinPhase);
+        DrawRobotIcon(order[1], 12, 112, SPR_DOWN);
         snprintf(b, sizeof(b), "2ND %s %s  %d", RobotControlLabel(order[1]), RobotTag(order[1]), totalScores[order[1]]);
         MiniText(&renderRP, 30, 120, b, 7);
     }
     if (robotCount > 2) {
-        DrawRobotLarge(order[2], 156, 112, 1, titleSpinPhase);
+        DrawRobotIcon(order[2], 156, 112, SPR_DOWN);
         snprintf(b, sizeof(b), "3RD %s %s  %d", RobotControlLabel(order[2]), RobotTag(order[2]), totalScores[order[2]]);
         MiniText(&renderRP, 174, 120, b, 7);
     }
@@ -3598,16 +3644,49 @@ static void DrawLeaderboardScreen(BOOL finalBoard)
     MiniTextCentered(&renderRP, 136, "BOARD", 8, 1);
     for (i = 0; i < robotCount && i < 10; i++) {
         WORD id = order[i];
-        WORD y = 150 + i * 9;
-        DrawRobotLarge(id, 54, y - 5, 1, titleSpinPhase + i);
-        snprintf(b, sizeof(b), "%d %s %s PTS:%d W:%d", i + 1, RobotControlLabel(id), RobotTag(id), totalScores[id], roundWins[id]);
-        MiniText(&renderRP, 72, y, b, (i == 0) ? 14 : 7);
+        WORD col = i / 5;
+        WORD row = i % 5;
+        WORD x = 8 + (col * 154);
+        WORD y = 150 + row * 17;
+        DrawRobotIcon(id, x, y - 8, SPR_DOWN);
+        snprintf(b, sizeof(b), "%d %s %s P:%d W:%d", i + 1, RobotControlLabel(id), RobotTag(id), totalScores[id], roundWins[id]);
+        MiniText(&renderRP, x + 18, y, b, (i == 0) ? 14 : 7);
     }
 
     if (!finalBoard && bonusAvailable) {
         MiniTextCentered(&renderRP, 238, "OVER 50! SPACE/FIRE BONUS", 13, 1);
     } else {
         MiniTextCentered(&renderRP, 238, "SPACE/FIRE TITLE", 13, 1);
+    }
+}
+
+static void DrawBossExplosion(void)
+{
+    static const WORD dirs[8][2] = {
+        {-1, -1}, {0, -1}, {1, -1}, {-1, 0},
+        {1, 0}, {-1, 1}, {0, 1}, {1, 1}
+    };
+    WORD i;
+    WORD spread;
+    WORD centerX;
+    WORD centerY;
+
+    if (gameState != GAME_BONUS_PLAYING || bonusBossExplosionTicks <= 0) return;
+
+    spread = (BONUS_BOSS_EXPLOSION_TICKS - bonusBossExplosionTicks) / 2;
+    centerX = bonusBossExplosionX + ((ROBOT_W * BONUS_BOSS_SCALE) / 2) - (ROBOT_W / 2);
+    centerY = bonusBossExplosionY + ((ROBOT_H * BONUS_BOSS_SCALE) / 2) - (ROBOT_H / 2);
+
+    SetAPen(&renderRP, 13);
+    RectFill(&renderRP, centerX - spread, centerY - 2, centerX + ROBOT_W + spread, centerY + ROBOT_H + 2);
+    SetAPen(&renderRP, 12);
+    RectFill(&renderRP, centerX - 2, centerY - spread, centerX + ROBOT_W + 2, centerY + ROBOT_H + spread);
+
+    for (i = 0; i < 8; i++) {
+        DrawRobotIcon(finalWinner >= 0 ? finalWinner : 0,
+                      centerX + dirs[i][0] * spread,
+                      centerY + dirs[i][1] * spread,
+                      (UBYTE)(SPR_DOWN + (i & 1)));
     }
 }
 
@@ -3634,7 +3713,7 @@ static void DrawHud(void)
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
         MiniTextCentered(&renderRP, 20, "ARROWS/J1 P1  P2 FIRE JOINS", 13, 2);
         MiniTextCentered(&renderRP, 32, "P2 Z/C/J2 SELECT  V LOCK", 13, 2);
-        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/FIRE START", 14, 2);
+        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE START", 14, 2);
         return;
     }
 
@@ -3902,11 +3981,12 @@ static void DrawFrame(void)
     for (i = 0; i < humanPlayers; i++) {
         DrawRobotBob(i);
     }
-    for (i = 0; i < humanPlayers; i++) {
+    for (i = 0; i < robotCount; i++) {
         DrawPlayerBolt(i);
     }
 
     DrawBossBolts();
+    DrawBossExplosion();
     DrawBonusBoss();
     DrawEmpCountdown();
     DrawRoundStartOverlay();
@@ -4114,17 +4194,40 @@ static void TitlePlayer2Fire(void)
     }
 }
 
-static void FirePlayerBolt(WORD id)
+static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL playSound)
 {
-    WORD dirX = 0, dirY = 0;
     struct Bolt *bolt;
 
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     if (RoundStartLocked()) return;
-    if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
+    if (id < 0 || id >= robotCount) return;
+    if (robots[id].stunTicks > 0) return;
+    if (dirX == 0 && dirY == 0) dirY = -1;
+
     bolt = &playerBolts[id];
-    if (robots[id].battery < 2 && !(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) return;
     if (bolt->active) return;
+    if (useBattery && robots[id].battery < 2 && !(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) return;
+
+    if (useBattery && !(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) {
+        robots[id].battery -= 2;
+    }
+
+    bolt->active = TRUE;
+    bolt->dirX = dirX;
+    bolt->dirY = dirY;
+    bolt->px = TO_FP(robots[id].tileX * TILE_SIZE);
+    bolt->py = TO_FP(robots[id].tileY * TILE_SIZE);
+    bolt->ttl = (gameState == GAME_BONUS_PLAYING) ? 42 : 24;
+    if (playSound) PlayBoltFireSample();
+}
+
+static void FirePlayerBolt(WORD id)
+{
+    WORD dirX = 0, dirY = 0;
+
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
+    if (RoundStartLocked()) return;
+    if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
 
     if (robots[id].moving) {
         dirX = robots[id].targetX - robots[id].tileX;
@@ -4140,18 +4243,9 @@ static void FirePlayerBolt(WORD id)
     else { dirX = playerFacingX[id]; dirY = playerFacingY[id]; }
     if (dirX == 0 && dirY == 0) dirY = -1;
 
-    if (!(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) {
-        robots[id].battery -= 2;
-    }
     playerFacingX[id] = dirX;
     playerFacingY[id] = dirY;
-    bolt->active = TRUE;
-    bolt->dirX = dirX;
-    bolt->dirY = dirY;
-    bolt->px = TO_FP(robots[id].tileX * TILE_SIZE);
-    bolt->py = TO_FP(robots[id].tileY * TILE_SIZE);
-    bolt->ttl = 24;
-    PlayBoltFireSample();
+    FireRobotBolt(id, dirX, dirY, TRUE, TRUE);
 }
 
 static void StepPlayerBolt(WORD ownerId)
@@ -4159,7 +4253,7 @@ static void StepPlayerBolt(WORD ownerId)
     WORD tx, ty, i;
     struct Bolt *bolt;
 
-    if (ownerId < 0 || ownerId >= humanPlayers || ownerId >= MAX_HUMAN_PLAYERS) return;
+    if (ownerId < 0 || ownerId >= robotCount) return;
     bolt = &playerBolts[ownerId];
     if (!bolt->active) return;
     if (bolt->ttl-- <= 0) { bolt->active = FALSE; return; }
@@ -4184,7 +4278,7 @@ static void StepPlayerBolt(WORD ownerId)
             snprintf(lastPowerText, sizeof(lastPowerText), "%s BOSS HIT +%d HP:%d", RobotTag(ownerId), BONUS_BOSS_HIT_POINTS, bonusBossHealth);
             lastPowerTicks = 80;
             bolt->active = FALSE;
-            if (bonusBossHealth <= 0) FinishBonusRound();
+            if (bonusBossHealth <= 0) StartBonusBossExplosion();
             return;
         }
     }
@@ -4208,8 +4302,58 @@ static void StepPlayerBolt(WORD ownerId)
 static void StepPlayerBolts(void)
 {
     WORD i;
-    for (i = 0; i < humanPlayers; i++) {
+    for (i = 0; i < robotCount; i++) {
         StepPlayerBolt(i);
+    }
+}
+
+static void FireAiBoltAtBoss(WORD id)
+{
+    WORD robotX;
+    WORD robotY;
+    WORD bossCenterX;
+    WORD bossCenterY;
+    WORD dx;
+    WORD dy;
+
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].stunTicks > 0) return;
+
+    robotX = robots[id].tileX * TILE_SIZE + (ROBOT_W / 2);
+    robotY = robots[id].tileY * TILE_SIZE + (ROBOT_H / 2);
+    bossCenterX = (bonusBossX - MAP_X) + ((ROBOT_W * BONUS_BOSS_SCALE) / 2);
+    bossCenterY = (bonusBossY - MAP_Y) + ((ROBOT_H * BONUS_BOSS_SCALE) / 2);
+    dx = bossCenterX - robotX;
+    dy = bossCenterY - robotY;
+
+    if (AbsW(dx) >= AbsW(dy)) {
+        FireRobotBolt(id, (dx < 0) ? -1 : 1, 0, FALSE, FALSE);
+    } else {
+        FireRobotBolt(id, 0, (dy < 0) ? -1 : 1, FALSE, FALSE);
+    }
+}
+
+static void StepBonusAiFire(void)
+{
+    static WORD nextAiShooter = 0;
+    WORD tries;
+
+    if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0 || bonusBossExplosionTicks > 0) return;
+    if (humanPlayers >= robotCount) return;
+
+    if (bonusAiFireTicks > 0) bonusAiFireTicks--;
+    if (bonusAiFireTicks > 0) return;
+    bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
+
+    if (nextAiShooter < humanPlayers || nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
+    for (tries = 0; tries < robotCount; tries++) {
+        WORD id = nextAiShooter;
+        nextAiShooter++;
+        if (nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
+        if (id >= humanPlayers && id < robotCount && !playerBolts[id].active) {
+            FireAiBoltAtBoss(id);
+            return;
+        }
     }
 }
 
