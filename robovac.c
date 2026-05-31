@@ -4344,10 +4344,10 @@ static void PollWindowMessages(void)
             if (gameState == GAME_PLAYING) continue;
             if (code == MENUDOWN) running = FALSE;
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
-            if (code == SELECTDOWN && gameState == GAME_TITLE) {
-                if (aiSelectMenuOpen) ActivateAiSelectMenu();
-                else StartWithRivals(aiRivals);
-            }
+            /* J1 fire shares the left mouse button line on Amiga hardware, so
+             * title-screen SELECTDOWN must not start/activate menus.  Let
+             * PollJoysticks consume the fire press and enable J1 instead.
+             */
         }
     }
 }
