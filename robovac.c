@@ -1031,7 +1031,7 @@ static BOOL AnyHooverMoving(void)
 {
     WORD i;
 
-    if ((gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) || roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) return FALSE;
+    if ((gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) || roundCountdownTicks > 0 || pauseMenuOpen) return FALSE;
     for (i = 0; i < robotCount; i++) {
         if (robots[i].moving) return TRUE;
     }
@@ -1042,7 +1042,8 @@ static void StartMainGameMusic(void)
 {
     if (mainMusicSample.playing) return;
     StopMenuMusic();
-    StopRoundStartSamples();
+    StopGetReadySample();
+    StopCountdownSample();
     PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_LEFT_AUDIO_CHANNEL);
     PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
@@ -1406,7 +1407,7 @@ static ULONG ReadBE32(const UBYTE *p)
 static BOOL RoundStartLocked(void)
 {
     return ((gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) &&
-            (roundCountdownTicks > 0 || roundGoTicks > 0)) ? TRUE : FALSE;
+            roundCountdownTicks > 0) ? TRUE : FALSE;
 }
 
 static UWORD AudioDmaBit(WORD channel)
@@ -3451,25 +3452,21 @@ static void StepGame(void)
                 PlayCountdownSample();
                 roundCountdownLastSoundNumber = roundCountdownSoundNumber;
             }
+            return;
         }
-        if (roundCountdownTicks <= 0) {
-            roundGoTicks = ROUND_GO_FRAMES;
-            ClearMovementKeys();
-            if (!roundGoSoundPlayed) {
-                PlayGoSample();
-                roundGoSoundPlayed = TRUE;
-            }
+
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
         }
-        return;
+        StartMainGameMusic();
     }
     if (roundGoTicks > 0) {
         roundGoTicks--;
         if (roundGoTicks <= 0) {
             roundGoTicks = 0;
-            StopGoSample();
-            StartMainGameMusic();
         }
-        return;
     }
 
     StepBonusBoss();
