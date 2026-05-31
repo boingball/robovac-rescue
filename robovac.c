@@ -201,16 +201,15 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BOLT_FIRE_AUDIO_CHANNEL 2
 #define PAULA_CLOCK_HZ 3546895UL
 #define ROUND_COUNTDOWN_SECONDS 3
-#define ROUND_COUNTDOWN_STEP_FRAMES 17
+#define ROUND_COUNTDOWN_STEP_FRAMES 24
 #define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
 #define ROUND_COUNTDOWN_TOTAL_FRAMES ROUND_COUNTDOWN_FRAMES
-#define ROUND_GO_FRAMES 20
+#define ROUND_GO_FRAMES 24
 #define ROUND_START_OVERLAY_LEFT 44
 #define ROUND_START_OVERLAY_TOP 66
 #define ROUND_START_OVERLAY_W 233
 #define ROUND_START_OVERLAY_H 115
 #define ROUND_START_OVERLAY_COUNT 4
-#define ROUND_START_MAX_ELAPSED_TICKS 5
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -380,7 +379,6 @@ static WORD roundGoTicks = 0;
 static WORD roundCountdownSoundNumber = 0;
 static BOOL roundGoSoundPlayed = FALSE;
 static WORD roundCountdownLastSoundNumber = 0;
-static ULONG roundStartClockTicks = 0;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -578,9 +576,7 @@ static void StopGetReadySample(void);
 static void StopCountdownSample(void);
 static void StopGoSample(void);
 static void StopRoundStartSamples(void);
-static void StepRoundStartSamples(WORD ticks);
-static ULONG ReadFrameClockTicks(void);
-static WORD ConsumeRoundStartFrameTicks(void);
+static void StepRoundStartSamples(void);
 static BOOL InitRoundStartOverlayCache(void);
 static void FreeRoundStartOverlayCache(void);
 static BOOL LoadGameplaySamples(void);
@@ -1035,16 +1031,11 @@ static void PlayGoSample(void)
     PlayOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
-static void StepRoundStartSamples(WORD ticks)
+static void StepRoundStartSamples(void)
 {
-    WORD i;
-
-    if (ticks < 1) ticks = 1;
-    for (i = 0; i < ticks; i++) {
-        StepOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
-        StepOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
-        StepOneShotSample(&goSample, GO_AUDIO_CHANNEL);
-    }
+    StepOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
+    StepOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+    StepOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
 static BOOL AnyHooverMoving(void)
@@ -2870,7 +2861,6 @@ static void ResetLevel(void)
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
-    roundStartClockTicks = ReadFrameClockTicks();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
     gameState = GAME_PLAYING;
@@ -3378,7 +3368,6 @@ static void StartBonusRound(void)
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
-    roundStartClockTicks = ReadFrameClockTicks();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
     bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
@@ -3462,12 +3451,7 @@ static void StepGame(void)
         return;
     }
 
-    if (roundCountdownTicks > 0 || roundGoTicks > 0) {
-        frameTicks = ConsumeRoundStartFrameTicks();
-    } else {
-        roundStartClockTicks = 0;
-    }
-    StepRoundStartSamples(frameTicks);
+    StepRoundStartSamples();
 
     if (roundCountdownTicks > 0) {
         if (frameTicks < roundCountdownTicks) {
@@ -3642,31 +3626,6 @@ static void MiniTextCentered(struct RastPort *rp, WORD y, const char *s, UBYTE p
 static void MiniTextCenteredIn(struct RastPort *rp, WORD left, WORD width, WORD y, const char *s, UBYTE pen, WORD scale)
 {
     MiniTextScaled(rp, left + ((width - MiniTextWidth(s, scale)) / 2), y, s, pen, scale);
-}
-
-static ULONG ReadFrameClockTicks(void)
-{
-    struct DateStamp ds;
-
-    DateStamp(&ds);
-    return ((ULONG)ds.ds_Days * 72000UL) + ((ULONG)ds.ds_Minute * 3000UL) + (ULONG)ds.ds_Tick;
-}
-
-static WORD ConsumeRoundStartFrameTicks(void)
-{
-    ULONG now = ReadFrameClockTicks();
-    ULONG elapsed;
-
-    if (roundStartClockTicks == 0) {
-        roundStartClockTicks = now;
-        return 1;
-    }
-
-    elapsed = now - roundStartClockTicks;
-    if (elapsed < 1UL) elapsed = 1UL;
-    if (elapsed > ROUND_START_MAX_ELAPSED_TICKS) elapsed = ROUND_START_MAX_ELAPSED_TICKS;
-    roundStartClockTicks += elapsed;
-    return (WORD)elapsed;
 }
 
 static void BuildRoundStartOverlay(WORD index, const char *label)
