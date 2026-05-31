@@ -22,7 +22,7 @@
  *                 J1 uses JOY0DAT + CIAA PRA bit 6 fire
  *                 J2 uses JOY1DAT + CIAA PRA bit 7 fire
  *   P2 fire/V     - arm/lock two-player carousel selection from title screen
- *   Space/fire - start/advance; R resets the active level
+ *   Space/J1 second fire - start/advance; R resets the active level
  *   Q          - open in-game restart/quit menu
  *   0/1/2/3    - choose AI rivals from two-player AI prompt
  *   1/2/3      - start one-player match with 1/2/3 AI rivals from title screen
@@ -95,7 +95,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BONUS_BOSS_MAX_HEALTH    50
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
-#define BONUS_BOSS_TOUCH_STUN_TICKS 150
+#define BONUS_BOSS_TOUCH_STUN_TICKS 100
+#define BONUS_BOSS_TOUCH_COOLDOWN_TICKS 100
 #define BONUS_BOSS_FIRE_INTERVAL_TICKS 50
 #define MAX_BOSS_BOLTS 12
 #define BONUS_AI_FIRE_INTERVAL_TICKS 25
@@ -322,6 +323,8 @@ static WORD bonusAiFireTicks = 0;
 static WORD bonusBossExplosionTicks = 0;
 static WORD bonusBossExplosionX = 0;
 static WORD bonusBossExplosionY = 0;
+static WORD bonusBossTouchCooldown[MAX_ROBOTS];
+static BOOL bonusBossTouching[MAX_ROBOTS];
 static WORD roomType = 0;
 static BOOL running = TRUE;
 static BOOL pauseMenuOpen = FALSE;
@@ -2984,6 +2987,7 @@ static void ResetBonusBoss(void)
     bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
     bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
     bonusBossExplosionTicks = 0;
+    { WORD i; for (i = 0; i < MAX_ROBOTS; i++) { bonusBossTouchCooldown[i] = 0; bonusBossTouching[i] = FALSE; } }
 }
 
 static void BossStunRobot(WORD id, const char *label)
@@ -2998,7 +3002,7 @@ static void BossStunRobot(WORD id, const char *label)
         robots[id].py = TO_FP(robots[id].tileY * TILE_SIZE);
         robots[id].moving = FALSE;
     }
-    snprintf(lastPowerText, sizeof(lastPowerText), "%s %s STUN 3S", RobotTag(id), label);
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s %s STUN 2S", RobotTag(id), label);
     lastPowerTicks = 60;
 }
 
@@ -3061,8 +3065,19 @@ static void StepBonusBoss(void)
     for (i = 0; i < robotCount; i++) {
         WORD rx = MAP_X + FP_TO_INT(robots[i].px);
         WORD ry = MAP_Y + FP_TO_INT(robots[i].py);
-        if (RectsOverlap(rx, ry, ROBOT_W, ROBOT_H, bonusBossX, bonusBossY, bossW, bossH)) {
-            BossStunRobot(i, "BOSS");
+        BOOL touching;
+
+        if (bonusBossTouchCooldown[i] > 0) bonusBossTouchCooldown[i]--;
+
+        touching = RectsOverlap(rx, ry, ROBOT_W, ROBOT_H, bonusBossX, bonusBossY, bossW, bossH);
+        if (touching) {
+            if (!bonusBossTouching[i] && bonusBossTouchCooldown[i] <= 0) {
+                BossStunRobot(i, "BOSS");
+                bonusBossTouchCooldown[i] = BONUS_BOSS_TOUCH_COOLDOWN_TICKS;
+            }
+            bonusBossTouching[i] = TRUE;
+        } else {
+            bonusBossTouching[i] = FALSE;
         }
     }
 
@@ -3478,11 +3493,11 @@ static void DrawTitleCarousel(void)
     snprintf(b, sizeof(b), "P%d %s", titleSelectPlayer + 1, robotVariantNames[selectedPlayerVariant[titleSelectPlayer]]);
     MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 50, b, 7, 2);
     if (!titleTwoPlayerArmed) {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1/J1 SELECT  P2 FIRE JOINS", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1/J1 SELECT  J1B2 START", 13, 2);
     } else if (!titlePlayer2Locked) {
         MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2/J2 SELECT  P2 FIRE LOCK", 13, 2);
     } else {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  SPACE/FIRE START", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1/J1 SELECT  J1B2 START", 13, 2);
     }
 }
 
@@ -3713,7 +3728,7 @@ static void DrawHud(void)
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
         MiniTextCentered(&renderRP, 20, "ARROWS/J1 P1  P2 FIRE JOINS", 13, 2);
         MiniTextCentered(&renderRP, 32, "P2 Z/C/J2 SELECT  V LOCK", 13, 2);
-        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE START", 14, 2);
+        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/J1B2 START", 14, 2);
         return;
     }
 
@@ -4539,7 +4554,14 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     }
 
     if (aiSelectMenuOpen) {
-        if (id == 0) HandleAiSelectJoystick(up, down, firePressed);
+        if (id == 0) {
+            /* J1 fire remains Player 1 select/focus on menus; use Space,
+             * keyboard Return, number keys, or J1 second fire/RMB to accept
+             * the AI-rival prompt.
+             */
+            HandleAiSelectJoystick(up, down, FALSE);
+            if (firePressed) titleSelectPlayer = 0;
+        }
         prevLeft[id] = left;
         prevRight[id] = right;
         return;
@@ -4547,7 +4569,12 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (firePressed) {
         if (id == 0) {
-            ActivateSpaceOrFireAction();
+            /* J1 fire shares the left mouse button line, so on the title
+             * screen it only confirms/focuses Player 1's carousel selection.
+             * Starting/advancing is left to Space, keyboard AI shortcuts, or
+             * the J1 second button/RMB path handled by Intuition.
+             */
+            titleSelectPlayer = 0;
         } else if (id == 1) {
             TitlePlayer2Fire();
         }
@@ -4629,9 +4656,14 @@ static void PollWindowMessages(void)
             HandleRawKey(code);
         } else if (cls == IDCMP_MOUSEBUTTONS) {
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
+            if (code == MENUDOWN && gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
+                if (aiSelectMenuOpen) ActivateAiSelectMenu();
+                else ActivateSpaceOrFireAction();
+            }
             /* J1 fire shares the left mouse button line on Amiga hardware, so
              * title-screen SELECTDOWN must not start/activate menus.  Let
              * PollJoysticks consume the fire press and enable J1 instead.
+             * J1 second fire/RMB arrives as MENUDOWN and can start/advance.
              */
         }
     }
