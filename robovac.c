@@ -96,6 +96,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
 #define BONUS_BOSS_TOUCH_STUN_TICKS 100
+#define BOLT_STUN_STEP_FRAMES    17
+#define BOLT_STUN_TICKS          (5 * BOLT_STUN_STEP_FRAMES)
+#define BOLT_STUN_DAMAGE         5
+#define MAIN_AI_FIRE_CHANCE      18
+#define MAIN_AI_FIRE_RANGE       6
 #define BONUS_BOSS_TOUCH_COOLDOWN_TICKS 100
 #define BONUS_BOSS_FIRE_INTERVAL_TICKS 50
 #define MAX_BOSS_BOLTS 12
@@ -493,8 +498,10 @@ static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolts(void);
 static void StepBossBolts(void);
 static void StepBonusAiFire(void);
+static void StepMainGameAiFire(void);
 static BOOL ActivateSpaceOrFireAction(void);
 static void DrawTitleCarousel(void);
+static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen);
 static void TriggerRobotPower(WORD id);
 static WORD NextPowerCleanTarget(WORD useCount);
 static WORD SpawnDirtTiles(WORD count);
@@ -688,6 +695,52 @@ static BOOL RobotAtTile(WORD tx, WORD ty, WORD ignoreId)
     }
 
     return FALSE;
+}
+
+static BOOL MoveRobotToNearestFreeTile(WORD id)
+{
+    WORD radius;
+    WORD bestX = -1;
+    WORD bestY = -1;
+
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (!IsBlocked(robots[id].tileX, robots[id].tileY)) return FALSE;
+
+    for (radius = 1; radius < MAP_W + MAP_H; radius++) {
+        WORD dy;
+        for (dy = -radius; dy <= radius; dy++) {
+            WORD dx;
+            for (dx = -radius; dx <= radius; dx++) {
+                WORD tx;
+                WORD ty;
+
+                if (AbsW(dx) + AbsW(dy) != radius) continue;
+                tx = robots[id].tileX + dx;
+                ty = robots[id].tileY + dy;
+                if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+                if (IsBlocked(tx, ty)) continue;
+                if (RobotAtTile(tx, ty, id)) continue;
+                bestX = tx;
+                bestY = ty;
+                break;
+            }
+            if (bestX >= 0) break;
+        }
+        if (bestX >= 0) break;
+    }
+
+    if (bestX < 0) return FALSE;
+
+    robots[id].tileX = bestX;
+    robots[id].tileY = bestY;
+    robots[id].targetX = bestX;
+    robots[id].targetY = bestY;
+    robots[id].px = TO_FP(bestX * TILE_SIZE);
+    robots[id].py = TO_FP(bestY * TILE_SIZE);
+    robots[id].moving = FALSE;
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s PHASED FREE", RobotTag(id));
+    lastPowerTicks = 60;
+    return TRUE;
 }
 
 /* -------------------------------------------------------------------------
@@ -2393,6 +2446,31 @@ static void DrawBossBolts(void)
     }
 }
 
+static void DrawStunCountdowns(void)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        WORD secondsLeft;
+        WORD sx;
+        WORD sy;
+        char b[4];
+
+        if (robots[i].stunTicks <= 0) continue;
+
+        secondsLeft = ((robots[i].stunTicks - 1) / BOLT_STUN_STEP_FRAMES) + 1;
+        if (secondsLeft < 1) secondsLeft = 1;
+        if (secondsLeft > 5) secondsLeft = 5;
+        snprintf(b, sizeof(b), "%d", secondsLeft);
+
+        sx = MAP_X + FP_TO_INT(robots[i].px) + 6;
+        sy = MAP_Y + FP_TO_INT(robots[i].py) - 6;
+        if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[i].py) + 2;
+
+        MiniText(&renderRP, sx, sy, b, 14);
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Gameplay
  * ------------------------------------------------------------------------- */
@@ -2754,6 +2832,12 @@ static void FinishRobotTileMove(WORD id)
     robots[id].px = TO_FP(tx * TILE_SIZE);
     robots[id].py = TO_FP(ty * TILE_SIZE);
     robots[id].moving = FALSE;
+
+    if (robots[id].powerType != POWER_QUAD || robots[id].powerMovesLeft <= 0) {
+        MoveRobotToNearestFreeTile(id);
+        tx = robots[id].tileX;
+        ty = robots[id].tileY;
+    }
 
     if (CleanTileForRobot(id, tx, ty)) {
         robots[id].cleanStreak++;
@@ -3285,7 +3369,7 @@ static void StepGame(void)
             WORD j;
             for (j = 0; j < robotCount; j++) {
                 if (j != i && AbsW(robots[j].tileX - robots[i].tileX) + AbsW(robots[j].tileY - robots[i].tileY) <= 3) {
-                    robots[j].stunTicks = 80;
+                    robots[j].stunTicks = BOLT_STUN_TICKS;
                     robots[j].battery -= 3;
                     if (robots[j].battery < 0) robots[j].battery = 0;
                     break;
@@ -3301,6 +3385,7 @@ static void StepGame(void)
         }
     }
     StepBonusAiFire();
+    StepMainGameAiFire();
     StepPlayerBolts();
     StepBossBolts();
     if (bonusBossExplosionTicks > 0) bonusBossExplosionTicks--;
@@ -3996,6 +4081,7 @@ static void DrawFrame(void)
     for (i = 0; i < humanPlayers; i++) {
         DrawRobotBob(i);
     }
+    DrawStunCountdowns();
     for (i = 0; i < robotCount; i++) {
         DrawPlayerBolt(i);
     }
@@ -4298,14 +4384,15 @@ static void StepPlayerBolt(WORD ownerId)
         }
     }
 
+    if (gameState == GAME_BONUS_PLAYING) return;
+
     for (i = 0; i < robotCount; i++) {
         if (i == ownerId) continue;
         if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
-            robots[i].stunTicks = 250;
-            robots[i].battery -= 5;
+            robots[i].stunTicks = BOLT_STUN_TICKS;
+            robots[i].battery -= BOLT_STUN_DAMAGE;
             if (robots[i].battery < 0) robots[i].battery = 0;
             robots[ownerId].score += BONUS_BOSS_HIT_POINTS;
-            if (gameState == GAME_BONUS_PLAYING) totalScores[ownerId] += BONUS_BOSS_HIT_POINTS;
             snprintf(lastPowerText, sizeof(lastPowerText), "%s BOLT +%d", RobotTag(ownerId), BONUS_BOSS_HIT_POINTS);
             lastPowerTicks = 80;
             bolt->active = FALSE;
@@ -4367,6 +4454,75 @@ static void StepBonusAiFire(void)
         if (nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
         if (id >= humanPlayers && id < robotCount && !playerBolts[id].active) {
             FireAiBoltAtBoss(id);
+            return;
+        }
+    }
+}
+
+static BOOL ClearBoltLane(WORD sx, WORD sy, WORD tx, WORD ty)
+{
+    WORD dx = 0;
+    WORD dy = 0;
+    WORD x;
+    WORD y;
+
+    if (sx == tx) dy = (ty > sy) ? 1 : -1;
+    else if (sy == ty) dx = (tx > sx) ? 1 : -1;
+    else return FALSE;
+
+    x = sx + dx;
+    y = sy + dy;
+    while (x != tx || y != ty) {
+        if (IsBlocked(x, y)) return FALSE;
+        x += dx;
+        y += dy;
+    }
+
+    return TRUE;
+}
+
+static void StepMainGameAiFire(void)
+{
+    static WORD nextAiShooter = 0;
+    WORD tries;
+
+    if (gameState != GAME_PLAYING || RoundStartLocked()) return;
+    if (humanPlayers >= robotCount) return;
+
+    if (nextAiShooter < humanPlayers || nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
+    for (tries = 0; tries < robotCount; tries++) {
+        WORD id = nextAiShooter;
+        WORD target = -1;
+        WORD bestDist = MAIN_AI_FIRE_RANGE + 1;
+        WORD j;
+
+        nextAiShooter++;
+        if (nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
+
+        if (id < humanPlayers || id >= robotCount) continue;
+        if (robots[id].stunTicks > 0 || playerBolts[id].active) continue;
+        if (robots[id].battery < 2 && !(robots[id].powerType == POWER_BOLT && robots[id].powerMovesLeft > 0)) continue;
+        if (RandRange(MAIN_AI_FIRE_CHANCE) != 0) continue;
+
+        for (j = 0; j < robotCount; j++) {
+            WORD dist;
+            if (j == id) continue;
+            if (robots[j].tileX != robots[id].tileX && robots[j].tileY != robots[id].tileY) continue;
+            dist = AbsW(robots[j].tileX - robots[id].tileX) + AbsW(robots[j].tileY - robots[id].tileY);
+            if (dist <= 0 || dist > MAIN_AI_FIRE_RANGE || dist >= bestDist) continue;
+            if (!ClearBoltLane(robots[id].tileX, robots[id].tileY, robots[j].tileX, robots[j].tileY)) continue;
+            target = j;
+            bestDist = dist;
+        }
+
+        if (target >= 0) {
+            WORD dirX = 0;
+            WORD dirY = 0;
+            if (robots[target].tileX < robots[id].tileX) dirX = -1;
+            else if (robots[target].tileX > robots[id].tileX) dirX = 1;
+            else if (robots[target].tileY < robots[id].tileY) dirY = -1;
+            else dirY = 1;
+            FireRobotBolt(id, dirX, dirY, TRUE, FALSE);
             return;
         }
     }
