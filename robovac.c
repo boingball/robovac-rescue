@@ -22,12 +22,12 @@
  *                 J1 uses JOY0DAT + CIAA PRA bit 6 fire
  *                 J2 uses JOY1DAT + CIAA PRA bit 7 fire
  *   P2 fire/V     - arm/lock two-player carousel selection from title screen
- *   R/Space    - start/reset
+ *   Space/fire - start/advance; R resets the active level
  *   Q          - open in-game restart/quit menu
  *   0/1/2/3    - choose AI rivals from two-player AI prompt
  *   1/2/3      - start one-player match with 1/2/3 AI rivals from title screen
  *   O          - hidden 9-rival mode (battle mode)
- *   Esc/RMB    - quit
+ *   Esc       - quit
  */
 
 #include <exec/types.h>
@@ -95,6 +95,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BONUS_BOSS_MAX_HEALTH    80
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
+#define BONUS_BOSS_TOUCH_STUN_TICKS 150
+#define BONUS_BOSS_FIRE_INTERVAL_TICKS 50
+#define MAX_BOSS_BOLTS 12
 
 #define ROBOT_W     16
 #define ROBOT_H     16
@@ -312,6 +315,7 @@ static WORD bonusBossY = 0;
 static WORD bonusBossDx = 1;
 static WORD bonusBossDy = 1;
 static WORD bonusBossPhase = 0;
+static WORD bonusBossFireTicks = 0;
 static WORD roomType = 0;
 static BOOL running = TRUE;
 static BOOL pauseMenuOpen = FALSE;
@@ -353,6 +357,7 @@ static struct Bolt playerBolts[MAX_HUMAN_PLAYERS] = {
     {FALSE, 0, -1, 0, 0, 0},
     {FALSE, 0, -1, 0, 0, 0}
 };
+static struct Bolt bossBolts[MAX_BOSS_BOLTS];
 
 static ULONG rng = 0x1234ABCD;
 
@@ -471,8 +476,17 @@ static const char *RobotTag(WORD id)
     return robotVariantTags[variant];
 }
 
+static const char *RobotControlLabel(WORD id)
+{
+    if (id == 0 && humanPlayers >= 1) return joyEnabled[0] ? "J1" : "P1";
+    if (id == 1 && humanPlayers >= 2) return joyEnabled[1] ? "J2" : "P2";
+    return "AI";
+}
+
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
 static void StepPlayerBolts(void);
+static void StepBossBolts(void);
+static BOOL ActivateSpaceOrFireAction(void);
 static void DrawTitleCarousel(void);
 static void TriggerRobotPower(WORD id);
 static WORD NextPowerCleanTarget(WORD useCount);
@@ -2325,15 +2339,12 @@ static void DrawRobotBob(WORD id)
     }
 }
 
-static void DrawPlayerBolt(WORD playerId)
+static void DrawBoltSprite(struct Bolt *bolt)
 {
     WORD sx, sy, x, y;
     WORD srcBaseX;
-    struct Bolt *bolt;
 
-    if (playerId < 0 || playerId >= MAX_HUMAN_PLAYERS) return;
-    bolt = &playerBolts[playerId];
-    if (!bolt->active || !robotCacheBM) return;
+    if (!bolt || !bolt->active || !robotCacheBM) return;
 
     sx = MAP_X + FP_TO_INT(bolt->px);
     sy = MAP_Y + FP_TO_INT(bolt->py);
@@ -2357,6 +2368,20 @@ static void DrawPlayerBolt(WORD playerId)
                 WritePixel(&renderRP, sx + x, sy + y);
             }
         }
+    }
+}
+
+static void DrawPlayerBolt(WORD playerId)
+{
+    if (playerId < 0 || playerId >= MAX_HUMAN_PLAYERS) return;
+    DrawBoltSprite(&playerBolts[playerId]);
+}
+
+static void DrawBossBolts(void)
+{
+    WORD i;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) {
+        DrawBoltSprite(&bossBolts[i]);
     }
 }
 
@@ -2621,6 +2646,7 @@ static void ResetLevel(void)
     ClearMovementKeys();
     playerBolts[0].active = FALSE;
     playerBolts[1].active = FALSE;
+    { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
     roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
@@ -2950,6 +2976,56 @@ static void ResetBonusBoss(void)
     bonusBossDx = 1;
     bonusBossDy = 1;
     bonusBossPhase = 0;
+    bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
+}
+
+static void BossStunRobot(WORD id, const char *label)
+{
+    if (id < 0 || id >= robotCount) return;
+
+    robots[id].stunTicks = BONUS_BOSS_TOUCH_STUN_TICKS;
+    if (robots[id].moving) {
+        robots[id].tileX = robots[id].targetX;
+        robots[id].tileY = robots[id].targetY;
+        robots[id].px = TO_FP(robots[id].tileX * TILE_SIZE);
+        robots[id].py = TO_FP(robots[id].tileY * TILE_SIZE);
+        robots[id].moving = FALSE;
+    }
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s %s STUN 3S", RobotTag(id), label);
+    lastPowerTicks = 60;
+}
+
+static BOOL RectsOverlap(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh)
+{
+    if (ax + aw <= bx || bx + bw <= ax) return FALSE;
+    if (ay + ah <= by || by + bh <= ay) return FALSE;
+    return TRUE;
+}
+
+static void FireBossBolt(void)
+{
+    static const WORD dirs[8][2] = {
+        {-1, -1}, {0, -1}, {1, -1},
+        {-1,  0},          {1,  0},
+        {-1,  1}, {0,  1}, {1,  1}
+    };
+    WORD i;
+    WORD d;
+    WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
+    WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) {
+        if (!bossBolts[i].active) {
+            d = RandRange(8);
+            bossBolts[i].active = TRUE;
+            bossBolts[i].dirX = dirs[d][0];
+            bossBolts[i].dirY = dirs[d][1];
+            bossBolts[i].px = TO_FP(bonusBossX + (bossW / 2) - (ROBOT_W / 2) - MAP_X);
+            bossBolts[i].py = TO_FP(bonusBossY + (bossH / 2) - (ROBOT_H / 2) - MAP_Y);
+            bossBolts[i].ttl = 70;
+            return;
+        }
+    }
 }
 
 static void StepBonusBoss(void)
@@ -2958,6 +3034,7 @@ static void StepBonusBoss(void)
     WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
     WORD minY = MAP_Y + TILE_SIZE;
     WORD maxY = SCREEN_H - TILE_SIZE - bossH;
+    WORD i;
 
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
@@ -2972,6 +3049,20 @@ static void StepBonusBoss(void)
     if (bonusBossY <= minY || bonusBossY >= maxY) {
         bonusBossDy = -bonusBossDy;
         bonusBossY += bonusBossDy;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        WORD rx = MAP_X + FP_TO_INT(robots[i].px);
+        WORD ry = MAP_Y + FP_TO_INT(robots[i].py);
+        if (RectsOverlap(rx, ry, ROBOT_W, ROBOT_H, bonusBossX, bonusBossY, bossW, bossH)) {
+            BossStunRobot(i, "BOSS");
+        }
+    }
+
+    if (bonusBossFireTicks > 0) bonusBossFireTicks--;
+    if (bonusBossFireTicks <= 0) {
+        FireBossBolt();
+        bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
     }
 }
 
@@ -3026,6 +3117,7 @@ static void StartBonusRound(void)
     ClearMovementKeys();
     playerBolts[0].active = FALSE;
     playerBolts[1].active = FALSE;
+    { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
     roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
@@ -3168,6 +3260,7 @@ static void StepGame(void)
         }
     }
     StepPlayerBolts();
+    StepBossBolts();
     if (empCountdownTicks > 0) {
         empCountdownTicks--;
         if (empCountdownTicks <= 0) empCountdownOwner = -1;
@@ -3361,7 +3454,7 @@ static void DrawTitleCarousel(void)
     } else if (!titlePlayer2Locked) {
         MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2/J2 SELECT  P2 FIRE LOCK", 13, 2);
     } else {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  SPACE START", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  SPACE/FIRE START", 13, 2);
     }
 }
 
@@ -3487,31 +3580,34 @@ static void DrawLeaderboardScreen(BOOL finalBoard)
     titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
 
     MiniTextCentered(&renderRP, 8, finalBoard ? "FINAL SCORE BOARD" : "CONGRATS WINNER", finalBoard ? 7 : 14, 2);
-    snprintf(b, sizeof(b), "1ST %s", RobotTag(order[0]));
+    snprintf(b, sizeof(b), "1ST %s %s", RobotControlLabel(order[0]), RobotTag(order[0]));
     MiniTextCentered(&renderRP, 30, b, 13, 2);
     DrawRobotLarge(order[0], (SCREEN_W - ROBOT_W * 4) / 2, 48, 4, titleSpinPhase);
 
     if (robotCount > 1) {
-        snprintf(b, sizeof(b), "2ND %s  %d", RobotTag(order[1]), totalScores[order[1]]);
-        MiniText(&renderRP, 28, 120, b, 7);
+        DrawRobotLarge(order[1], 12, 112, 1, titleSpinPhase);
+        snprintf(b, sizeof(b), "2ND %s %s  %d", RobotControlLabel(order[1]), RobotTag(order[1]), totalScores[order[1]]);
+        MiniText(&renderRP, 30, 120, b, 7);
     }
     if (robotCount > 2) {
-        snprintf(b, sizeof(b), "3RD %s  %d", RobotTag(order[2]), totalScores[order[2]]);
-        MiniText(&renderRP, 172, 120, b, 7);
+        DrawRobotLarge(order[2], 156, 112, 1, titleSpinPhase);
+        snprintf(b, sizeof(b), "3RD %s %s  %d", RobotControlLabel(order[2]), RobotTag(order[2]), totalScores[order[2]]);
+        MiniText(&renderRP, 174, 120, b, 7);
     }
 
     MiniTextCentered(&renderRP, 136, "BOARD", 8, 1);
     for (i = 0; i < robotCount && i < 10; i++) {
         WORD id = order[i];
         WORD y = 150 + i * 9;
-        snprintf(b, sizeof(b), "%d %s PTS:%d W:%d", i + 1, RobotTag(id), totalScores[id], roundWins[id]);
+        DrawRobotLarge(id, 54, y - 5, 1, titleSpinPhase + i);
+        snprintf(b, sizeof(b), "%d %s %s PTS:%d W:%d", i + 1, RobotControlLabel(id), RobotTag(id), totalScores[id], roundWins[id]);
         MiniText(&renderRP, 72, y, b, (i == 0) ? 14 : 7);
     }
 
     if (!finalBoard && bonusAvailable) {
-        MiniTextCentered(&renderRP, 238, "OVER 50! SPACE BONUS ROUND", 13, 1);
+        MiniTextCentered(&renderRP, 238, "OVER 50! SPACE/FIRE BONUS", 13, 1);
     } else {
-        MiniTextCentered(&renderRP, 238, "SPACE/R TITLE", 13, 1);
+        MiniTextCentered(&renderRP, 238, "SPACE/FIRE TITLE", 13, 1);
     }
 }
 
@@ -3538,7 +3634,7 @@ static void DrawHud(void)
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
         MiniTextCentered(&renderRP, 20, "ARROWS/J1 P1  P2 FIRE JOINS", 13, 2);
         MiniTextCentered(&renderRP, 32, "P2 Z/C/J2 SELECT  V LOCK", 13, 2);
-        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/R START", 14, 2);
+        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/FIRE START", 14, 2);
         return;
     }
 
@@ -3546,7 +3642,7 @@ static void DrawHud(void)
         snprintf(b, sizeof(b), "ROUND WINNER: %s", RobotName(roundWinner));
         PutText(&renderRP, 14, 10, b, 13);
         DrawRobotHealthStrip();
-        PutText(&renderRP, 76, 30, "Press R/Space for next round", 7);
+        PutText(&renderRP, 62, 30, "Press Space/Fire for next round", 7);
         return;
     }
 
@@ -3554,7 +3650,7 @@ static void DrawHud(void)
         snprintf(b, sizeof(b), "MATCH WINNER: %s", RobotName(finalWinner));
         PutText(&renderRP, 42, 10, b, 12);
         DrawRobotHealthStrip();
-        PutText(&renderRP, 82, 30, bonusAvailable ? "Space bonus" : "Press R/Space", 7);
+        PutText(&renderRP, 72, 30, bonusAvailable ? "Space/Fire bonus" : "Space/Fire", 7);
         return;
     }
 
@@ -3810,6 +3906,7 @@ static void DrawFrame(void)
         DrawPlayerBolt(i);
     }
 
+    DrawBossBolts();
     DrawBonusBoss();
     DrawEmpCountdown();
     DrawRoundStartOverlay();
@@ -4116,6 +4213,50 @@ static void StepPlayerBolts(void)
     }
 }
 
+static void StepBossBolts(void)
+{
+    WORD i;
+
+    if (gameState != GAME_BONUS_PLAYING) return;
+
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) {
+        WORD tx;
+        WORD ty;
+        WORD j;
+        struct Bolt *bolt = &bossBolts[i];
+
+        if (!bolt->active) continue;
+        if (bolt->ttl-- <= 0) { bolt->active = FALSE; continue; }
+
+        bolt->px += bolt->dirX * (4 * FP_ONE);
+        bolt->py += bolt->dirY * (4 * FP_ONE);
+        tx = FP_TO_INT(bolt->px) / TILE_SIZE;
+        ty = FP_TO_INT(bolt->py) / TILE_SIZE;
+
+        if (IsBlocked(tx, ty)) { bolt->active = FALSE; continue; }
+
+        for (j = 0; j < robotCount; j++) {
+            if (AbsW(robots[j].tileX - tx) + AbsW(robots[j].tileY - ty) <= 1) {
+                BossStunRobot(j, "BOLT");
+                bolt->active = FALSE;
+                break;
+            }
+        }
+    }
+}
+
+
+static BOOL ActivateSpaceOrFireAction(void)
+{
+    if (gameState == GAME_ROUND_END) { roundIndex++; ResetLevel(); return TRUE; }
+    if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); return TRUE; }
+    if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
+    if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
+    if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(aiRivals); return TRUE; }
+    if (gameState == GAME_TITLE) { WORD i; roundIndex = 0; for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; } ResetLevel(); return TRUE; }
+    return FALSE;
+}
+
 static void HandleRawKey(UWORD rawCode)
 {
     BOOL keyUpEvent = (rawCode & 0x80) ? TRUE : FALSE;
@@ -4163,16 +4304,13 @@ static void HandleRawKey(UWORD rawCode)
     if (!keyUpEvent && code == RAW_B) { FirePlayerBolt(0); return; }
     if (!keyUpEvent && code == RAW_V) { FirePlayerBolt(1); return; }
 
-    if (!keyUpEvent && (code == RAW_R || code == RAW_SPACE)) {
-        if (gameState == GAME_PLAYING) { ResetLevel(); }
-        else if (gameState == GAME_BONUS_PLAYING) { FinishBonusRound(); }
-        else if (gameState == GAME_ROUND_END) { roundIndex++; ResetLevel(); }
-        else if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); }
-        else if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); }
-        else if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); }
-        else if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(aiRivals); }
-        else { WORD i; roundIndex = 0; for (i=0;i<MAX_ROBOTS;i++){roundWins[i]=0; totalScores[i]=0;} ResetLevel(); }
-        return;
+    if (!keyUpEvent && code == RAW_R) {
+        if (gameState == GAME_PLAYING) { ResetLevel(); return; }
+        if (gameState == GAME_BONUS_PLAYING) { StartBonusRound(); return; }
+    }
+
+    if (!keyUpEvent && code == RAW_SPACE) {
+        if (ActivateSpaceOrFireAction()) return;
     }
 
     switch (code) {
@@ -4264,7 +4402,9 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     }
 
     if (firePressed) {
-        if (id == 1) {
+        if (id == 0) {
+            ActivateSpaceOrFireAction();
+        } else if (id == 1) {
             TitlePlayer2Fire();
         }
         prevLeft[id] = left;
@@ -4297,6 +4437,7 @@ static void PollJoysticks(void)
     dat[1] = custom.joy1dat;
 
     for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        WORD stateBefore = gameState;
         BOOL left = JOY_LEFT(dat[i]);
         BOOL right = JOY_RIGHT(dat[i]);
         BOOL up = JOY_UP(dat[i]);
@@ -4319,8 +4460,10 @@ static void PollJoysticks(void)
         joyUp[i] = joyEnabled[i] ? up : FALSE;
         joyDown[i] = joyEnabled[i] ? down : FALSE;
 
-        if (gameState == GAME_PLAYING && joyEnabled[i] && firePressed) {
-            FirePlayerBolt(i);
+        if (stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING) {
+            if (joyEnabled[i] && firePressed) FirePlayerBolt(i);
+        } else if (stateBefore != GAME_TITLE && joyEnabled[i] && firePressed) {
+            ActivateSpaceOrFireAction();
         }
         joyFirePrev[i] = fire;
     }
@@ -4341,8 +4484,6 @@ static void PollWindowMessages(void)
         if (cls == IDCMP_RAWKEY) {
             HandleRawKey(code);
         } else if (cls == IDCMP_MOUSEBUTTONS) {
-            if (gameState == GAME_PLAYING) continue;
-            if (code == MENUDOWN) running = FALSE;
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
             /* J1 fire shares the left mouse button line on Amiga hardware, so
              * title-screen SELECTDOWN must not start/activate menus.  Let
