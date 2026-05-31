@@ -185,27 +185,25 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 /*
  * Paula channel ownership is deliberately partitioned so state changes can
  * hand channels over without accidental overlap on real hardware:
- *   ch0/ch3: menu music, then main game music (stopped before handover)
- *   ch1:     hoover movement loop only
- *   ch2:     round countdown voice during round start, bolt/fire effects after GO
+ *   countdown: ch0 get ready, ch1 number countdown, ch2 go, ch3 silent
+ *   gameplay:  ch0/ch3 main game music, ch1 hoover movement loop,
+ *              ch2 bolt/fire effects
  */
 #define MENU_MUSIC_LEFT_AUDIO_CHANNEL 0
 #define MENU_MUSIC_RIGHT_AUDIO_CHANNEL 3
 #define MAIN_MUSIC_LEFT_AUDIO_CHANNEL 0
 #define MAIN_MUSIC_RIGHT_AUDIO_CHANNEL 3
 #define HOOVER_MOVE_AUDIO_CHANNEL 1
-#define ROUND_VOICE_AUDIO_CHANNEL 2
-#define GET_READY_AUDIO_CHANNEL ROUND_VOICE_AUDIO_CHANNEL
-#define COUNTDOWN_AUDIO_CHANNEL ROUND_VOICE_AUDIO_CHANNEL
-#define GO_AUDIO_CHANNEL ROUND_VOICE_AUDIO_CHANNEL
+#define GET_READY_AUDIO_CHANNEL 0
+#define COUNTDOWN_AUDIO_CHANNEL 1
+#define GO_AUDIO_CHANNEL 2
 #define BOLT_FIRE_AUDIO_CHANNEL 2
 #define PAULA_CLOCK_HZ 3546895UL
 #define ROUND_COUNTDOWN_SECONDS 3
-#define ROUND_COUNTDOWN_STEP_FRAMES 65
+#define ROUND_COUNTDOWN_STEP_FRAMES 17
 #define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
-#define ROUND_GET_READY_FRAMES 210
-#define ROUND_COUNTDOWN_TOTAL_FRAMES (ROUND_GET_READY_FRAMES + ROUND_COUNTDOWN_FRAMES)
-#define ROUND_GO_FRAMES 55
+#define ROUND_COUNTDOWN_TOTAL_FRAMES ROUND_COUNTDOWN_FRAMES
+#define ROUND_GO_FRAMES 20
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -1009,9 +1007,7 @@ static void PlayGetReadySample(void)
 
 static void PlayCountdownSample(void)
 {
-    StopGetReadySample();
     StopCountdownSample();
-    StopGoSample();
     PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
     if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_STEP_FRAMES) {
         countdownSample.ticksRemaining = ROUND_COUNTDOWN_STEP_FRAMES;
