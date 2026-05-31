@@ -18,7 +18,8 @@
  *   Arrow keys / B - move player 1 robot / fire bolts
  *   Z/X/C/S / V   - move player 2 robot / fire bolts
  *   Joysticks     - disabled until that joystick fire is pressed (J1/J2 shown)
- *                 J1/J2 map to JOY0DAT/JOY1DAT with matching CIA fire bits
+ *                 J1 uses JOY0DAT + CIAA PRA bit 6 fire
+ *                 J2 uses JOY1DAT + CIAA PRA bit 7 fire
  *   P2 fire/V     - arm/lock two-player carousel selection from title screen
  *   R/Space    - start/reset
  *   Q          - open in-game restart/quit menu
@@ -4186,8 +4187,16 @@ static void HandleRawKey(UWORD rawCode)
     }
 }
 
+/* Amiga joystick direction bits are encoded in each JOYxDAT word:
+ *   up    = bit 9 xor bit 8
+ *   down  = bit 1 xor bit 0
+ *   left  = bit 9
+ *   right = bit 1
+ * This avoids treating LEFT as RIGHT in the carousel, which happened when
+ * RIGHT was decoded as bit 1 xor bit 9.
+ */
 #define JOY_UP(dat)    (((((dat) & 0x0200) >> 1) ^ ((dat) & 0x0100)) != 0)
-#define JOY_DOWN(dat)  ((((dat) & 0x0002) ^ (((dat) & 0x0001) << 1)) != 0)
+#define JOY_DOWN(dat)  (((((dat) & 0x0002) >> 1) ^ ((dat) & 0x0001)) != 0)
 #define JOY_LEFT(dat)  (((dat) & 0x0200) != 0)
 #define JOY_RIGHT(dat) (((dat) & 0x0002) != 0)
 
@@ -4195,11 +4204,14 @@ static BOOL ReadJoystickFire(WORD id)
 {
     UBYTE pra = ciaa.ciapra;
 
-    if (id == 0) return (pra & 0x80) ? FALSE : TRUE;
-    return (pra & 0x40) ? FALSE : TRUE;
+    /* Keep fire lines matched to PR90: J1/P1 is CIAA PRA bit 6,
+     * J2/P2 is CIAA PRA bit 7.  Fire inputs are active low.
+     */
+    if (id == 0) return (pra & 0x40) ? FALSE : TRUE;
+    return (pra & 0x80) ? FALSE : TRUE;
 }
 
-static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
+static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL firePressed)
 {
     static BOOL prevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
     static BOOL prevRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -4216,20 +4228,25 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
         return;
     }
 
+    if (firePressed) {
+        if (id == 1) {
+            TitlePlayer2Fire();
+        }
+        prevLeft[id] = left;
+        prevRight[id] = right;
+        return;
+    }
+
     if (id == 0) {
         if (!titleTwoPlayerArmed || titlePlayer2Locked) {
             titleSelectPlayer = 0;
             if (left && !prevLeft[id]) TitleChooseVariant(0, -1);
             if (right && !prevRight[id]) TitleChooseVariant(0, 1);
         }
-    } else {
-        if (fire && !joyFirePrev[id]) {
-            TitlePlayer2Fire();
-        } else if (titleTwoPlayerArmed && !titlePlayer2Locked) {
-            titleSelectPlayer = 1;
-            if (left && !prevLeft[id]) TitleChooseVariant(1, -1);
-            if (right && !prevRight[id]) TitleChooseVariant(1, 1);
-        }
+    } else if (titleTwoPlayerArmed && !titlePlayer2Locked) {
+        titleSelectPlayer = 1;
+        if (left && !prevLeft[id]) TitleChooseVariant(1, -1);
+        if (right && !prevRight[id]) TitleChooseVariant(1, 1);
     }
 
     prevLeft[id] = left;
@@ -4259,7 +4276,7 @@ static void PollJoysticks(void)
         }
 
         if (gameState == GAME_TITLE) {
-            HandleTitleJoystick(i, left, right, fire);
+            HandleTitleJoystick(i, left, right, firePressed);
         }
 
         joyLeft[i] = joyEnabled[i] ? left : FALSE;
