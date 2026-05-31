@@ -18,6 +18,7 @@
  *   Arrow keys / B - move player 1 robot / fire bolts
  *   Z/X/C/S / V   - move player 2 robot / fire bolts
  *   Joysticks     - disabled until that joystick fire is pressed (J1/J2 shown)
+ *                 Title menu also enables J1/J2 from fire so the carousel can be used
  *                 J1 uses JOY0DAT + CIAA PRA bit 6 fire
  *                 J2 uses JOY1DAT + CIAA PRA bit 7 fire
  *   P2 fire/V     - arm/lock two-player carousel selection from title screen
@@ -3356,9 +3357,9 @@ static void DrawTitleCarousel(void)
     snprintf(b, sizeof(b), "P%d %s", titleSelectPlayer + 1, robotVariantNames[selectedPlayerVariant[titleSelectPlayer]]);
     MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 50, b, 7, 2);
     if (!titleTwoPlayerArmed) {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  P2 FIRE JOINS", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1/J1 SELECT  P2 FIRE JOINS", 13, 2);
     } else if (!titlePlayer2Locked) {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2 SELECT  P2 FIRE LOCK", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2/J2 SELECT  P2 FIRE LOCK", 13, 2);
     } else {
         MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  SPACE START", 13, 2);
     }
@@ -3535,8 +3536,8 @@ static void DrawHud(void)
 
     if (gameState == GAME_TITLE) {
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
-        MiniTextCentered(&renderRP, 20, "ARROWS P1  P2 FIRE JOINS", 13, 2);
-        MiniTextCentered(&renderRP, 32, "P2 Z/C SELECT  V LOCK", 13, 2);
+        MiniTextCentered(&renderRP, 20, "ARROWS/J1 P1  P2 FIRE JOINS", 13, 2);
+        MiniTextCentered(&renderRP, 32, "P2 Z/C/J2 SELECT  V LOCK", 13, 2);
         MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/R START", 14, 2);
         return;
     }
@@ -4211,7 +4212,32 @@ static BOOL ReadJoystickFire(WORD id)
     return (pra & 0x80) ? FALSE : TRUE;
 }
 
-static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL firePressed)
+static void HandleAiSelectJoystick(BOOL up, BOOL down, BOOL firePressed)
+{
+    static BOOL prevUp = FALSE;
+    static BOOL prevDown = FALSE;
+
+    if (!aiSelectMenuOpen) {
+        prevUp = up;
+        prevDown = down;
+        return;
+    }
+
+    if (up && !prevUp) {
+        aiSelectMenuSelection = (aiSelectMenuSelection + 3) & 3;
+    }
+    if (down && !prevDown) {
+        aiSelectMenuSelection = (aiSelectMenuSelection + 1) & 3;
+    }
+    if (firePressed) {
+        ActivateAiSelectMenu();
+    }
+
+    prevUp = up;
+    prevDown = down;
+}
+
+static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL down, BOOL firePressed)
 {
     static BOOL prevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
     static BOOL prevRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -4219,10 +4245,19 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL firePressed
     if (gameState != GAME_TITLE) {
         prevLeft[id] = left;
         prevRight[id] = right;
+        if (id == 0) HandleAiSelectJoystick(FALSE, FALSE, FALSE);
         return;
     }
 
     if (!joyEnabled[id]) {
+        prevLeft[id] = left;
+        prevRight[id] = right;
+        if (id == 0) HandleAiSelectJoystick(FALSE, FALSE, FALSE);
+        return;
+    }
+
+    if (aiSelectMenuOpen) {
+        if (id == 0) HandleAiSelectJoystick(up, down, firePressed);
         prevLeft[id] = left;
         prevRight[id] = right;
         return;
@@ -4271,12 +4306,12 @@ static void PollJoysticks(void)
 
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
 
-        if (firePressed) {
+        if (firePressed || (gameState == GAME_TITLE && fire)) {
             joyEnabled[i] = TRUE;
         }
 
         if (gameState == GAME_TITLE) {
-            HandleTitleJoystick(i, left, right, firePressed);
+            HandleTitleJoystick(i, left, right, up, down, firePressed);
         }
 
         joyLeft[i] = joyEnabled[i] ? left : FALSE;
