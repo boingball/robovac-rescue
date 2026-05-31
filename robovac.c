@@ -18,6 +18,7 @@
  *   Arrow keys / B - move player 1 robot / fire bolts
  *   Z/X/C/S / V   - move player 2 robot / fire bolts
  *   Joysticks     - disabled until that joystick fire is pressed (J1/J2 shown)
+ *                 J1/J2 map to JOY0DAT/JOY1DAT with matching CIA fire bits
  *   P2 fire/V     - arm/lock two-player carousel selection from title screen
  *   R/Space    - start/reset
  *   Q          - open in-game restart/quit menu
@@ -4185,17 +4186,17 @@ static void HandleRawKey(UWORD rawCode)
     }
 }
 
-#define JOY_UP(dat)    (((dat) & 0x0100) != 0)
-#define JOY_DOWN(dat)  ((((dat) & 0x0001) ^ (((dat) & 0x0100) >> 8)) != 0)
+#define JOY_UP(dat)    (((((dat) & 0x0200) >> 1) ^ ((dat) & 0x0100)) != 0)
+#define JOY_DOWN(dat)  ((((dat) & 0x0002) ^ (((dat) & 0x0001) << 1)) != 0)
 #define JOY_LEFT(dat)  (((dat) & 0x0200) != 0)
-#define JOY_RIGHT(dat) ((((dat) & 0x0002) ^ (((dat) & 0x0200) >> 8)) != 0)
+#define JOY_RIGHT(dat) (((dat) & 0x0002) != 0)
 
 static BOOL ReadJoystickFire(WORD id)
 {
     UBYTE pra = ciaa.ciapra;
 
-    if (id == 0) return (pra & 0x40) ? FALSE : TRUE;
-    return (pra & 0x80) ? FALSE : TRUE;
+    if (id == 0) return (pra & 0x80) ? FALSE : TRUE;
+    return (pra & 0x40) ? FALSE : TRUE;
 }
 
 static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL fire)
@@ -4251,13 +4252,6 @@ static void PollJoysticks(void)
         BOOL fire = ReadJoystickFire(i);
         BOOL firePressed;
 
-        if (gameState == GAME_PLAYING && i == 0) {
-            left = FALSE;
-            right = FALSE;
-            up = FALSE;
-            down = FALSE;
-            fire = FALSE;
-        }
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
 
         if (firePressed) {
