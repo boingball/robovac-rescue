@@ -182,19 +182,29 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAIN_MUSIC_SAMPLE_PATH "PROGDIR:samples/mainmusic-lo.8svx"
 #define BOLT_FIRE_SAMPLE_PATH "PROGDIR:samples/boltfire.8svx"
 #define HOOVER_MOVE_SAMPLE_PATH "PROGDIR:samples/hoover-go-loop-low.8svx"
-#define GET_READY_AUDIO_CHANNEL 0
-#define COUNTDOWN_AUDIO_CHANNEL 1
-#define GO_AUDIO_CHANNEL 2
-#define MAIN_MUSIC_LEFT_AUDIO_CHANNEL 0
-#define MAIN_MUSIC_RIGHT_AUDIO_CHANNEL 3
+/*
+ * Paula channel ownership is deliberately partitioned so state changes can
+ * hand channels over without accidental overlap on real hardware:
+ *   ch0/ch3: menu music, then main game music (stopped before handover)
+ *   ch1:     hoover movement loop only
+ *   ch2:     round countdown voice during round start, bolt/fire effects after GO
+ */
 #define MENU_MUSIC_LEFT_AUDIO_CHANNEL 0
 #define MENU_MUSIC_RIGHT_AUDIO_CHANNEL 3
+#define MAIN_MUSIC_LEFT_AUDIO_CHANNEL 0
+#define MAIN_MUSIC_RIGHT_AUDIO_CHANNEL 3
 #define HOOVER_MOVE_AUDIO_CHANNEL 1
+#define ROUND_VOICE_AUDIO_CHANNEL 2
+#define GET_READY_AUDIO_CHANNEL ROUND_VOICE_AUDIO_CHANNEL
+#define COUNTDOWN_AUDIO_CHANNEL ROUND_VOICE_AUDIO_CHANNEL
+#define GO_AUDIO_CHANNEL ROUND_VOICE_AUDIO_CHANNEL
 #define BOLT_FIRE_AUDIO_CHANNEL 2
 #define PAULA_CLOCK_HZ 3546895UL
 #define ROUND_COUNTDOWN_SECONDS 3
-#define ROUND_COUNTDOWN_STEP_FRAMES 17
+#define ROUND_COUNTDOWN_STEP_FRAMES 65
 #define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
+#define ROUND_GET_READY_FRAMES 210
+#define ROUND_COUNTDOWN_TOTAL_FRAMES (ROUND_GET_READY_FRAMES + ROUND_COUNTDOWN_FRAMES)
 #define ROUND_GO_FRAMES 55
 
 #ifndef DMAF_SETCLR
@@ -207,7 +217,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD3 0x0008
 #endif
 #define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
-#define MENU_MUSIC_STREAM_PREROLL_FRAMES 0
+#define MENU_MUSIC_STREAM_PREROLL_FRAMES 6
 
 struct Robot {
     WORD tileX;
@@ -306,6 +316,19 @@ static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 static UWORD *audioSilenceWord = NULL;
+
+enum AudioOwner {
+    AUDIO_OWNER_NONE = 0,
+    AUDIO_OWNER_MENU_MUSIC,
+    AUDIO_OWNER_ROUND_VOICE,
+    AUDIO_OWNER_MAIN_MUSIC,
+    AUDIO_OWNER_HOOVER_LOOP,
+    AUDIO_OWNER_BOLT_FIRE
+};
+
+static UBYTE audioChannelOwner[4] = {
+    AUDIO_OWNER_NONE, AUDIO_OWNER_NONE, AUDIO_OWNER_NONE, AUDIO_OWNER_NONE
+};
 
 static WORD dirtLeft = 0;
 static WORD moves = 0;
@@ -538,6 +561,10 @@ static void PlayGetReadySample(void);
 static void PlayCountdownSample(void);
 static void PlayGoSample(void);
 static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
+static void AudioPrepareChannel(WORD channel, UBYTE owner);
+static void AudioReleaseChannel(WORD channel, UBYTE owner);
+static void AudioSafeWait(void);
+static void StartRoundCountdownAudio(void);
 static void StopGetReadySample(void);
 static void StopCountdownSample(void);
 static void StopGoSample(void);
@@ -809,14 +836,62 @@ static void DrawTileIntoCache(UBYTE tileType)
 }
 
 
-static void StopOneShotSample(struct OneShotSample *sample, WORD channel)
+static void AudioSafeWait(void)
 {
-    UWORD dmaBit = AudioDmaBit(channel);
+    volatile WORD i;
 
-    if (!sample->loaded && !sample->playing) return;
+    for (i = 0; i < 64; i++) {
+        ;
+    }
+}
 
+static void AudioPrepareChannel(WORD channel, UBYTE owner)
+{
+    UWORD dmaBit;
+
+    if (channel < 0 || channel > 3) return;
+
+    dmaBit = AudioDmaBit(channel);
     custom.dmacon = dmaBit;
     custom.aud[channel].ac_vol = 0;
+    AudioSafeWait();
+    custom.aud[channel].ac_len = 1;
+    if (audioSilenceWord) custom.aud[channel].ac_ptr = audioSilenceWord;
+    audioChannelOwner[channel] = owner;
+}
+
+static void AudioReleaseChannel(WORD channel, UBYTE owner)
+{
+    UWORD dmaBit;
+
+    if (channel < 0 || channel > 3) return;
+
+    dmaBit = AudioDmaBit(channel);
+    custom.dmacon = dmaBit;
+    custom.aud[channel].ac_vol = 0;
+    AudioSafeWait();
+    custom.aud[channel].ac_len = 1;
+    if (audioSilenceWord) custom.aud[channel].ac_ptr = audioSilenceWord;
+    if (audioChannelOwner[channel] == owner || owner == AUDIO_OWNER_NONE) {
+        audioChannelOwner[channel] = AUDIO_OWNER_NONE;
+    }
+}
+
+static UBYTE SampleAudioOwner(struct OneShotSample *sample)
+{
+    if (sample == &menuMusicSample) return AUDIO_OWNER_MENU_MUSIC;
+    if (sample == &getReadySample || sample == &countdownSample || sample == &goSample) return AUDIO_OWNER_ROUND_VOICE;
+    if (sample == &mainMusicSample) return AUDIO_OWNER_MAIN_MUSIC;
+    if (sample == &hooverMoveSample) return AUDIO_OWNER_HOOVER_LOOP;
+    if (sample == &boltFireSample) return AUDIO_OWNER_BOLT_FIRE;
+    return AUDIO_OWNER_NONE;
+}
+
+static void StopOneShotSample(struct OneShotSample *sample, WORD channel)
+{
+    if (!sample->loaded && !sample->playing) return;
+
+    AudioReleaseChannel(channel, SampleAudioOwner(sample));
     sample->playing = FALSE;
     sample->ticksRemaining = 0;
 }
@@ -824,11 +899,13 @@ static void StopOneShotSample(struct OneShotSample *sample, WORD channel)
 static void PlayOneShotSample(struct OneShotSample *sample, WORD channel)
 {
     UWORD dmaBit;
+    UBYTE owner;
 
     if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
 
+    owner = SampleAudioOwner(sample);
+    AudioPrepareChannel(channel, owner);
     dmaBit = AudioDmaBit(channel);
-    custom.dmacon = dmaBit;
     custom.aud[channel].ac_ptr = (UWORD *)sample->data;
     custom.aud[channel].ac_len = sample->lengthWords;
     custom.aud[channel].ac_per = sample->period;
@@ -857,8 +934,8 @@ static void PlayLoopedSample(struct OneShotSample *sample, WORD channel)
 
     if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
 
+    AudioPrepareChannel(channel, SampleAudioOwner(sample));
     dmaBit = AudioDmaBit(channel);
-    custom.dmacon = dmaBit;
     custom.aud[channel].ac_ptr = (UWORD *)sample->data;
     custom.aud[channel].ac_len = sample->lengthWords;
     custom.aud[channel].ac_per = sample->period;
@@ -880,8 +957,8 @@ static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel)
 
     if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
 
+    AudioPrepareChannel(channel, SampleAudioOwner(sample));
     dmaBit = AudioDmaBit(channel);
-    custom.dmacon = dmaBit;
     custom.aud[channel].ac_ptr = (UWORD *)sample->data;
     custom.aud[channel].ac_len = sample->lengthWords;
     custom.aud[channel].ac_per = sample->period;
@@ -917,6 +994,14 @@ static void StopRoundStartSamples(void)
     StopGoSample();
 }
 
+static void StartRoundCountdownAudio(void)
+{
+    StopGameplaySamples();
+    StopMenuMusic();
+    StopRoundStartSamples();
+    PlayGetReadySample();
+}
+
 static void PlayGetReadySample(void)
 {
     PlayOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
@@ -924,7 +1009,9 @@ static void PlayGetReadySample(void)
 
 static void PlayCountdownSample(void)
 {
+    StopGetReadySample();
     StopCountdownSample();
+    StopGoSample();
     PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
     if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_STEP_FRAMES) {
         countdownSample.ticksRemaining = ROUND_COUNTDOWN_STEP_FRAMES;
@@ -958,6 +1045,8 @@ static BOOL AnyHooverMoving(void)
 static void StartMainGameMusic(void)
 {
     if (mainMusicSample.playing) return;
+    StopMenuMusic();
+    StopRoundStartSamples();
     PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_LEFT_AUDIO_CHANNEL);
     PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
@@ -973,7 +1062,10 @@ static void StopGameplaySamples(void)
 static void ServiceHooverMoveSample(void)
 {
     if (AnyHooverMoving()) {
-        if (!hooverMoveSample.playing) PlayLoopedSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
+        if (!hooverMoveSample.playing) {
+            StopOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
+            PlayLoopedSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
+        }
     } else if (hooverMoveSample.playing) {
         StopOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
     }
@@ -1226,9 +1318,10 @@ static void StartMenuMusic(void)
     firstChunkBytes &= ~1UL;
     if (firstChunkBytes < 2UL) return;
 
+    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
+    AudioPrepareChannel(MENU_MUSIC_RIGHT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
     leftDmaBit = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-    custom.dmacon = leftDmaBit | rightDmaBit;
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
@@ -1272,6 +1365,15 @@ static BOOL LoadGameplaySamples(void)
     loaded |= LoadOneShotSample(MAIN_MUSIC_SAMPLE_PATH, &mainMusicSample, "main game music");
     loaded |= LoadOneShotSample(BOLT_FIRE_SAMPLE_PATH, &boltFireSample, "bolt fire effect");
     loaded |= LoadOneShotSample(HOOVER_MOVE_SAMPLE_PATH, &hooverMoveSample, "hoover movement loop");
+    if (hooverMoveSample.loaded) {
+        hooverMoveSample.lengthWords = (UWORD)((hooverMoveSample.dataSize & ~1L) / 2L);
+        if (hooverMoveSample.loopLengthWords > 0 &&
+            ((ULONG)hooverMoveSample.loopStartWords + (ULONG)hooverMoveSample.loopLengthWords >
+             (ULONG)hooverMoveSample.lengthWords)) {
+            hooverMoveSample.loopStartWords = 0;
+            hooverMoveSample.loopLengthWords = hooverMoveSample.lengthWords;
+        }
+    }
     return loaded;
 }
 
@@ -1307,7 +1409,8 @@ static ULONG ReadBE32(const UBYTE *p)
 
 static BOOL RoundStartLocked(void)
 {
-    return ((gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) && roundCountdownTicks > 0) ? TRUE : FALSE;
+    return ((gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) &&
+            (roundCountdownTicks > 0 || roundGoTicks > 0)) ? TRUE : FALSE;
 }
 
 static UWORD AudioDmaBit(WORD channel)
@@ -2745,7 +2848,7 @@ static void ResetLevel(void)
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
     bonusBossExplosionTicks = 0;
-    roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
     roundGoTicks = 0;
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
@@ -2758,9 +2861,8 @@ static void ResetLevel(void)
     InitRobots();
     CountDirt();
     BuildRoomBuffer();
-    PlayGetReadySample();
-    PlayCountdownSample();
-    roundCountdownLastSoundNumber = ROUND_COUNTDOWN_SECONDS;
+    StartRoundCountdownAudio();
+    roundCountdownLastSoundNumber = 0;
 }
 
 static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
@@ -3253,7 +3355,7 @@ static void StartBonusRound(void)
     { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
     lastPowerText[0] = '\0';
     lastPowerTicks = 0;
-    roundCountdownTicks = ROUND_COUNTDOWN_FRAMES;
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
     roundGoTicks = 0;
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
@@ -3275,9 +3377,8 @@ static void StartBonusRound(void)
     CountDirt();
     ResetBonusBoss();
     BuildRoomBuffer();
-    PlayGetReadySample();
-    PlayCountdownSample();
-    roundCountdownLastSoundNumber = ROUND_COUNTDOWN_SECONDS;
+    StartRoundCountdownAudio();
+    roundCountdownLastSoundNumber = 0;
 }
 
 static void EnterTitleScreen(void)
@@ -3345,6 +3446,9 @@ static void StepGame(void)
 
     if (roundCountdownTicks > 0) {
         roundCountdownTicks--;
+        if (roundCountdownTicks > ROUND_COUNTDOWN_FRAMES) {
+            return;
+        }
         if (roundCountdownTicks > 0) {
             roundCountdownSoundNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
             if (roundCountdownSoundNumber != roundCountdownLastSoundNumber) {
@@ -3357,7 +3461,6 @@ static void StepGame(void)
             ClearMovementKeys();
             if (!roundGoSoundPlayed) {
                 PlayGoSample();
-                StartMainGameMusic();
                 roundGoSoundPlayed = TRUE;
             }
         }
@@ -3367,7 +3470,10 @@ static void StepGame(void)
         roundGoTicks--;
         if (roundGoTicks <= 0) {
             roundGoTicks = 0;
+            StopGoSample();
+            StartMainGameMusic();
         }
+        return;
     }
 
     StepBonusBoss();
