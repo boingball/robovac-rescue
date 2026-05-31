@@ -3482,7 +3482,7 @@ static void DrawTitleCarousel(void)
     } else if (!titlePlayer2Locked) {
         MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2/J2 SELECT  P2 FIRE LOCK", 13, 2);
     } else {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  SPACE START", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1 SELECT  SPACE/FIRE START", 13, 2);
     }
 }
 
@@ -4546,7 +4546,9 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     }
 
     if (firePressed) {
-        if (id == 1) {
+        if (id == 0) {
+            ActivateSpaceOrFireAction();
+        } else if (id == 1) {
             TitlePlayer2Fire();
         }
         prevLeft[id] = left;
