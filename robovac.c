@@ -25,7 +25,8 @@
  *   Space/J1 second fire - start/advance; R resets the active level
  *   Q          - open in-game restart/quit menu
  *   0/1/2/3    - choose AI rivals from two-player AI prompt
- *   1/2/3      - start one-player match with 1/2/3 AI rivals from title screen
+ *   1/2/3      - choose one-player AI rivals from title screen
+ *   1/2/3,E/N/H - choose Easy/Normal/Hard when AI difficulty is prompted
  *   O          - hidden 9-rival mode (battle mode)
  *   Esc       - quit
  */
@@ -100,7 +101,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BOLT_STUN_TICKS          (5 * BOLT_STUN_STEP_FRAMES)
 #define BOLT_STUN_DAMAGE         5
 #define MAIN_AI_FIRE_CHANCE      18
-#define MAIN_AI_FIRE_RANGE       6
+#define MAIN_AI_FIRE_RANGE_NORMAL 3
+#define MAIN_AI_FIRE_RANGE_HARD   8
 #define BONUS_BOSS_TOUCH_COOLDOWN_TICKS 100
 #define BONUS_BOSS_FIRE_INTERVAL_TICKS 50
 #define MAX_BOSS_BOLTS 12
@@ -149,6 +151,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_3       0x03
 #define RAW_O       0x18
 #define RAW_B       0x35
+#define RAW_N       0x36
 #define RAW_E       0x12
 #define RAW_S       0x21
 #define RAW_H       0x25
@@ -336,6 +339,11 @@ static BOOL pauseMenuOpen = FALSE;
 static WORD pauseMenuSelection = 0;
 static BOOL aiSelectMenuOpen = FALSE;
 static WORD aiSelectMenuSelection = 0;
+static BOOL aiDifficultyMenuOpen = FALSE;
+static WORD aiDifficultyMenuSelection = 1;
+static WORD aiDifficultyPendingPlayers = 1;
+static WORD aiDifficultyPendingRivals = 0;
+static WORD aiDifficulty = 1;
 static WORD roundCountdownTicks = 0;
 static WORD roundGoTicks = 0;
 static WORD roundCountdownSoundNumber = 0;
@@ -509,6 +517,8 @@ static void EnterTitleScreen(void);
 static void ClosePauseMenu(void);
 static void CloseAiSelectMenu(void);
 static void OpenAiSelectMenu(WORD initialSelection);
+static void CloseAiDifficultyMenu(void);
+static void OpenAiDifficultyMenu(WORD players, WORD rivals);
 static void StartMatch(WORD players, WORD rivals);
 static void StartBonusRound(void);
 static void FinishBonusRound(void);
@@ -2467,7 +2477,7 @@ static void DrawStunCountdowns(void)
         sy = MAP_Y + FP_TO_INT(robots[i].py) - 6;
         if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[i].py) + 2;
 
-        MiniText(&renderRP, sx, sy, b, 14);
+        MiniText(&renderRP, sx, sy, b, 10);
     }
 }
 
@@ -3086,7 +3096,7 @@ static void BossStunRobot(WORD id, const char *label)
         robots[id].py = TO_FP(robots[id].tileY * TILE_SIZE);
         robots[id].moving = FALSE;
     }
-    snprintf(lastPowerText, sizeof(lastPowerText), "%s %s STUN 2S", RobotTag(id), label);
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s %s STUN 5S", RobotTag(id), label);
     lastPowerTicks = 60;
 }
 
@@ -3283,6 +3293,7 @@ static void EnterTitleScreen(void)
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
     CloseAiSelectMenu();
+    CloseAiDifficultyMenu();
     joyEnabled[0] = FALSE;
     joyEnabled[1] = FALSE;
     ClearMovementKeys();
@@ -3519,6 +3530,43 @@ static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD d
                           titleCarouselMaskBM->Planes[0]);
 }
 
+
+/* The winner robot reuses the cached title-carousel spin frames.  The
+ * carousel path blits these frames as a masked BOB; this helper scales the
+ * same cached frames for the larger winner presentation.
+ */
+static void DrawCachedTitleRobotSpinScaled(WORD variant, WORD phase, WORD dstX, WORD dstY, WORD scale)
+{
+    WORD frame;
+    WORD srcX;
+    WORD px;
+    WORD py;
+
+    if (!titleCarouselBM || variant < 0 || variant >= ROBOT_VARIANTS || titleCarouselFrameCount <= 0) return;
+    if (scale <= 1) {
+        DrawCachedTitleRobotSpin(variant, phase, dstX, dstY);
+        return;
+    }
+
+    phase &= (TITLE_SPIN_STEPS - 1);
+    frame = (phase * titleCarouselFrameCount) / TITLE_SPIN_STEPS;
+    if (frame >= titleCarouselFrameCount) frame = titleCarouselFrameCount - 1;
+    srcX = (variant * titleCarouselFrameCount + frame) * TITLE_ROT_W;
+
+    for (py = 0; py < TITLE_ROT_H; py++) {
+        for (px = 0; px < TITLE_ROT_W; px++) {
+            LONG pen = ReadPixel(&titleCarouselRP, srcX + px, py);
+            if (pen <= 0) continue;
+            SetAPen(&renderRP, (UBYTE)pen);
+            RectFill(&renderRP,
+                     dstX + px * scale,
+                     dstY + py * scale,
+                     dstX + ((px + 1) * scale) - 1,
+                     dstY + ((py + 1) * scale) - 1);
+        }
+    }
+}
+
 static void DrawTitlePanelBase(WORD top, WORD bottom)
 {
     SetAPen(&renderRP, TITLE_COPPER_PEN);
@@ -3655,6 +3703,13 @@ static void DrawRobotLarge(WORD robotId, WORD x, WORD y, WORD scale, WORD phase)
 
     if (!robotCacheBM || robotId < 0 || robotId >= robotCount) return;
     variant = robots[robotId].spriteVariant;
+    if (variant >= ROBOT_VARIANTS) variant = 0;
+
+    if (scale == 4 && titleCarouselBM && titleCarouselFrameCount > 0) {
+        DrawCachedTitleRobotSpinScaled(variant, phase, x, y, 2);
+        return;
+    }
+
     state = SPR_DOWN;
     switch ((phase >> 3) & 3) {
         case 0: state = SPR_DOWN; break;
@@ -4026,6 +4081,42 @@ static void DrawAiSelectMenu(void)
     MiniTextCentered(&renderRP, bottom - 12, "0-3 OR ARROWS ENTER", 13, 1);
 }
 
+
+static void DrawAiDifficultyMenu(void)
+{
+    static const char *items[3] = { "EASY", "NORMAL", "HARD" };
+    WORD left = 64;
+    WORD top = 76;
+    WORD right = 256;
+    WORD bottom = 184;
+    WORD i;
+
+    SetAPen(&renderRP, 1);
+    RectFill(&renderRP, left - 4, top - 4, right + 4, bottom + 4);
+    SetAPen(&renderRP, 10);
+    RectFill(&renderRP, left - 2, top - 2, right + 2, bottom + 2);
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, left, top, right, bottom);
+
+    MiniTextCentered(&renderRP, top + 10, "AI DIFFICULTY", 7, 2);
+    MiniTextCentered(&renderRP, top + 28, "HOW FAR CAN AI FIRE?", 8, 1);
+
+    for (i = 0; i < 3; i++) {
+        WORD y = top + 44 + (i * 16);
+        WORD textX = (SCREEN_W - MiniTextWidth(items[i], 2)) / 2;
+
+        if (i == aiDifficultyMenuSelection) {
+            SetAPen(&renderRP, 4);
+            RectFill(&renderRP, left + 14, y - 4, right - 14, y + 13);
+            MiniTextScaled(&renderRP, left + 20, y, ">", 14, 2);
+            MiniTextScaled(&renderRP, right - 28, y, "<", 14, 2);
+        }
+        MiniTextScaled(&renderRP, textX, y, items[i], (i == aiDifficultyMenuSelection) ? 14 : 7, 2);
+    }
+
+    MiniTextCentered(&renderRP, bottom - 12, "1-3/E-N-H OR ENTER", 13, 1);
+}
+
 static void DrawFrame(void)
 {
     WORD i;
@@ -4057,6 +4148,9 @@ static void DrawFrame(void)
         DrawTitleCarousel();
         if (aiSelectMenuOpen) {
             DrawAiSelectMenu();
+        }
+        if (aiDifficultyMenuOpen) {
+            DrawAiDifficultyMenu();
         }
         return;
     }
@@ -4161,11 +4255,85 @@ static void CloseAiSelectMenu(void)
     ClearMovementKeys();
 }
 
+static void CloseAiDifficultyMenu(void)
+{
+    aiDifficultyMenuOpen = FALSE;
+    aiDifficultyMenuSelection = aiDifficulty;
+    aiDifficultyPendingPlayers = 1;
+    aiDifficultyPendingRivals = 0;
+    ClearMovementKeys();
+}
+
+static void OpenAiDifficultyMenu(WORD players, WORD rivals)
+{
+    if (gameState != GAME_TITLE) return;
+    if (rivals <= 0) {
+        StartMatch(players, rivals);
+        return;
+    }
+    aiSelectMenuOpen = FALSE;
+    aiDifficultyPendingPlayers = players;
+    aiDifficultyPendingRivals = rivals;
+    aiDifficultyMenuSelection = aiDifficulty;
+    aiDifficultyMenuOpen = TRUE;
+    ClearMovementKeys();
+}
+
+static void ActivateAiDifficultyMenu(void)
+{
+    WORD players = aiDifficultyPendingPlayers;
+    WORD rivals = aiDifficultyPendingRivals;
+
+    aiDifficulty = aiDifficultyMenuSelection;
+    CloseAiDifficultyMenu();
+    StartMatch(players, rivals);
+}
+
 static void ActivateAiSelectMenu(void)
 {
     WORD rivals = aiSelectMenuSelection;
     CloseAiSelectMenu();
-    StartMatch(2, rivals);
+    OpenAiDifficultyMenu(2, rivals);
+}
+
+static BOOL HandleAiDifficultyMenuRawKey(UWORD code, BOOL keyUpEvent)
+{
+    if (!aiDifficultyMenuOpen) return FALSE;
+    if (keyUpEvent) return TRUE;
+
+    if (code == RAW_Q || code == RAW_ESC) {
+        CloseAiDifficultyMenu();
+        return TRUE;
+    }
+    if (code == RAW_UP) {
+        aiDifficultyMenuSelection = (aiDifficultyMenuSelection + 2) % 3;
+        return TRUE;
+    }
+    if (code == RAW_DOWN) {
+        aiDifficultyMenuSelection = (aiDifficultyMenuSelection + 1) % 3;
+        return TRUE;
+    }
+    if (code == RAW_1 || code == RAW_E) {
+        aiDifficultyMenuSelection = 0;
+        ActivateAiDifficultyMenu();
+        return TRUE;
+    }
+    if (code == RAW_2 || code == RAW_N) {
+        aiDifficultyMenuSelection = 1;
+        ActivateAiDifficultyMenu();
+        return TRUE;
+    }
+    if (code == RAW_3 || code == RAW_H) {
+        aiDifficultyMenuSelection = 2;
+        ActivateAiDifficultyMenu();
+        return TRUE;
+    }
+    if (code == RAW_RETURN || code == RAW_SPACE) {
+        ActivateAiDifficultyMenu();
+        return TRUE;
+    }
+
+    return TRUE;
 }
 
 static BOOL HandleAiSelectMenuRawKey(UWORD code, BOOL keyUpEvent)
@@ -4247,6 +4415,7 @@ static void StartMatch(WORD players, WORD rivals)
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
     titleSelectPlayer = 0;
+    aiDifficultyMenuOpen = FALSE;
     ResetLevel();
 }
 
@@ -4256,7 +4425,7 @@ static void StartWithRivals(WORD rivals)
         OpenAiSelectMenu(rivals);
         return;
     }
-    StartMatch(humanPlayers, rivals);
+    OpenAiDifficultyMenu(humanPlayers, rivals);
 }
 
 static void TitleChooseVariant(WORD playerId, WORD delta)
@@ -4485,15 +4654,19 @@ static void StepMainGameAiFire(void)
 {
     static WORD nextAiShooter = 0;
     WORD tries;
+    WORD fireRange;
 
     if (gameState != GAME_PLAYING || RoundStartLocked()) return;
     if (humanPlayers >= robotCount) return;
+    if (aiDifficulty <= 0) return;
+
+    fireRange = (aiDifficulty >= 2) ? MAIN_AI_FIRE_RANGE_HARD : MAIN_AI_FIRE_RANGE_NORMAL;
 
     if (nextAiShooter < humanPlayers || nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
     for (tries = 0; tries < robotCount; tries++) {
         WORD id = nextAiShooter;
         WORD target = -1;
-        WORD bestDist = MAIN_AI_FIRE_RANGE + 1;
+        WORD bestDist = fireRange + 1;
         WORD j;
 
         nextAiShooter++;
@@ -4509,7 +4682,7 @@ static void StepMainGameAiFire(void)
             if (j == id) continue;
             if (robots[j].tileX != robots[id].tileX && robots[j].tileY != robots[id].tileY) continue;
             dist = AbsW(robots[j].tileX - robots[id].tileX) + AbsW(robots[j].tileY - robots[id].tileY);
-            if (dist <= 0 || dist > MAIN_AI_FIRE_RANGE || dist >= bestDist) continue;
+            if (dist <= 0 || dist > fireRange || dist >= bestDist) continue;
             if (!ClearBoltLane(robots[id].tileX, robots[id].tileY, robots[j].tileX, robots[j].tileY)) continue;
             target = j;
             bestDist = dist;
@@ -4568,7 +4741,7 @@ static BOOL ActivateSpaceOrFireAction(void)
     if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(aiRivals); return TRUE; }
-    if (gameState == GAME_TITLE) { WORD i; roundIndex = 0; for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; } ResetLevel(); return TRUE; }
+    if (gameState == GAME_TITLE) { OpenAiDifficultyMenu(humanPlayers, aiRivals); return TRUE; }
     return FALSE;
 }
 
@@ -4576,6 +4749,10 @@ static void HandleRawKey(UWORD rawCode)
 {
     BOOL keyUpEvent = (rawCode & 0x80) ? TRUE : FALSE;
     UWORD code = rawCode & 0x7F;
+
+    if (HandleAiDifficultyMenuRawKey(code, keyUpEvent)) {
+        return;
+    }
 
     if (HandleAiSelectMenuRawKey(code, keyUpEvent)) {
         return;
@@ -4665,6 +4842,31 @@ static BOOL ReadJoystickFire(WORD id)
     return (pra & 0x80) ? FALSE : TRUE;
 }
 
+static void HandleAiDifficultyJoystick(BOOL up, BOOL down, BOOL firePressed)
+{
+    static BOOL prevUp = FALSE;
+    static BOOL prevDown = FALSE;
+
+    if (!aiDifficultyMenuOpen) {
+        prevUp = up;
+        prevDown = down;
+        return;
+    }
+
+    if (up && !prevUp) {
+        aiDifficultyMenuSelection = (aiDifficultyMenuSelection + 2) % 3;
+    }
+    if (down && !prevDown) {
+        aiDifficultyMenuSelection = (aiDifficultyMenuSelection + 1) % 3;
+    }
+    if (firePressed) {
+        ActivateAiDifficultyMenu();
+    }
+
+    prevUp = up;
+    prevDown = down;
+}
+
 static void HandleAiSelectJoystick(BOOL up, BOOL down, BOOL firePressed)
 {
     static BOOL prevUp = FALSE;
@@ -4698,14 +4900,30 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     if (gameState != GAME_TITLE) {
         prevLeft[id] = left;
         prevRight[id] = right;
-        if (id == 0) HandleAiSelectJoystick(FALSE, FALSE, FALSE);
+        if (id == 0) {
+            HandleAiSelectJoystick(FALSE, FALSE, FALSE);
+            HandleAiDifficultyJoystick(FALSE, FALSE, FALSE);
+        }
         return;
     }
 
     if (!joyEnabled[id]) {
         prevLeft[id] = left;
         prevRight[id] = right;
-        if (id == 0) HandleAiSelectJoystick(FALSE, FALSE, FALSE);
+        if (id == 0) {
+            HandleAiSelectJoystick(FALSE, FALSE, FALSE);
+            HandleAiDifficultyJoystick(FALSE, FALSE, FALSE);
+        }
+        return;
+    }
+
+    if (aiDifficultyMenuOpen) {
+        if (id == 0) {
+            HandleAiDifficultyJoystick(up, down, FALSE);
+            if (firePressed) titleSelectPlayer = 0;
+        }
+        prevLeft[id] = left;
+        prevRight[id] = right;
         return;
     }
 
@@ -4813,7 +5031,8 @@ static void PollWindowMessages(void)
         } else if (cls == IDCMP_MOUSEBUTTONS) {
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
             if (code == MENUDOWN && gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
-                if (aiSelectMenuOpen) ActivateAiSelectMenu();
+                if (aiDifficultyMenuOpen) ActivateAiDifficultyMenu();
+                else if (aiSelectMenuOpen) ActivateAiSelectMenu();
                 else ActivateSpaceOrFireAction();
             }
             /* J1 fire shares the left mouse button line on Amiga hardware, so

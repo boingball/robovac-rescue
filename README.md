@@ -10,15 +10,16 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
   - By default this is a one-player game and Left/Right arrows choose Player 1's hoover.
   - Player 2 joins by pressing joystick 2 fire or `V`; the carousel switches to Player 2 selection.
   - Player 2 chooses with joystick 2 left/right or `Z`/`C`, then presses joystick 2 fire or `V` again to lock Player 2 and open the two-player AI rival prompt.
-  - In the two-player AI prompt, choose `0`, `1`, `2`, or `3` AI rivals directly, or use Up/Down plus `Space` / Enter / joystick 1 button 2 / RMB.
+  - In the two-player AI prompt, choose `0`, `1`, `2`, or `3` AI rivals directly, or use Up/Down plus `Space` / Enter / joystick 1 button 2 / RMB. If you choose at least one AI rival, the next prompt asks for Easy / Normal / Hard AI difficulty.
 - `Space` / joystick 1 button 2 / RMB:
   - On title: start match (or lock Player 2 if Player 2 is currently selecting; locked two-player mode opens the AI rival prompt)
   - End of round: continue to next round
   - End of match: start new best-of-5 match
 - `R`:
   - During match: reset current round
-- `1` / `2` / `3`: choose AI rival count from the one-player title screen
-- `0` / `1` / `2` / `3`: choose AI rival count from the two-player AI prompt
+- `1` / `2` / `3`: choose AI rival count from the one-player title screen; choosing at least one AI opens the Easy / Normal / Hard difficulty prompt.
+- `0` / `1` / `2` / `3`: choose AI rival count from the two-player AI prompt; choosing `0` starts immediately, while `1`-`3` opens the difficulty prompt.
+- AI difficulty: Easy AI does not fire back, Normal AI fires only at close range, and Hard AI fires from longer range.
 - `Esc`: quit
 
 ## Robot Super Powers
@@ -47,7 +48,7 @@ The HUD shows each robot's current clean-streak count, flashes `P` while a timed
 
 ## Bonus Round
 
-If any robot has more than 50 total points after round 5, the leaderboard offers an optional round 6 bonus battle. All robots enter a clean room with charging docks around the edges. A giant 3x rotating hover boss moves around the middle of the room. Human players recharge on docks and shoot bolts at the boss; each boss hit adds 2 points to the shooter. The boss disappears after 80 hits, then the final scoreboard is shown and the winner is recalculated from the final totals. Touching the boss gives a single 2-second stun/penalty per contact, with a cooldown so the slow-moving boss cannot stack repeated penalties while it overlaps a robot.
+If any robot has more than 50 total points after round 5, the leaderboard offers an optional round 6 bonus battle. All robots enter a clean room with charging docks around the edges. A giant 3x rotating hover boss moves around the middle of the room. Human players recharge on docks and shoot bolts at the boss; each boss hit adds 2 points to the shooter. The boss disappears after 80 hits, then the final scoreboard is shown and the winner is recalculated from the final totals. Touching the boss gives a single 5-second stun/penalty per contact, with a cooldown so the slow-moving boss cannot stack repeated penalties while it overlaps a robot.
 
 ## Room Types
 
