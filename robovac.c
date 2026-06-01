@@ -112,6 +112,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define ROBOT_W     16
 #define ROBOT_H     16
+#define BOLT_FRAME_COUNT 4
 #define ROBOT_SCALE2_W (ROBOT_W * 2)
 #define ROBOT_SCALE2_H (ROBOT_H * 2)
 #define MAX_ROBOTS  10
@@ -286,6 +287,9 @@ static struct BitMap *roundOverlayBM = NULL;
 static struct RastPort robotRP;
 static struct BitMap *robotCacheBM = NULL;
 static struct BitMap *robotMaskBM = NULL;
+static struct RastPort boltRP;
+static struct BitMap *boltCacheBM = NULL;
+static struct BitMap *boltMaskBM = NULL;
 static struct RastPort robotScaledRP;
 static struct BitMap *robotScaledCacheBM = NULL;
 static struct BitMap *robotScaledMaskBM = NULL;
@@ -469,6 +473,13 @@ enum RobotSpriteState {
     SPR_LOW_BATTERY = 6,
     SPR_ENERGY_BOLT = 7,
     SPR_STATE_COUNT = 8
+};
+
+enum BoltSpriteFrame {
+    BOLT_FRAME_UP = 0,
+    BOLT_FRAME_DOWN = 1,
+    BOLT_FRAME_LEFT = 2,
+    BOLT_FRAME_RIGHT = 3
 };
 
 static const char *roomNames[5] = {
@@ -2259,6 +2270,94 @@ static BOOL LoadRobotSheetIntoCache(void)
     return TRUE;
 }
 
+static void FreeBoltCache(void)
+{
+    if (boltCacheBM) {
+        FreeBitMap(boltCacheBM);
+        boltCacheBM = NULL;
+    }
+
+    if (boltMaskBM) {
+        FreeBitMap(boltMaskBM);
+        boltMaskBM = NULL;
+    }
+
+    boltRP.BitMap = NULL;
+}
+
+static void CacheBoltPixel(struct RastPort *maskRP, WORD srcBaseX, WORD srcX, WORD srcY,
+                           WORD dstBaseX, WORD dstX, WORD dstY)
+{
+    LONG pen = ReadPixel(&robotRP, srcBaseX + srcX, srcY);
+
+    if (pen <= 0) return;
+    if (pen > 31) pen = 31;
+
+    SetAPen(&boltRP, (UBYTE)pen);
+    WritePixel(&boltRP, dstBaseX + dstX, dstY);
+    SetAPen(maskRP, 1);
+    WritePixel(maskRP, dstBaseX + dstX, dstY);
+}
+
+static void BuildBoltCacheFrame(struct RastPort *maskRP, WORD frame, WORD rotation)
+{
+    WORD x;
+    WORD y;
+    WORD srcBaseX = SPR_ENERGY_BOLT * ROBOT_W;
+    WORD dstBaseX = frame * ROBOT_W;
+
+    for (y = 0; y < ROBOT_H; y++) {
+        for (x = 0; x < ROBOT_W; x++) {
+            WORD dx = x;
+            WORD dy = y;
+
+            if (rotation == 90) {
+                dx = ROBOT_W - 1 - y;
+                dy = x;
+            } else if (rotation == 180) {
+                dx = ROBOT_W - 1 - x;
+                dy = ROBOT_H - 1 - y;
+            } else if (rotation == 270) {
+                dx = y;
+                dy = ROBOT_H - 1 - x;
+            }
+
+            CacheBoltPixel(maskRP, srcBaseX, x, y, dstBaseX, dx, dy);
+        }
+    }
+}
+
+static BOOL BuildBoltCache(void)
+{
+    struct RastPort maskRP;
+    WORD cacheW = ROBOT_W * BOLT_FRAME_COUNT;
+
+    if (!robotCacheBM) return FALSE;
+
+    boltCacheBM = AllocBitMap(cacheW, ROBOT_H, DEPTH,
+                              BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    boltMaskBM = AllocBitMap(cacheW, ROBOT_H, 1,
+                             BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+
+    if (!boltCacheBM || !boltMaskBM) {
+        FreeBoltCache();
+        return FALSE;
+    }
+
+    InitRastPort(&boltRP);
+    boltRP.BitMap = boltCacheBM;
+    InitRastPort(&maskRP);
+    maskRP.BitMap = boltMaskBM;
+
+    /* Match the old runtime path: vertical bolts used one rotated frame, horizontal bolts used the source frame. */
+    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_UP, 270);
+    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_DOWN, 270);
+    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_LEFT, 0);
+    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_RIGHT, 0);
+
+    return TRUE;
+}
+
 static void FreeRobotScaledCache(void)
 {
     if (robotScaledCacheBM) {
@@ -2478,6 +2577,7 @@ static BOOL InitRobotBobs(void)
 
     if (!LoadRobotSheetIntoCache()) {
         printf("Could not load PROGDIR:tiles/airobot1.iff through airobot7.iff (need at least 16x16, 16 colours)\n");
+        FreeBoltCache();
         FreeRobotScaledCache();
         FreeBitMap(robotCacheBM);
         FreeBitMap(robotMaskBM);
@@ -2487,11 +2587,16 @@ static BOOL InitRobotBobs(void)
         return FALSE;
     }
 
+    if (!BuildBoltCache()) {
+        printf("Could not allocate bolt sprite cache; bolts will use slower fallback drawing\n");
+    }
+
     if (!BuildRobotScaledCache()) {
         printf("Could not allocate scaled robot BOB cache; quad robot will use slower fallback drawing\n");
     }
 
     if (!BuildTitleCarouselRotationCache()) {
+        FreeBoltCache();
         FreeRobotScaledCache();
         FreeBitMap(robotCacheBM);
         FreeBitMap(robotMaskBM);
@@ -2621,35 +2726,43 @@ static void DrawRobotBob(WORD id)
     }
 }
 
+static WORD BoltFrameForDirection(struct Bolt *bolt)
+{
+    if (bolt->dirY < 0) return BOLT_FRAME_UP;
+    if (bolt->dirY > 0) return BOLT_FRAME_DOWN;
+    if (bolt->dirX < 0) return BOLT_FRAME_LEFT;
+    return BOLT_FRAME_RIGHT;
+}
+
 static void DrawBoltSprite(struct Bolt *bolt)
 {
-    WORD sx, sy, x, y;
-    WORD srcBaseX;
+    WORD sx;
+    WORD sy;
+    WORD frame;
+    WORD srcX;
 
-    if (!bolt || !bolt->active || !robotCacheBM) return;
+    if (!bolt || !bolt->active) return;
 
     sx = MAP_X + FP_TO_INT(bolt->px);
     sy = MAP_Y + FP_TO_INT(bolt->py);
-    srcBaseX = SPR_ENERGY_BOLT * ROBOT_W;
 
-    if (bolt->dirY != 0) {
-        for (y = 0; y < ROBOT_H; y++) {
-            for (x = 0; x < ROBOT_W; x++) {
-                LONG p = ReadPixel(&robotRP, srcBaseX + x, y);
-                if (p <= 0) continue;
-                SetAPen(&renderRP, (UBYTE)p);
-                WritePixel(&renderRP, sx + y, sy + (ROBOT_W - 1 - x));
-            }
-        }
-    } else {
-        for (y = 0; y < ROBOT_H; y++) {
-            for (x = 0; x < ROBOT_W; x++) {
-                LONG p = ReadPixel(&robotRP, srcBaseX + x, y);
-                if (p <= 0) continue;
-                SetAPen(&renderRP, (UBYTE)p);
-                WritePixel(&renderRP, sx + x, sy + y);
-            }
-        }
+    if (boltCacheBM && boltMaskBM && boltMaskBM->Planes[0]) {
+        frame = BoltFrameForDirection(bolt);
+        srcX = frame * ROBOT_W;
+        BltMaskBitMapRastPort(boltCacheBM, srcX, 0,
+                              &renderRP, sx, sy,
+                              ROBOT_W, ROBOT_H,
+                              (ABC | ABNC | ANBC),
+                              boltMaskBM->Planes[0]);
+        return;
+    }
+
+    if (robotCacheBM && robotMaskBM && robotMaskBM->Planes[0]) {
+        BltMaskBitMapRastPort(robotCacheBM, SPR_ENERGY_BOLT * ROBOT_W, 0,
+                              &renderRP, sx, sy,
+                              ROBOT_W, ROBOT_H,
+                              (ABC | ABNC | ANBC),
+                              robotMaskBM->Planes[0]);
     }
 }
 
@@ -5420,6 +5533,7 @@ static void CloseGameScreen(void)
 
     FreeIntroTitleImage();
     FreeTitleCarouselCache();
+    FreeBoltCache();
     FreeRobotScaledCache();
 
     if (robotCacheBM) {
