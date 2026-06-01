@@ -112,6 +112,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define ROBOT_W     16
 #define ROBOT_H     16
+#define ROBOT_SCALE2_W (ROBOT_W * 2)
+#define ROBOT_SCALE2_H (ROBOT_H * 2)
 #define MAX_ROBOTS  10
 #define MAX_HUMAN_PLAYERS 2
 #define ROBOT_VARIANTS 7
@@ -284,6 +286,9 @@ static struct BitMap *roundOverlayBM = NULL;
 static struct RastPort robotRP;
 static struct BitMap *robotCacheBM = NULL;
 static struct BitMap *robotMaskBM = NULL;
+static struct RastPort robotScaledRP;
+static struct BitMap *robotScaledCacheBM = NULL;
+static struct BitMap *robotScaledMaskBM = NULL;
 static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
@@ -2254,6 +2259,78 @@ static BOOL LoadRobotSheetIntoCache(void)
     return TRUE;
 }
 
+static void FreeRobotScaledCache(void)
+{
+    if (robotScaledCacheBM) {
+        FreeBitMap(robotScaledCacheBM);
+        robotScaledCacheBM = NULL;
+    }
+
+    if (robotScaledMaskBM) {
+        FreeBitMap(robotScaledMaskBM);
+        robotScaledMaskBM = NULL;
+    }
+
+    robotScaledRP.BitMap = NULL;
+}
+
+static BOOL BuildRobotScaledCache(void)
+{
+    struct RastPort maskRP;
+    WORD frame;
+    WORD x;
+    WORD y;
+    WORD cacheW = ROBOT_SCALE2_W * SPR_STATE_COUNT * ROBOT_VARIANTS;
+
+    if (!robotCacheBM || !robotMaskBM) return FALSE;
+
+    robotScaledCacheBM = AllocBitMap(cacheW, ROBOT_SCALE2_H, DEPTH,
+                                     BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    robotScaledMaskBM = AllocBitMap(cacheW, ROBOT_SCALE2_H, 1,
+                                    BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+
+    if (!robotScaledCacheBM || !robotScaledMaskBM) {
+        FreeRobotScaledCache();
+        return FALSE;
+    }
+
+    InitRastPort(&robotScaledRP);
+    robotScaledRP.BitMap = robotScaledCacheBM;
+    InitRastPort(&maskRP);
+    maskRP.BitMap = robotScaledMaskBM;
+
+    for (frame = 0; frame < (SPR_STATE_COUNT * ROBOT_VARIANTS); frame++) {
+        WORD srcX = frame * ROBOT_W;
+        WORD dstX = frame * ROBOT_SCALE2_W;
+
+        for (y = 0; y < ROBOT_H; y++) {
+            for (x = 0; x < ROBOT_W; x++) {
+                LONG p = ReadPixel(&robotRP, srcX + x, y);
+                WORD dx;
+                WORD dy;
+
+                if (p <= 0) continue;
+                dx = dstX + (x * 2);
+                dy = y * 2;
+
+                SetAPen(&robotScaledRP, (UBYTE)p);
+                WritePixel(&robotScaledRP, dx, dy);
+                WritePixel(&robotScaledRP, dx + 1, dy);
+                WritePixel(&robotScaledRP, dx, dy + 1);
+                WritePixel(&robotScaledRP, dx + 1, dy + 1);
+
+                SetAPen(&maskRP, 1);
+                WritePixel(&maskRP, dx, dy);
+                WritePixel(&maskRP, dx + 1, dy);
+                WritePixel(&maskRP, dx, dy + 1);
+                WritePixel(&maskRP, dx + 1, dy + 1);
+            }
+        }
+    }
+
+    return TRUE;
+}
+
 
 static void FreeTitleCarouselCache(void)
 {
@@ -2401,6 +2478,7 @@ static BOOL InitRobotBobs(void)
 
     if (!LoadRobotSheetIntoCache()) {
         printf("Could not load PROGDIR:tiles/airobot1.iff through airobot7.iff (need at least 16x16, 16 colours)\n");
+        FreeRobotScaledCache();
         FreeBitMap(robotCacheBM);
         FreeBitMap(robotMaskBM);
         robotCacheBM = NULL;
@@ -2409,7 +2487,12 @@ static BOOL InitRobotBobs(void)
         return FALSE;
     }
 
+    if (!BuildRobotScaledCache()) {
+        printf("Could not allocate scaled robot BOB cache; quad robot will use slower fallback drawing\n");
+    }
+
     if (!BuildTitleCarouselRotationCache()) {
+        FreeRobotScaledCache();
         FreeBitMap(robotCacheBM);
         FreeBitMap(robotMaskBM);
         robotCacheBM = NULL;
@@ -2430,7 +2513,7 @@ static void PlotRobotPixel(WORD x, WORD y, UBYTE pen)
     WritePixel(&renderRP, x, y);
 }
 
-static void DrawRobotBobScaled2(WORD srcX, WORD sx, WORD sy)
+static void DrawRobotBobScaled2Cpu(WORD srcX, WORD sx, WORD sy)
 {
     WORD x;
     WORD y;
@@ -2452,6 +2535,23 @@ static void DrawRobotBobScaled2(WORD srcX, WORD sx, WORD sy)
             PlotRobotPixel(dx + 1, dy + 1, (UBYTE)p);
         }
     }
+}
+
+static void DrawRobotBobScaled2(WORD srcX, WORD sx, WORD sy)
+{
+    WORD scaledSrcX;
+
+    if (robotScaledCacheBM && robotScaledMaskBM && robotScaledMaskBM->Planes[0]) {
+        scaledSrcX = (srcX / ROBOT_W) * ROBOT_SCALE2_W;
+        BltMaskBitMapRastPort(robotScaledCacheBM, scaledSrcX, 0,
+                              &renderRP, sx - (ROBOT_W / 2), sy - (ROBOT_H / 2),
+                              ROBOT_SCALE2_W, ROBOT_SCALE2_H,
+                              (ABC | ABNC | ANBC),
+                              robotScaledMaskBM->Planes[0]);
+        return;
+    }
+
+    DrawRobotBobScaled2Cpu(srcX, sx, sy);
 }
 
 static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection)
@@ -5320,6 +5420,7 @@ static void CloseGameScreen(void)
 
     FreeIntroTitleImage();
     FreeTitleCarouselCache();
+    FreeRobotScaledCache();
 
     if (robotCacheBM) {
         FreeBitMap(robotCacheBM);
