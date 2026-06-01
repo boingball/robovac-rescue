@@ -298,9 +298,16 @@ static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
 static WORD titleCarouselFrameCount = 0;
+enum TitleEffectQuality {
+    EFFECT_LOW = 0,
+    EFFECT_NORMAL = 1,
+    EFFECT_HIGH = 2
+};
+
 static WORD titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
 static WORD titleSpinAdvanceDivisor = 1;
 static WORD titleSpinAdvanceCounter = 0;
+static enum TitleEffectQuality effectQuality = EFFECT_NORMAL;
 static const char *titleFxModeName = "normal";
 static const char *detectedCpuName = "unknown";
 static struct RastPort introTitleRP;
@@ -358,25 +365,29 @@ static void InitTitleEffectQuality(void)
     ULONG attnFlags = 0;
 
     detectedCpuName = "unknown";
+    effectQuality = EFFECT_LOW;
     titleFxModeName = "low";
     titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS_LOW;
-    titleSpinAdvanceDivisor = 2;
+    titleSpinAdvanceDivisor = 4;
     titleSpinAdvanceCounter = 0;
 
     if (SysBase) {
         attnFlags = SysBase->AttnFlags;
         if (attnFlags & AFF_68060) {
             detectedCpuName = "68060";
+            effectQuality = EFFECT_HIGH;
             titleFxModeName = "high";
             titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
             titleSpinAdvanceDivisor = 1;
         } else if (attnFlags & AFF_68040) {
             detectedCpuName = "68040";
+            effectQuality = EFFECT_HIGH;
             titleFxModeName = "high";
             titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
             titleSpinAdvanceDivisor = 1;
         } else if (attnFlags & AFF_68030) {
             detectedCpuName = "68030";
+            effectQuality = EFFECT_NORMAL;
             titleFxModeName = "normal";
             titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
             titleSpinAdvanceDivisor = 1;
@@ -4039,6 +4050,40 @@ static void DrawTitleSelectorBox(WORD x, WORD y)
     RectFill(&renderRP, left, top, right, bottom);
 }
 
+static void DrawTitleRobotStatic(WORD variant, WORD state, WORD dstX, WORD dstY)
+{
+    WORD srcX;
+    WORD px;
+    WORD py;
+
+    if (variant < 0 || variant >= ROBOT_VARIANTS) return;
+    if (state < 0 || state >= SPR_STATE_COUNT) state = SPR_READY;
+
+    if (robotScaledCacheBM) {
+        srcX = (variant * SPR_STATE_COUNT + state) * ROBOT_SCALE2_W;
+        BltBitMapRastPort(robotScaledCacheBM, srcX, 0,
+                          &renderRP, dstX, dstY,
+                          ROBOT_SCALE2_W, ROBOT_SCALE2_H,
+                          0xC0);
+        return;
+    }
+
+    if (!robotCacheBM) return;
+    srcX = (variant * SPR_STATE_COUNT + state) * ROBOT_W;
+    for (py = 0; py < ROBOT_H; py++) {
+        for (px = 0; px < ROBOT_W; px++) {
+            LONG pen = ReadPixel(&robotRP, srcX + px, py);
+            if (pen <= 0) continue;
+            SetAPen(&renderRP, (UBYTE)pen);
+            RectFill(&renderRP,
+                     dstX + (px * TITLE_ROBOT_SCALE),
+                     dstY + (py * TITLE_ROBOT_SCALE),
+                     dstX + ((px + 1) * TITLE_ROBOT_SCALE) - 1,
+                     dstY + ((py + 1) * TITLE_ROBOT_SCALE) - 1);
+        }
+    }
+}
+
 static void DrawTitleCarousel(void)
 {
     char b[80];
@@ -4070,7 +4115,15 @@ static void DrawTitleCarousel(void)
             RectFill(&renderRP, x, y, x + (ROBOT_W * TITLE_ROBOT_SCALE) - 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) - 1);
         }
 
-        DrawCachedTitleRobotSpin(variant, (titleSpinPhase + slot * 2) & (TITLE_SPIN_STEPS - 1), x, y);
+        if (effectQuality == EFFECT_LOW) {
+            if (slot == (ROBOT_VARIANTS / 2)) {
+                DrawCachedTitleRobotSpin(variant, (titleSpinPhase * 2) & (TITLE_SPIN_STEPS - 1), x, y);
+            } else {
+                DrawTitleRobotStatic(variant, SPR_READY, x, y);
+            }
+        } else {
+            DrawCachedTitleRobotSpin(variant, (titleSpinPhase + slot * 2) & (TITLE_SPIN_STEPS - 1), x, y);
+        }
         if (slot != (ROBOT_VARIANTS / 2)) {
             MiniText(&renderRP, x + 10, y + 35, robotVariantTags[variant], 7);
         }
