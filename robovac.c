@@ -179,6 +179,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_ROT_H (ROBOT_H * TITLE_ROBOT_SCALE)
 #define TITLE_COPPER_PEN 1
 #define TITLE_COPPER_BANDS 32
+#define TITLE_DIRTY_TOP (TITLE_CAROUSEL_Y - 24)
+#define TITLE_MENU_DIRTY_TOP 66
 
 #define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenuShort.8svx"
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
@@ -298,6 +300,12 @@ static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
 static WORD titleCarouselFrameCount = 0;
+static WORD titleCarouselPhaseFrame[TITLE_SPIN_STEPS];
+static struct RastPort titleStaticRP;
+static struct BitMap *titleStaticBM = NULL;
+static BOOL titleStaticDirty = TRUE;
+static BOOL titlePanelDirty = TRUE;
+static BOOL titleFullPresentPending = TRUE;
 enum TitleEffectQuality {
     EFFECT_LOW = 0,
     EFFECT_NORMAL = 1,
@@ -430,7 +438,29 @@ static WORD dirtLeft = 0;
 static WORD moves = 0;
 static WORD maxBattery = 110;
 static WORD batteryCostPerMove = 1;
+static BOOL EnableTitleCopperGradient(void);
 static WORD gameState = GAME_TITLE;
+
+static void MarkTitlePanelDirty(void)
+{
+    if (gameState != GAME_TITLE) return;
+    titlePanelDirty = TRUE;
+}
+
+static void MarkTitleAllDirty(void)
+{
+    if (gameState != GAME_TITLE) return;
+    titleStaticDirty = TRUE;
+    titlePanelDirty = TRUE;
+    titleFullPresentPending = TRUE;
+}
+
+static void PrepareTitlePresentation(void)
+{
+    if (gameState != GAME_TITLE) return;
+    EnableTitleCopperGradient();
+    MarkTitleAllDirty();
+}
 
 static WORD roundIndex = 0;
 static WORD roundWins[MAX_ROBOTS] = {0,0,0,0};
@@ -634,7 +664,12 @@ static void StepBossBolts(void);
 static void StepBonusAiFire(void);
 static void StepMainGameAiFire(void);
 static BOOL ActivateSpaceOrFireAction(void);
+static BOOL EnableTitleCopperGradient(void);
 static void DrawTitleCarousel(void);
+static void DrawHud(void);
+static void MarkTitlePanelDirty(void);
+static void MarkTitleAllDirty(void);
+static void PrepareTitlePresentation(void);
 static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen);
 static void TriggerRobotPower(WORD id);
 static WORD NextPowerCleanTarget(WORD useCount);
@@ -2525,6 +2560,40 @@ static void FreeTitleCarouselCache(void)
 
     titleCarouselRP.BitMap = NULL;
     titleCarouselFrameCount = 0;
+    {
+        WORD phase;
+        for (phase = 0; phase < TITLE_SPIN_STEPS; phase++) titleCarouselPhaseFrame[phase] = 0;
+    }
+}
+
+static void FreeTitleStaticCache(void)
+{
+    if (titleStaticBM) {
+        FreeBitMap(titleStaticBM);
+        titleStaticBM = NULL;
+    }
+
+    titleStaticRP.BitMap = NULL;
+    titleStaticDirty = TRUE;
+    titlePanelDirty = TRUE;
+    titleFullPresentPending = TRUE;
+}
+
+static BOOL AllocTitleStaticCache(void)
+{
+    if (titleStaticBM) return TRUE;
+
+    titleStaticBM = AllocBitMap(SCREEN_W, SCREEN_H, DEPTH,
+                                BMF_CLEAR | BMF_DISPLAYABLE,
+                                scr->RastPort.BitMap);
+    if (!titleStaticBM) return FALSE;
+
+    InitRastPort(&titleStaticRP);
+    titleStaticRP.BitMap = titleStaticBM;
+    titleStaticDirty = TRUE;
+    titlePanelDirty = TRUE;
+    titleFullPresentPending = TRUE;
+    return TRUE;
 }
 
 static BOOL AllocTitleCarouselCache(WORD frameCount)
@@ -2544,6 +2613,14 @@ static BOOL AllocTitleCarouselCache(WORD frameCount)
     InitRastPort(&titleCarouselRP);
     titleCarouselRP.BitMap = titleCarouselBM;
     titleCarouselFrameCount = frameCount;
+    {
+        WORD phase;
+        for (phase = 0; phase < TITLE_SPIN_STEPS; phase++) {
+            WORD frame = (phase * titleCarouselFrameCount) / TITLE_SPIN_STEPS;
+            if (frame >= titleCarouselFrameCount) frame = titleCarouselFrameCount - 1;
+            titleCarouselPhaseFrame[phase] = frame;
+        }
+    }
     return TRUE;
 }
 
@@ -3701,6 +3778,7 @@ static void EnterTitleScreen(void)
     joyEnabled[1] = FALSE;
     ClearMovementKeys();
     LoadGamePalette();
+    PrepareTitlePresentation();
 }
 
 static void StepIntro(void)
@@ -3973,16 +4051,13 @@ static void FreeRoundStartOverlayCache(void)
     roundOverlayRP.BitMap = NULL;
 }
 
-static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD dstY)
+static void DrawCachedTitleRobotSpinFrame(WORD variant, WORD frame, WORD dstX, WORD dstY)
 {
-    WORD frame;
     WORD srcX;
 
     if (!titleCarouselBM || !titleCarouselMaskBM || !titleCarouselMaskBM->Planes[0]) return;
     if (variant < 0 || variant >= ROBOT_VARIANTS || titleCarouselFrameCount <= 0) return;
-
-    phase &= (TITLE_SPIN_STEPS - 1);
-    frame = (phase * titleCarouselFrameCount) / TITLE_SPIN_STEPS;
+    if (frame < 0) frame = 0;
     if (frame >= titleCarouselFrameCount) frame = titleCarouselFrameCount - 1;
     srcX = (variant * titleCarouselFrameCount + frame) * TITLE_ROT_W;
 
@@ -3991,6 +4066,12 @@ static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD d
                           TITLE_ROT_W, TITLE_ROT_H,
                           (ABC | ABNC | ANBC),
                           titleCarouselMaskBM->Planes[0]);
+}
+
+static void DrawCachedTitleRobotSpin(WORD variant, WORD phase, WORD dstX, WORD dstY)
+{
+    phase &= (TITLE_SPIN_STEPS - 1);
+    DrawCachedTitleRobotSpinFrame(variant, titleCarouselPhaseFrame[phase], dstX, dstY);
 }
 
 
@@ -4084,15 +4165,32 @@ static void DrawTitleRobotStatic(WORD variant, WORD state, WORD dstX, WORD dstY)
     }
 }
 
-static void DrawTitleCarousel(void)
+static void BuildTitleStaticCache(void)
 {
+    struct BitMap *oldBM;
     char b[80];
     WORD slot;
     static const WORD slotX[ROBOT_VARIANTS] = {24, 64, 104, 144, 184, 224, 264};
 
-    AdvanceTitleCarouselSpin();
+    if (!AllocTitleStaticCache()) return;
+    if (!titleStaticDirty && !titlePanelDirty) return;
 
-    EnableTitleCopperGradient();
+    oldBM = renderRP.BitMap;
+    renderRP.BitMap = titleStaticBM;
+
+    if (titleStaticDirty) {
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
+        DrawHud();
+        MiniTextCentered(&renderRP, 86, "A TINY AMIGA ROBOT CLEANER", 7, 2);
+        MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
+        MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
+        MiniTextCentered(&renderRP, 134, "EMP/DIRT NEED 5 7 10", 14, 2);
+    } else {
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, 0, TITLE_DIRTY_TOP, SCREEN_W - 1, SCREEN_H - 1);
+    }
+
     DrawTitlePanelBase(TITLE_CAROUSEL_Y - 8, SCREEN_H - 1);
     SetAPen(&renderRP, 8);
     RectFill(&renderRP, 0, TITLE_CAROUSEL_Y - 8, SCREEN_W - 1, TITLE_CAROUSEL_Y - 6);
@@ -4106,6 +4204,11 @@ static void DrawTitleCarousel(void)
         while (variant < 0) variant += ROBOT_VARIANTS;
         while (variant >= ROBOT_VARIANTS) variant -= ROBOT_VARIANTS;
 
+        if (effectQuality == EFFECT_LOW &&
+            (slot < (ROBOT_VARIANTS / 2) - 1 || slot > (ROBOT_VARIANTS / 2) + 1)) {
+            continue;
+        }
+
         if (slot == (ROBOT_VARIANTS / 2)) {
             DrawTitleSelectorBox(x, y);
         } else {
@@ -4113,18 +4216,6 @@ static void DrawTitleCarousel(void)
             RectFill(&renderRP, x - 2, y - 2, x + (ROBOT_W * TITLE_ROBOT_SCALE) + 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) + 1);
             SetAPen(&renderRP, 0);
             RectFill(&renderRP, x, y, x + (ROBOT_W * TITLE_ROBOT_SCALE) - 1, y + (ROBOT_H * TITLE_ROBOT_SCALE) - 1);
-        }
-
-        if (effectQuality == EFFECT_LOW) {
-            if (slot == (ROBOT_VARIANTS / 2)) {
-                DrawCachedTitleRobotSpin(variant, (titleSpinPhase * 2) & (TITLE_SPIN_STEPS - 1), x, y);
-            } else {
-                DrawTitleRobotStatic(variant, SPR_READY, x, y);
-            }
-        } else {
-            DrawCachedTitleRobotSpin(variant, (titleSpinPhase + slot * 2) & (TITLE_SPIN_STEPS - 1), x, y);
-        }
-        if (slot != (ROBOT_VARIANTS / 2)) {
             MiniText(&renderRP, x + 10, y + 35, robotVariantTags[variant], 7);
         }
     }
@@ -4137,6 +4228,47 @@ static void DrawTitleCarousel(void)
         MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2/J2 SELECT  P2 FIRE LOCK", 13, 2);
     } else {
         MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1/J1 SELECT  J1B2 START", 13, 2);
+    }
+
+    renderRP.BitMap = oldBM;
+    titleStaticDirty = FALSE;
+    titlePanelDirty = FALSE;
+}
+
+static void DrawTitleCarousel(void)
+{
+    WORD slot;
+    WORD baseFrame;
+    static const WORD slotX[ROBOT_VARIANTS] = {24, 64, 104, 144, 184, 224, 264};
+
+    AdvanceTitleCarouselSpin();
+    baseFrame = titleCarouselPhaseFrame[titleSpinPhase & (TITLE_SPIN_STEPS - 1)];
+
+    if (titleStaticBM) {
+        BltBitMap(titleStaticBM, 0, TITLE_DIRTY_TOP,
+                  renderBM, 0, TITLE_DIRTY_TOP,
+                  SCREEN_W, SCREEN_H - TITLE_DIRTY_TOP,
+                  0xC0, 0xFF, NULL);
+    }
+
+    for (slot = 0; slot < ROBOT_VARIANTS; slot++) {
+        WORD variant = selectedPlayerVariant[titleSelectPlayer] + slot - (ROBOT_VARIANTS / 2);
+        WORD x = slotX[slot];
+        WORD y = TITLE_CAROUSEL_Y;
+        while (variant < 0) variant += ROBOT_VARIANTS;
+        while (variant >= ROBOT_VARIANTS) variant -= ROBOT_VARIANTS;
+
+        if (effectQuality == EFFECT_LOW) {
+            if (slot < (ROBOT_VARIANTS / 2) - 1 || slot > (ROBOT_VARIANTS / 2) + 1) continue;
+            if (slot == (ROBOT_VARIANTS / 2)) {
+                DrawCachedTitleRobotSpinFrame(variant, baseFrame, x, y);
+            } else {
+                DrawTitleRobotStatic(variant, SPR_READY, x, y);
+            }
+        } else {
+            WORD phase = (titleSpinPhase + slot * 2) & (TITLE_SPIN_STEPS - 1);
+            DrawCachedTitleRobotSpinFrame(variant, titleCarouselPhaseFrame[phase], x, y);
+        }
     }
 }
 
@@ -4618,13 +4750,19 @@ static void DrawFrame(void)
     }
 
     if (gameState == GAME_TITLE) {
-        SetAPen(&renderRP, 0);
-        RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
-        DrawHud();
-        MiniTextCentered(&renderRP, 86, "A TINY AMIGA ROBOT CLEANER", 7, 2);
-        MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
-        MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
-        MiniTextCentered(&renderRP, 134, "EMP/DIRT NEED 5 7 10", 14, 2);
+        BuildTitleStaticCache();
+        if (titleStaticBM && titleFullPresentPending) {
+            BltBitMap(titleStaticBM, 0, 0,
+                      renderBM, 0, 0,
+                      SCREEN_W, SCREEN_H,
+                      0xC0, 0xFF, NULL);
+        }
+        if ((aiSelectMenuOpen || aiDifficultyMenuOpen) && titleStaticBM) {
+            BltBitMap(titleStaticBM, 0, TITLE_MENU_DIRTY_TOP,
+                      renderBM, 0, TITLE_MENU_DIRTY_TOP,
+                      SCREEN_W, SCREEN_H - TITLE_MENU_DIRTY_TOP,
+                      0xC0, 0xFF, NULL);
+        }
         DrawTitleCarousel();
         if (aiSelectMenuOpen) {
             DrawAiSelectMenu();
@@ -4673,10 +4811,24 @@ static void DrawFrame(void)
 
 static void PresentFrame(void)
 {
+    WORD dirtyTop;
+
+    if (gameState == GAME_TITLE && !titleFullPresentPending) {
+        dirtyTop = (aiSelectMenuOpen || aiDifficultyMenuOpen) ? TITLE_MENU_DIRTY_TOP : TITLE_DIRTY_TOP;
+        BltBitMap(renderBM, 0, dirtyTop,
+                  scr->RastPort.BitMap, 0, dirtyTop,
+                  SCREEN_W, SCREEN_H - dirtyTop,
+                  0xC0, 0xFF, NULL);
+        return;
+    }
+
     BltBitMap(renderBM, 0, 0,
               scr->RastPort.BitMap, 0, 0,
               SCREEN_W, SCREEN_H,
               0xC0, 0xFF, NULL);
+    if (gameState == GAME_TITLE) {
+        titleFullPresentPending = FALSE;
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -4726,6 +4878,7 @@ static void OpenAiSelectMenu(WORD initialSelection)
     aiSelectMenuOpen = TRUE;
     aiSelectMenuSelection = initialSelection;
     ClearMovementKeys();
+    MarkTitleAllDirty();
 }
 
 static void CloseAiSelectMenu(void)
@@ -4733,6 +4886,7 @@ static void CloseAiSelectMenu(void)
     aiSelectMenuOpen = FALSE;
     aiSelectMenuSelection = 0;
     ClearMovementKeys();
+    MarkTitleAllDirty();
 }
 
 static void CloseAiDifficultyMenu(void)
@@ -4742,6 +4896,7 @@ static void CloseAiDifficultyMenu(void)
     aiDifficultyPendingPlayers = 1;
     aiDifficultyPendingRivals = 0;
     ClearMovementKeys();
+    MarkTitleAllDirty();
 }
 
 static void OpenAiDifficultyMenu(WORD players, WORD rivals)
@@ -4757,6 +4912,7 @@ static void OpenAiDifficultyMenu(WORD players, WORD rivals)
     aiDifficultyMenuSelection = aiDifficulty;
     aiDifficultyMenuOpen = TRUE;
     ClearMovementKeys();
+    MarkTitleAllDirty();
 }
 
 static void ActivateAiDifficultyMenu(void)
@@ -4914,6 +5070,7 @@ static void TitleChooseVariant(WORD playerId, WORD delta)
     selectedPlayerVariant[playerId] += delta;
     while (selectedPlayerVariant[playerId] < 0) selectedPlayerVariant[playerId] += ROBOT_VARIANTS;
     while (selectedPlayerVariant[playerId] >= ROBOT_VARIANTS) selectedPlayerVariant[playerId] -= ROBOT_VARIANTS;
+    MarkTitlePanelDirty();
 }
 
 static void TitleArmTwoPlayer(void)
@@ -4922,6 +5079,7 @@ static void TitleArmTwoPlayer(void)
     titleTwoPlayerArmed = TRUE;
     titlePlayer2Locked = FALSE;
     titleSelectPlayer = 1;
+    MarkTitlePanelDirty();
 }
 
 static void TitleLockPlayer2(void)
@@ -4932,6 +5090,7 @@ static void TitleLockPlayer2(void)
     }
     titlePlayer2Locked = TRUE;
     titleSelectPlayer = 0;
+    MarkTitlePanelDirty();
     OpenAiSelectMenu(aiRivals);
 }
 
@@ -5258,10 +5417,10 @@ static void HandleRawKey(UWORD rawCode)
     }
 
     if (!keyUpEvent && gameState == GAME_TITLE) {
-        if (code == RAW_LEFT) { if (!titleTwoPlayerArmed || titlePlayer2Locked) { titleSelectPlayer = 0; TitleChooseVariant(0, -1); } return; }
-        if (code == RAW_RIGHT) { if (!titleTwoPlayerArmed || titlePlayer2Locked) { titleSelectPlayer = 0; TitleChooseVariant(0, 1); } return; }
-        if (code == RAW_Z) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; TitleChooseVariant(1, -1); return; }
-        if (code == RAW_C) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; TitleChooseVariant(1, 1); return; }
+        if (code == RAW_LEFT) { if (!titleTwoPlayerArmed || titlePlayer2Locked) { titleSelectPlayer = 0; MarkTitlePanelDirty(); TitleChooseVariant(0, -1); } return; }
+        if (code == RAW_RIGHT) { if (!titleTwoPlayerArmed || titlePlayer2Locked) { titleSelectPlayer = 0; MarkTitlePanelDirty(); TitleChooseVariant(0, 1); } return; }
+        if (code == RAW_Z) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, -1); return; }
+        if (code == RAW_C) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, 1); return; }
         if (code == RAW_V) { TitlePlayer2Fire(); return; }
         if (code == RAW_0 && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(0); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
@@ -5400,7 +5559,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     if (aiDifficultyMenuOpen) {
         if (id == 0) {
             HandleAiDifficultyJoystick(up, down, FALSE);
-            if (firePressed) titleSelectPlayer = 0;
+            if (firePressed) { titleSelectPlayer = 0; MarkTitlePanelDirty(); }
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -5414,7 +5573,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
              * the AI-rival prompt.
              */
             HandleAiSelectJoystick(up, down, FALSE);
-            if (firePressed) titleSelectPlayer = 0;
+            if (firePressed) { titleSelectPlayer = 0; MarkTitlePanelDirty(); }
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -5429,6 +5588,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
              * the J1 second button/RMB path handled by Intuition.
              */
             titleSelectPlayer = 0;
+            MarkTitlePanelDirty();
         } else if (id == 1) {
             TitlePlayer2Fire();
         }
@@ -5440,11 +5600,13 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     if (id == 0) {
         if (!titleTwoPlayerArmed || titlePlayer2Locked) {
             titleSelectPlayer = 0;
+            MarkTitlePanelDirty();
             if (left && !prevLeft[id]) TitleChooseVariant(0, -1);
             if (right && !prevRight[id]) TitleChooseVariant(0, 1);
         }
     } else if (titleTwoPlayerArmed && !titlePlayer2Locked) {
         titleSelectPlayer = 1;
+        MarkTitlePanelDirty();
         if (left && !prevLeft[id]) TitleChooseVariant(1, -1);
         if (right && !prevRight[id]) TitleChooseVariant(1, 1);
     }
@@ -5473,6 +5635,7 @@ static void PollJoysticks(void)
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
 
         if (firePressed || (gameState == GAME_TITLE && fire)) {
+            if (!joyEnabled[i] && gameState == GAME_TITLE) MarkTitleAllDirty();
             joyEnabled[i] = TRUE;
         }
 
@@ -5657,6 +5820,7 @@ static void CloseGameScreen(void)
     }
 
     FreeIntroTitleImage();
+    FreeTitleStaticCache();
     FreeTitleCarouselCache();
     FreeBoltCache();
     FreeRobotScaledCache();
@@ -5712,6 +5876,9 @@ int main(void)
     }
 
     gameState = introTitleBM ? GAME_INTRO : GAME_TITLE;
+    if (gameState == GAME_TITLE) {
+        PrepareTitlePresentation();
+    }
 
     while (running) {
         PollWindowMessages();
