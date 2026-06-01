@@ -201,7 +201,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BOLT_FIRE_AUDIO_CHANNEL 2
 #define PAULA_CLOCK_HZ 3546895UL
 #define ROUND_COUNTDOWN_SECONDS 3
-#define ROUND_COUNTDOWN_STEP_FRAMES 24
+#define ROUND_COUNTDOWN_STEP_FRAMES 12
 #define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
 #define ROUND_COUNTDOWN_TOTAL_FRAMES ROUND_COUNTDOWN_FRAMES
 #define ROUND_GO_FRAMES 24
@@ -4103,11 +4103,14 @@ static void DrawRoundStartOverlay(void)
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     if (roundCountdownTicks <= 0 && roundGoTicks <= 0) return;
 
-    if (roundCountdownTicks > 0) {
+    if (roundCountdownTicks <= 0) {
+        MiniTextCentered(&renderRP, (SCREEN_H - (5 * 6)) / 2, "GO", 10, 6);
+        return;
+    }
+
+    {
         WORD activeNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
         index = ROUND_COUNTDOWN_SECONDS - activeNumber;
-    } else {
-        index = ROUND_START_OVERLAY_COUNT - 1;
     }
 
     if (index < 0) index = 0;
@@ -4121,15 +4124,13 @@ static void DrawRoundStartOverlay(void)
         return;
     }
 
-    if (roundCountdownTicks > 0) {
+    {
         char digit[2];
         WORD activeNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
         digit[0] = (char)('0' + activeNumber);
         digit[1] = '\0';
         MiniTextCentered(&renderRP, 88, "GET-READY", 7, 3);
         MiniTextCentered(&renderRP, 116, digit, 10, 8);
-    } else {
-        MiniTextCentered(&renderRP, 110, "GO", 10, 6);
     }
 }
 
