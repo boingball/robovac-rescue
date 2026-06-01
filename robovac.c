@@ -33,6 +33,7 @@
 
 #include <exec/types.h>
 #include <exec/memory.h>
+#include <exec/execbase.h>
 #include <intuition/intuition.h>
 #include <graphics/rastport.h>
 #include <graphics/view.h>
@@ -173,7 +174,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define INTRO_SLICE_H 4
 #define INTRO_TOTAL_FRAMES (INTRO_HOLD_FRAMES + INTRO_EFFECT_FRAMES)
 #define TITLE_SPIN_STEPS 32
-#define TITLE_SPIN_STEPS_FALLBACK 16
+#define TITLE_SPIN_STEPS_LOW 16
 #define TITLE_ROT_W (ROBOT_W * TITLE_ROBOT_SCALE)
 #define TITLE_ROT_H (ROBOT_H * TITLE_ROBOT_SCALE)
 #define TITLE_COPPER_PEN 1
@@ -297,6 +298,11 @@ static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
 static WORD titleCarouselFrameCount = 0;
+static WORD titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
+static WORD titleSpinAdvanceDivisor = 1;
+static WORD titleSpinAdvanceCounter = 0;
+static const char *titleFxModeName = "normal";
+static const char *detectedCpuName = "unknown";
 static struct RastPort introTitleRP;
 static struct BitMap *introTitleBM = NULL;
 static WORD introTitleW = 0;
@@ -332,6 +338,69 @@ static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 static UWORD *audioSilenceWord = NULL;
+
+
+#ifndef AFF_68020
+#define AFF_68020 (1L << 1)
+#endif
+#ifndef AFF_68030
+#define AFF_68030 (1L << 2)
+#endif
+#ifndef AFF_68040
+#define AFF_68040 (1L << 3)
+#endif
+#ifndef AFF_68060
+#define AFF_68060 (1L << 7)
+#endif
+
+static void InitTitleEffectQuality(void)
+{
+    ULONG attnFlags = 0;
+
+    detectedCpuName = "unknown";
+    titleFxModeName = "low";
+    titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS_LOW;
+    titleSpinAdvanceDivisor = 2;
+    titleSpinAdvanceCounter = 0;
+
+    if (SysBase) {
+        attnFlags = SysBase->AttnFlags;
+        if (attnFlags & AFF_68060) {
+            detectedCpuName = "68060";
+            titleFxModeName = "high";
+            titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
+            titleSpinAdvanceDivisor = 1;
+        } else if (attnFlags & AFF_68040) {
+            detectedCpuName = "68040";
+            titleFxModeName = "high";
+            titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
+            titleSpinAdvanceDivisor = 1;
+        } else if (attnFlags & AFF_68030) {
+            detectedCpuName = "68030";
+            titleFxModeName = "normal";
+            titleCarouselDesiredFrameCount = TITLE_SPIN_STEPS;
+            titleSpinAdvanceDivisor = 1;
+        } else if (attnFlags & AFF_68020) {
+            detectedCpuName = "68020";
+        }
+    }
+
+    printf("Detected CPU: %s (AttnFlags=$%08lx); title FX: %s, %ld spin frames, advance every %ld frame(s)\n",
+           detectedCpuName,
+           (ULONG)attnFlags,
+           titleFxModeName,
+           (LONG)titleCarouselDesiredFrameCount,
+           (LONG)titleSpinAdvanceDivisor);
+}
+
+static void AdvanceTitleCarouselSpin(void)
+{
+    titleSpinAdvanceCounter++;
+    if (titleSpinAdvanceCounter >= titleSpinAdvanceDivisor) {
+        titleSpinAdvanceCounter = 0;
+        titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
+    }
+}
 
 enum AudioOwner {
     AUDIO_OWNER_NONE = 0,
@@ -2530,13 +2599,14 @@ static BOOL BuildTitleCarouselRotationCache(void)
 
     if (!robotCacheBM || !robotMaskBM) return FALSE;
 
-    if (!AllocTitleCarouselCache(TITLE_SPIN_STEPS)) {
-        if (!AllocTitleCarouselCache(TITLE_SPIN_STEPS_FALLBACK)) {
-            printf("Could not allocate title carousel rotation cache\n");
-            return FALSE;
-        }
-        printf("Using %ld title carousel rotation frames per robot\n", (LONG)titleCarouselFrameCount);
+    if (!AllocTitleCarouselCache(titleCarouselDesiredFrameCount)) {
+        printf("Could not allocate %ld-frame title carousel rotation cache\n",
+               (LONG)titleCarouselDesiredFrameCount);
+        return FALSE;
     }
+
+    printf("Using %ld title carousel rotation frames per robot (%s title FX)\n",
+           (LONG)titleCarouselFrameCount, titleFxModeName);
 
     InitRastPort(&maskRP);
     maskRP.BitMap = titleCarouselMaskBM;
@@ -3975,7 +4045,7 @@ static void DrawTitleCarousel(void)
     WORD slot;
     static const WORD slotX[ROBOT_VARIANTS] = {24, 64, 104, 144, 184, 224, 264};
 
-    titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
+    AdvanceTitleCarouselSpin();
 
     EnableTitleCopperGradient();
     DrawTitlePanelBase(TITLE_CAROUSEL_Y - 8, SCREEN_H - 1);
@@ -5432,6 +5502,8 @@ static BOOL OpenGameScreen(void)
     }
 
     LoadRGB4(&scr->ViewPort, palette, 32);
+
+    InitTitleEffectQuality();
 
     audioSilenceWord = (UWORD *)AllocMem(sizeof(UWORD), MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
     if (!audioSilenceWord) {
