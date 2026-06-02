@@ -24,7 +24,7 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
 
 ## Robot Super Powers
 
-Every robot tracks a five-dirt clean streak. Whenever a robot cleans its fifth dirt tile in that streak, it triggers the super power tied to that robot variant:
+Every robot tracks a clean streak toward the super power tied to that robot variant. Standard powers trigger every 5 dirt tiles. EMP blast and dirt bomb escalate after each use, requiring 5 dirt tiles for the first trigger, 15 for the second, and 30 for later triggers:
 
 - Dust Viper: double speed for 20 moves.
 - Crumb Comet: storm bolt for 10 moves, letting the robot zap nearby rivals.
