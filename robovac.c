@@ -3822,7 +3822,7 @@ static BOOL ValidDirtTile(WORD tx, WORD ty)
 {
     WORD i;
     if (map[ty][tx] != TILE_FLOOR) return FALSE;
-    for (i = 0; i < MAX_ROBOTS; i++) {
+    for (i = 0; i < robotCount; i++) {
         if (tx == RobotDockX(i) && ty == RobotDockY(i)) return FALSE;
     }
     return TRUE;
@@ -4003,7 +4003,8 @@ static void FinishRobotTileMove(WORD id)
     robots[id].py = TO_FP(ty * TILE_SIZE);
     robots[id].moving = FALSE;
 
-    if (robots[id].powerType != POWER_QUAD || robots[id].powerMovesLeft <= 0) {
+    if ((robots[id].powerType != POWER_QUAD || robots[id].powerMovesLeft <= 0) &&
+        (map[ty][tx] == TILE_WALL || map[ty][tx] == TILE_TABLE)) {
         MoveRobotToNearestFreeTile(id);
         tx = robots[id].tileX;
         ty = robots[id].tileY;
@@ -7002,10 +7003,10 @@ int main(void)
         PollWindowMessages();
         PollJoysticks();
         StepGame();
+        ServiceTitleMusicForState();
         DrawFrame();
         WaitTOF();
         PresentFrame();
-        ServiceTitleMusicForState();
     }
 
     CloseGameScreen();
