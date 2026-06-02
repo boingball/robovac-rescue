@@ -776,6 +776,7 @@ static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WOR
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id);
 static void AddDirtyBolt(struct Bolt *bolt);
 static void AddDirtyBoltAt(LONG px, LONG py);
+static void AddDirtyBossExplosionAt(WORD ticks);
 static void AddDirtyEmpRobotVisualAt(WORD sx, WORD sy);
 static void AddDirtyEmpRobotVisual(WORD id);
 static void MarkDirtyEmpRobotVisuals(void);
@@ -1082,6 +1083,21 @@ static void AddDirtyBolt(struct Bolt *bolt)
     AddDirtyBoltAt(bolt->px, bolt->py);
 }
 
+static void AddDirtyBossExplosionAt(WORD ticks)
+{
+    WORD spread;
+    WORD centerX;
+    WORD centerY;
+
+    if (gameState != GAME_BONUS_PLAYING || ticks <= 0) return;
+
+    spread = (BONUS_BOSS_EXPLOSION_TICKS - ticks) / 2;
+    centerX = bonusBossExplosionX + ((ROBOT_W * BONUS_BOSS_SCALE) / 2) - (ROBOT_W / 2);
+    centerY = bonusBossExplosionY + ((ROBOT_H * BONUS_BOSS_SCALE) / 2) - (ROBOT_H / 2);
+    AddDirtyRect(centerX - spread - 2, centerY - spread - 2,
+                 ROBOT_W + (spread * 2) + 4, ROBOT_H + (spread * 2) + 4);
+}
+
 static void AddDirtyEmpRobotVisualAt(WORD sx, WORD sy)
 {
     struct DirtyRect rect;
@@ -1203,9 +1219,8 @@ static void MarkDirtyBossArea(void)
     if (gameState != GAME_BONUS_PLAYING) return;
     if (dirtyPrevBossHealth > 0) AddDirtyRect(dirtyPrevBossX - 8, dirtyPrevBossY - 8, bossW + 16, bossH + 16);
     if (bonusBossHealth > 0) AddDirtyRect(bonusBossX - 8, bonusBossY - 8, bossW + 16, bossH + 16);
-    if (dirtyPrevBossExplosionTicks > 0 || bonusBossExplosionTicks > 0) {
-        AddDirtyRect(0, HUD_H, SCREEN_W, SCREEN_H - HUD_H);
-    }
+    AddDirtyBossExplosionAt(dirtyPrevBossExplosionTicks);
+    AddDirtyBossExplosionAt(bonusBossExplosionTicks);
     dirtyPrevBossX = bonusBossX;
     dirtyPrevBossY = bonusBossY;
     dirtyPrevBossExplosionTicks = bonusBossExplosionTicks;
@@ -1222,7 +1237,7 @@ static void BeginGameplayDirtyRects(void)
 
     ClearDirtyRects();
 
-    if (roundCountdownTicks > 0 || pauseMenuOpen || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) {
+    if (roundCountdownTicks > 0 || pauseMenuOpen) {
         ForceGameplayFullPresent();
     }
 
@@ -1279,7 +1294,7 @@ static void FinishGameplayDirtyRects(void)
     MarkDirtyEmpOverlay();
     MarkDirtyHudIfChanged();
 
-    if (roundCountdownTicks > 0 || pauseMenuOpen || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) ForceGameplayFullPresent();
+    if (roundCountdownTicks > 0 || pauseMenuOpen) ForceGameplayFullPresent();
 }
 #endif
 
@@ -5336,6 +5351,29 @@ static BOOL BonusBossIntersectsRect(struct DirtyRect *rect)
     return RectIntersects(rect->x, rect->y, rect->w, rect->h, 80, 36, 160, 14);
 }
 
+static BOOL BonusBossExplosionIntersectsRect(struct DirtyRect *rect)
+{
+    WORD spread;
+    WORD centerX;
+    WORD centerY;
+    WORD left;
+    WORD top;
+    WORD sizeW;
+    WORD sizeH;
+
+    if (!rect || gameState != GAME_BONUS_PLAYING || bonusBossExplosionTicks <= 0) return FALSE;
+
+    spread = (BONUS_BOSS_EXPLOSION_TICKS - bonusBossExplosionTicks) / 2;
+    centerX = bonusBossExplosionX + ((ROBOT_W * BONUS_BOSS_SCALE) / 2) - (ROBOT_W / 2);
+    centerY = bonusBossExplosionY + ((ROBOT_H * BONUS_BOSS_SCALE) / 2) - (ROBOT_H / 2);
+    left = centerX - spread - 2;
+    top = centerY - spread - 2;
+    sizeW = ROBOT_W + (spread * 2) + 4;
+    sizeH = ROBOT_H + (spread * 2) + 4;
+
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h, left, top, sizeW, sizeH);
+}
+
 static BOOL RoundGoOverlayIntersectsRect(struct DirtyRect *rect)
 {
     if (!rect || roundGoTicks <= 0 || roundCountdownTicks > 0) return FALSE;
@@ -5385,6 +5423,7 @@ static void DrawGameplayDirtyRects(void)
         DrawHudIfDirty(&rect);
         DrawRobotsIntersectingRect(&rect);
         DrawBoltsIntersectingRect(&rect);
+        if (BonusBossExplosionIntersectsRect(&rect)) DrawBossExplosion();
         if (BonusBossIntersectsRect(&rect)) DrawBonusBoss();
         DrawGameplayDirtyOverlays(&rect);
     }
@@ -5504,7 +5543,6 @@ static BOOL DirtyGameplayRectsReady(void)
     if (dirtyRectCount <= 0) return FALSE;
     if (dirtyForceFullFrame) return FALSE;
     if (roundCountdownTicks > 0 || pauseMenuOpen) return FALSE;
-    if (bonusBossExplosionTicks > 0) return FALSE;
     return TRUE;
 }
 
