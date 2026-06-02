@@ -66,6 +66,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define SCREEN_H    256
 #define DEPTH       5
 
+#ifndef USE_DIRTY_RECTS
+#define USE_DIRTY_RECTS 1
+#endif
+
 #define TILE_SIZE   16
 #define MAP_W       20
 #define MAP_H       14
@@ -4809,6 +4813,40 @@ static void DrawFrame(void)
     }
 }
 
+static void PresentFullFrame(void)
+{
+    BltBitMap(renderBM, 0, 0,
+              scr->RastPort.BitMap, 0, 0,
+              SCREEN_W, SCREEN_H,
+              0xC0, 0xFF, NULL);
+}
+
+#if USE_DIRTY_RECTS
+static BOOL DirtyGameplayRectsReady(void)
+{
+    /*
+     * Dirty gameplay rect collection is presentation-only.  If a frame has
+     * not produced a complete rect set by the time the stable WaitTOF-paced
+     * loop reaches presentation, the frame is still presented exactly once by
+     * falling back to the same full-frame blit used by stable main.  This keeps
+     * StepGame() on the one-tick-per-TOF cadence instead of letting the dirty
+     * renderer skip, replay, or add simulation ticks while waiting for rects.
+     */
+    return FALSE;
+}
+
+static void PresentDirtyGameplayFrame(void)
+{
+    if (!DirtyGameplayRectsReady()) {
+        PresentFullFrame();
+        return;
+    }
+
+    /* The gameplay dirty-rect renderer can blit its complete rect set here. */
+    PresentFullFrame();
+}
+#endif
+
 static void PresentFrame(void)
 {
     WORD dirtyTop;
@@ -4822,10 +4860,16 @@ static void PresentFrame(void)
         return;
     }
 
-    BltBitMap(renderBM, 0, 0,
-              scr->RastPort.BitMap, 0, 0,
-              SCREEN_W, SCREEN_H,
-              0xC0, 0xFF, NULL);
+#if USE_DIRTY_RECTS
+    if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+        PresentDirtyGameplayFrame();
+    } else {
+        PresentFullFrame();
+    }
+#else
+    PresentFullFrame();
+#endif
+
     if (gameState == GAME_TITLE) {
         titleFullPresentPending = FALSE;
     }
