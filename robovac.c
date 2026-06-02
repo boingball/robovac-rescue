@@ -140,6 +140,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TILE_CLEAN     6
 #define TILE_MARKER    7
 #define TILE_COUNT     8
+#define WALL_ROTATION_COUNT 4
+#define TILE_CACHE_COUNT (TILE_COUNT + WALL_ROTATION_COUNT)
 
 #define GAME_INTRO      0
 #define GAME_TITLE      1
@@ -2105,10 +2107,53 @@ static BOOL LoadTileSheetIntoCache(void)
     return TRUE;
 }
 
+static void BuildWallRotationsInCache(void)
+{
+    WORD srcBaseX = TILE_WALL * TILE_SIZE;
+    UBYTE rot;
+
+    for (rot = 0; rot < WALL_ROTATION_COUNT; rot++) {
+        WORD dstBaseX = (TILE_COUNT + rot) * TILE_SIZE;
+        WORD x;
+        WORD y;
+
+        if (rot == 0) {
+            BltBitMap(tileCacheBM, srcBaseX, 0,
+                      tileCacheBM, dstBaseX, 0,
+                      TILE_SIZE, TILE_SIZE,
+                      0xC0, 0xFF, NULL);
+            continue;
+        }
+
+        for (y = 0; y < TILE_SIZE; y++) {
+            for (x = 0; x < TILE_SIZE; x++) {
+                WORD sx;
+                WORD sy;
+                LONG pen;
+
+                if (rot == 1) {
+                    sx = y;
+                    sy = TILE_SIZE - 1 - x;
+                } else if (rot == 2) {
+                    sx = TILE_SIZE - 1 - x;
+                    sy = TILE_SIZE - 1 - y;
+                } else {
+                    sx = TILE_SIZE - 1 - y;
+                    sy = x;
+                }
+
+                pen = ReadPixel(&tileRP, srcBaseX + sx, sy);
+                SetAPen(&tileRP, (UBYTE)pen);
+                WritePixel(&tileRP, dstBaseX + x, y);
+            }
+        }
+    }
+}
+
 static BOOL InitTileCache(void)
 {
     UBYTE i;
-    tileCacheBM = AllocBitMap(TILE_SIZE * TILE_COUNT, TILE_SIZE, DEPTH,
+    tileCacheBM = AllocBitMap(TILE_SIZE * TILE_CACHE_COUNT, TILE_SIZE, DEPTH,
                               BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
     if (!tileCacheBM) {
         printf("Could not allocate tile cache bitmap\n");
@@ -2123,6 +2168,8 @@ static BOOL InitTileCache(void)
             DrawTileIntoCache(i);
         }
     }
+
+    BuildWallRotationsInCache();
 
     return TRUE;
 }
@@ -2162,43 +2209,17 @@ static UBYTE GetWallRotation(WORD tx, WORD ty)
 
 static void BlitWallRotatedTo(struct RastPort *rp, WORD tx, WORD ty)
 {
-    WORD srcX = TILE_WALL * TILE_SIZE;
+    UBYTE rot = GetWallRotation(tx, ty);
+    WORD srcX = (TILE_COUNT + rot) * TILE_SIZE;
     WORD dstX = MAP_X + tx * TILE_SIZE;
     WORD dstY = MAP_Y + ty * TILE_SIZE;
-    UBYTE rot = GetWallRotation(tx, ty);
-    WORD x;
-    WORD y;
 
-    if (rot == 0) {
-        BltBitMapRastPort(tileCacheBM, srcX, 0,
-                          rp, dstX, dstY,
-                          TILE_SIZE, TILE_SIZE,
-                          0xC0);
-        return;
-    }
+    if (!tileCacheBM) return;
 
-    for (y = 0; y < TILE_SIZE; y++) {
-        for (x = 0; x < TILE_SIZE; x++) {
-            WORD sx = x;
-            WORD sy = y;
-            WORD px;
-
-            if (rot == 1) {
-                sx = y;
-                sy = TILE_SIZE - 1 - x;
-            } else if (rot == 2) {
-                sx = TILE_SIZE - 1 - x;
-                sy = TILE_SIZE - 1 - y;
-            } else {
-                sx = TILE_SIZE - 1 - y;
-                sy = x;
-            }
-
-            px = ReadPixel(&tileRP, srcX + sx, sy);
-            SetAPen(rp, (UBYTE)px);
-            WritePixel(rp, dstX + x, dstY + y);
-        }
-    }
+    BltBitMapRastPort(tileCacheBM, srcX, 0,
+                      rp, dstX, dstY,
+                      TILE_SIZE, TILE_SIZE,
+                      0xC0);
 }
 
 static void UpdateRoomTile(WORD tx, WORD ty)
