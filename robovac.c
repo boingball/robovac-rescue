@@ -446,6 +446,10 @@ static UBYTE audioChannelOwner[4] = {
     AUDIO_OWNER_NONE, AUDIO_OWNER_NONE, AUDIO_OWNER_NONE, AUDIO_OWNER_NONE
 };
 
+struct DirtPos { WORD x, y; };
+static struct DirtPos dirtList[MAP_W * MAP_H];
+static WORD dirtListCount = 0;
+static BOOL dirtListValid = FALSE;
 static WORD dirtLeft = 0;
 static WORD moves = 0;
 static WORD maxBattery = 110;
@@ -1307,20 +1311,92 @@ static void PutText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pe
     Text(rp, (STRPTR)s, strlen(s));
 }
 
-static void CountDirt(void)
+static void RebuildDirtList(void)
 {
     WORD x;
     WORD y;
 
-    dirtLeft = 0;
+    dirtListCount = 0;
 
     for (y = 0; y < MAP_H; y++) {
         for (x = 0; x < MAP_W; x++) {
             if (map[y][x] == TILE_DIRT) {
-                dirtLeft++;
+                if (dirtListCount < MAP_W * MAP_H) {
+                    dirtList[dirtListCount].x = x;
+                    dirtList[dirtListCount].y = y;
+                    dirtListCount++;
+                }
             }
         }
     }
+
+    dirtLeft = dirtListCount;
+    dirtListValid = TRUE;
+}
+
+static void CountDirt(void)
+{
+    RebuildDirtList();
+}
+
+static void ClearDirtList(void)
+{
+    dirtListCount = 0;
+    dirtLeft = 0;
+    dirtListValid = TRUE;
+}
+
+static void EnsureDirtListValid(void)
+{
+    if (!dirtListValid || dirtListCount != dirtLeft) {
+        RebuildDirtList();
+    }
+}
+
+static void AddDirtListTile(WORD x, WORD y)
+{
+    if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H || map[y][x] != TILE_DIRT) {
+        RebuildDirtList();
+        return;
+    }
+
+    if (!dirtListValid) {
+        RebuildDirtList();
+        return;
+    }
+
+    if (dirtListCount >= MAP_W * MAP_H) {
+        RebuildDirtList();
+        return;
+    }
+
+    dirtList[dirtListCount].x = x;
+    dirtList[dirtListCount].y = y;
+    dirtListCount++;
+    dirtLeft = dirtListCount;
+}
+
+static void RemoveDirtListTile(WORD x, WORD y)
+{
+    WORD i;
+
+    if (!dirtListValid) {
+        RebuildDirtList();
+        return;
+    }
+
+    for (i = 0; i < dirtListCount; i++) {
+        if (dirtList[i].x == x && dirtList[i].y == y) {
+            dirtListCount--;
+            if (i != dirtListCount) {
+                dirtList[i] = dirtList[dirtListCount];
+            }
+            dirtLeft = dirtListCount;
+            return;
+        }
+    }
+
+    RebuildDirtList();
 }
 
 static BOOL IsBlocked(WORD tx, WORD ty)
@@ -3603,7 +3679,7 @@ static WORD CleanTileForRobot(WORD id, WORD tx, WORD ty)
     if (map[ty][tx] != TILE_DIRT) return 0;
 
     map[ty][tx] = TILE_FLOOR;
-    if (dirtLeft > 0) dirtLeft--;
+    RemoveDirtListTile(tx, ty);
     robots[id].score++;
     UpdateRoomTile(tx, ty);
     return 1;
@@ -3741,12 +3817,13 @@ static WORD SpawnDirtTiles(WORD count)
         WORD y = 1 + RandRange(MAP_H - 2);
         if (ValidDirtTile(x, y) && !RobotAtTile(x, y, -1)) {
             map[y][x] = TILE_DIRT;
+            AddDirtListTile(x, y);
             UpdateRoomTile(x, y);
             placed++;
         }
         tries++;
     }
-    if (placed > 0) CountDirt();
+    if (placed > 0) EnsureDirtListValid();
     return placed;
 }
 
@@ -3758,6 +3835,7 @@ static void SpawnRoundDirt(WORD count)
         WORD y = 1 + RandRange(MAP_H - 2);
         if (ValidDirtTile(x, y)) {
             map[y][x] = TILE_DIRT;
+            AddDirtListTile(x, y);
             placed++;
         }
         tries++;
@@ -3793,6 +3871,7 @@ static void ResetLevel(void)
     map[11][1] = TILE_DOCK;
     map[11][18] = TILE_DOCK;
 
+    ClearDirtList();
     SpawnRoundDirt(roundDirtTargets[roundIndex]);
     ClearMovementKeys();
     { WORD bi; for (bi = 0; bi < MAX_ROBOTS; bi++) playerBolts[bi].active = FALSE; }
@@ -3996,15 +4075,25 @@ static void ChooseAiMove(WORD id)
     curY = robots[id].tileY;
 
     if (bestX < 0) {
-        for (y = 0; y < MAP_H; y++) {
-            for (x = 0; x < MAP_W; x++) {
-                if (map[y][x] == TILE_DIRT) {
-                    WORD d = AbsW(x - curX) + AbsW(y - curY);
-                    if (d < bestDist) {
-                        bestDist = d;
-                        bestX = x;
-                        bestY = y;
-                    }
+        WORD i;
+        EnsureDirtListValid();
+        for (i = 0; i < dirtListCount; i++) {
+            x = dirtList[i].x;
+            y = dirtList[i].y;
+            if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H || map[y][x] != TILE_DIRT) {
+                RebuildDirtList();
+                bestX = -1;
+                bestY = -1;
+                bestDist = 9999;
+                i = -1;
+                continue;
+            }
+            {
+                WORD d = AbsW(x - curX) + AbsW(y - curY);
+                if (d < bestDist) {
+                    bestDist = d;
+                    bestX = x;
+                    bestY = y;
                 }
             }
         }
