@@ -576,6 +576,10 @@ static WORD dirtyPrevStunTicks[MAX_ROBOTS];
 static WORD dirtyPrevPowerMoves[MAX_ROBOTS];
 static UBYTE dirtyPrevPowerType[MAX_ROBOTS];
 static WORD dirtyPrevLastPowerTicks = -1;
+static WORD dirtyPrevEmpCountdown[MAX_ROBOTS];
+static WORD dirtyPrevEmpScreenX[MAX_ROBOTS];
+static WORD dirtyPrevEmpScreenY[MAX_ROBOTS];
+static BOOL dirtyPrevEmpVisible[MAX_ROBOTS];
 static WORD dirtyPrevEmpTicks = -1;
 static WORD dirtyPrevRoundGoTicks = -1;
 static WORD dirtyPrevCountdownTicks = -1;
@@ -722,9 +726,15 @@ static BOOL ActivateSpaceOrFireAction(void);
 static BOOL EnableTitleCopperGradient(void);
 static void DrawTitleCarousel(void);
 static void DrawHud(void);
+static WORD EmpRobotCountdownNumber(WORD id);
+static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect);
+static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect);
+static void DrawEmpRobotVisual(WORD id);
+static void DrawEmpRobotVisuals(void);
 static void MarkTitlePanelDirty(void);
 static void MarkTitleAllDirty(void);
 static void PrepareTitlePresentation(void);
+static WORD MiniTextWidth(const char *s, WORD scale);
 static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen);
 static void TriggerRobotPower(WORD id);
 static WORD NextPowerCleanTarget(WORD useCount);
@@ -764,9 +774,13 @@ static void ClearDirtyRects(void);
 static void AddDirtyRect(WORD x, WORD y, WORD w, WORD h);
 static void AddDirtyTile(WORD tx, WORD ty);
 static void AddDirtyRobot(WORD id);
+static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WORD *w, WORD *h);
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id);
 static void AddDirtyBolt(struct Bolt *bolt);
 static void AddDirtyBoltAt(LONG px, LONG py);
+static void AddDirtyEmpRobotVisualAt(WORD sx, WORD sy);
+static void AddDirtyEmpRobotVisual(WORD id);
+static void MarkDirtyEmpRobotVisuals(void);
 static BOOL RectIntersects(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh);
 static BOOL DirtyGameplayRectsReady(void);
 static void RestoreDirtyRectFromRoom(struct DirtyRect *rect);
@@ -989,15 +1003,68 @@ static void AddDirtyTile(WORD tx, WORD ty)
     AddDirtyRect(MAP_X + tx * TILE_SIZE, MAP_Y + ty * TILE_SIZE, TILE_SIZE, TILE_SIZE);
 }
 
+static BOOL RobotDirtyBoundsUseQuad(WORD id)
+{
+    if (id < 0 || id >= robotCount) return FALSE;
+
+    if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) return TRUE;
+
+    if (dirtyPrevRobotValid[id] &&
+        dirtyPrevPowerType[id] == POWER_QUAD &&
+        dirtyPrevPowerMoves[id] > 0) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WORD *w, WORD *h)
+{
+    WORD sx = MAP_X + FP_TO_INT(px);
+    WORD sy = MAP_Y + FP_TO_INT(py);
+    WORD left;
+    WORD top;
+    WORD right;
+    WORD bottom;
+    const WORD margin = 2;
+
+    if (RobotDirtyBoundsUseQuad(id)) {
+        left = sx - (ROBOT_W / 2);
+        top = sy - (ROBOT_H / 2);
+        right = left + ROBOT_SCALE2_W;
+        bottom = top + ROBOT_SCALE2_H;
+
+        if (sx < left) left = sx;
+        if (sy + 21 < top) top = sy + 21;
+        if (sx + 24 > right) right = sx + 24;
+        if (sy + 25 > bottom) bottom = sy + 25;
+    } else {
+        left = sx;
+        top = sy;
+        right = sx + ROBOT_W;
+        bottom = sy + ROBOT_H;
+
+        if (sx + 4 < left) left = sx + 4;
+        if (sy + 13 < top) top = sy + 13;
+        if (sx + 13 > right) right = sx + 13;
+        if (sy + 15 > bottom) bottom = sy + 15;
+    }
+
+    *x = left - margin;
+    *y = top - margin;
+    *w = (right - left) + (margin * 2);
+    *h = (bottom - top) + (margin * 2);
+}
+
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id)
 {
-    WORD x = MAP_X + FP_TO_INT(px);
-    WORD y = MAP_Y + FP_TO_INT(py);
-    WORD w = ROBOT_SCALE2_W;
-    WORD h = ROBOT_SCALE2_H;
+    WORD x;
+    WORD y;
+    WORD w;
+    WORD h;
 
-    (void)id;
-    AddDirtyRect(x - 2, y - 8, w + 4, h + 12);
+    GetRobotDirtyBounds(px, py, id, &x, &y, &w, &h);
+    AddDirtyRect(x, y, w, h);
 }
 
 static void AddDirtyRobot(WORD id)
@@ -1015,6 +1082,55 @@ static void AddDirtyBolt(struct Bolt *bolt)
 {
     if (!bolt || !bolt->active) return;
     AddDirtyBoltAt(bolt->px, bolt->py);
+}
+
+static void AddDirtyEmpRobotVisualAt(WORD sx, WORD sy)
+{
+    struct DirtyRect rect;
+
+    GetEmpRobotVisualRectFromScreen(sx, sy, &rect);
+    if (rect.w > 0 && rect.h > 0) AddDirtyRect(rect.x, rect.y, rect.w, rect.h);
+}
+
+static void AddDirtyEmpRobotVisual(WORD id)
+{
+    struct DirtyRect rect;
+
+    if (!GetEmpRobotVisualRect(id, &rect)) return;
+    AddDirtyRect(rect.x, rect.y, rect.w, rect.h);
+}
+
+static void MarkDirtyEmpRobotVisuals(void)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        WORD countdown = EmpRobotCountdownNumber(i);
+        WORD sx = MAP_X + FP_TO_INT(robots[i].px);
+        WORD sy = MAP_Y + FP_TO_INT(robots[i].py);
+
+        if (dirtyPrevEmpVisible[i]) {
+            AddDirtyEmpRobotVisualAt(dirtyPrevEmpScreenX[i], dirtyPrevEmpScreenY[i]);
+        }
+        if (countdown > 0) {
+            if (dirtyPrevEmpCountdown[i] != countdown) {
+                AddDirtyEmpRobotVisualAt(sx, sy);
+            }
+            AddDirtyEmpRobotVisual(i);
+        }
+
+        dirtyPrevEmpVisible[i] = countdown > 0;
+        dirtyPrevEmpCountdown[i] = countdown;
+        dirtyPrevEmpScreenX[i] = sx;
+        dirtyPrevEmpScreenY[i] = sy;
+    }
+    for (i = robotCount; i < MAX_ROBOTS; i++) {
+        if (dirtyPrevEmpVisible[i]) {
+            AddDirtyEmpRobotVisualAt(dirtyPrevEmpScreenX[i], dirtyPrevEmpScreenY[i]);
+        }
+        dirtyPrevEmpVisible[i] = FALSE;
+        dirtyPrevEmpCountdown[i] = 0;
+    }
 }
 
 static void ForceGameplayFullPresent(void)
@@ -5127,25 +5243,12 @@ static BOOL RobotIntersectsRect(WORD id, struct DirtyRect *rect)
 {
     WORD x;
     WORD y;
-    WORD w = ROBOT_SCALE2_W + 4;
-    WORD h = ROBOT_SCALE2_H + 12;
+    WORD w;
+    WORD h;
 
     if (!rect || id < 0 || id >= robotCount) return FALSE;
-    x = MAP_X + FP_TO_INT(robots[id].px) - 2;
-    y = MAP_Y + FP_TO_INT(robots[id].py) - 8;
+    GetRobotDirtyBounds(robots[id].px, robots[id].py, id, &x, &y, &w, &h);
     return RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, w, h);
-}
-
-static BOOL StunCountdownIntersectsRect(WORD id, struct DirtyRect *rect)
-{
-    WORD sx;
-    WORD sy;
-
-    if (!rect || id < 0 || id >= robotCount || robots[id].stunTicks <= 0) return FALSE;
-    sx = MAP_X + FP_TO_INT(robots[id].px) + 6;
-    sy = MAP_Y + FP_TO_INT(robots[id].py) - 6;
-    if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[id].py) + 2;
-    return RectIntersects(rect->x, rect->y, rect->w, rect->h, sx, sy, 8, 6);
 }
 
 static void DrawRobotsIntersectingRect(struct DirtyRect *rect)
@@ -5340,7 +5443,6 @@ static void DrawFrame(void)
     for (i = 0; i < humanPlayers; i++) {
         DrawRobotBob(i);
     }
-    DrawStunCountdowns();
     for (i = 0; i < robotCount; i++) {
         DrawPlayerBolt(i);
     }
@@ -5348,8 +5450,8 @@ static void DrawFrame(void)
     DrawBossBolts();
     DrawBossExplosion();
     DrawBonusBoss();
-    DrawEmpCountdown();
     DrawRoundStartOverlay();
+    DrawEmpRobotVisuals();
 
     if (pauseMenuOpen) {
         DrawPauseMenu();
