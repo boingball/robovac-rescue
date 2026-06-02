@@ -221,6 +221,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROUND_COUNTDOWN_FRAMES (ROUND_COUNTDOWN_SECONDS * ROUND_COUNTDOWN_STEP_FRAMES)
 #define ROUND_COUNTDOWN_TOTAL_FRAMES ROUND_COUNTDOWN_FRAMES
 #define ROUND_GO_FRAMES 24
+#define ROUND_GO_TEXT_SCALE 6
+#define ROUND_GO_TEXT_W (2 * 4 * ROUND_GO_TEXT_SCALE)
+#define ROUND_GO_TEXT_H (5 * ROUND_GO_TEXT_SCALE)
+#define ROUND_GO_TEXT_LEFT ((SCREEN_W - ROUND_GO_TEXT_W) / 2)
+#define ROUND_GO_TEXT_TOP ((SCREEN_H - ROUND_GO_TEXT_H) / 2)
 #define ROUND_START_OVERLAY_LEFT 44
 #define ROUND_START_OVERLAY_TOP 66
 #define ROUND_START_OVERLAY_W 233
@@ -1207,8 +1212,8 @@ static void MarkDirtyHudIfChanged(void)
 static void MarkDirtyRoundGoOverlay(void)
 {
     if (roundGoTicks > 0 || dirtyPrevRoundGoTicks > 0) {
-        AddDirtyRect(ROUND_START_OVERLAY_LEFT, ROUND_START_OVERLAY_TOP,
-                     ROUND_START_OVERLAY_W, ROUND_START_OVERLAY_H);
+        AddDirtyRect(ROUND_GO_TEXT_LEFT, ROUND_GO_TEXT_TOP,
+                     ROUND_GO_TEXT_W, ROUND_GO_TEXT_H);
     }
 }
 
@@ -5244,7 +5249,8 @@ static void DrawRoundStartOverlay(void)
     if (roundCountdownTicks <= 0 && roundGoTicks <= 0) return;
 
     if (roundCountdownTicks <= 0) {
-        MiniTextCentered(&renderRP, (SCREEN_H - (5 * 6)) / 2, "GO", 10, 6);
+        MiniTextScaled(&renderRP, ROUND_GO_TEXT_LEFT, ROUND_GO_TEXT_TOP,
+                       "GO", 10, ROUND_GO_TEXT_SCALE);
         return;
     }
 
@@ -5488,8 +5494,8 @@ static BOOL RoundGoOverlayIntersectsRect(struct DirtyRect *rect)
 {
     if (!rect || roundGoTicks <= 0 || roundCountdownTicks > 0) return FALSE;
     return RectIntersects(rect->x, rect->y, rect->w, rect->h,
-                          ROUND_START_OVERLAY_LEFT, ROUND_START_OVERLAY_TOP,
-                          ROUND_START_OVERLAY_W, ROUND_START_OVERLAY_H);
+                          ROUND_GO_TEXT_LEFT, ROUND_GO_TEXT_TOP,
+                          ROUND_GO_TEXT_W, ROUND_GO_TEXT_H);
 }
 
 static BOOL EmpRobotVisualIntersectsRect(WORD id, struct DirtyRect *rect)
