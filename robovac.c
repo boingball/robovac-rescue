@@ -224,6 +224,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROUND_START_OVERLAY_W 233
 #define ROUND_START_OVERLAY_H 115
 #define ROUND_START_OVERLAY_COUNT 4
+#define EMP_COUNTDOWN_LEFT 106
+#define EMP_COUNTDOWN_TOP 50
+#define EMP_COUNTDOWN_W 109
+#define EMP_COUNTDOWN_H 33
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -1025,8 +1029,7 @@ static void MarkDirtyHudIfChanged(void)
     BOOL changed = FALSE;
 
     if (dirtyPrevDirtLeft != dirtLeft || dirtyPrevMoves != moves ||
-        dirtyPrevLastPowerTicks != lastPowerTicks || dirtyPrevEmpTicks != empCountdownTicks ||
-        dirtyPrevRoundGoTicks != roundGoTicks || dirtyPrevCountdownTicks != roundCountdownTicks ||
+        dirtyPrevLastPowerTicks != lastPowerTicks || dirtyPrevCountdownTicks != roundCountdownTicks ||
         dirtyPrevRobotCount != robotCount ||
         (gameState == GAME_BONUS_PLAYING && dirtyPrevBossHealth != bonusBossHealth)) {
         changed = TRUE;
@@ -1065,6 +1068,22 @@ static void MarkDirtyHudIfChanged(void)
     }
 }
 
+static void MarkDirtyRoundGoOverlay(void)
+{
+    if (roundGoTicks > 0 || dirtyPrevRoundGoTicks > 0) {
+        AddDirtyRect(ROUND_START_OVERLAY_LEFT, ROUND_START_OVERLAY_TOP,
+                     ROUND_START_OVERLAY_W, ROUND_START_OVERLAY_H);
+    }
+}
+
+static void MarkDirtyEmpOverlay(void)
+{
+    if (empCountdownTicks > 0 || dirtyPrevEmpTicks > 0) {
+        AddDirtyRect(EMP_COUNTDOWN_LEFT, EMP_COUNTDOWN_TOP,
+                     EMP_COUNTDOWN_W, EMP_COUNTDOWN_H);
+    }
+}
+
 static void MarkDirtyBossArea(void)
 {
     WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
@@ -1073,7 +1092,7 @@ static void MarkDirtyBossArea(void)
     if (gameState != GAME_BONUS_PLAYING) return;
     if (dirtyPrevBossHealth > 0) AddDirtyRect(dirtyPrevBossX - 8, dirtyPrevBossY - 8, bossW + 16, bossH + 16);
     if (bonusBossHealth > 0) AddDirtyRect(bonusBossX - 8, bonusBossY - 8, bossW + 16, bossH + 16);
-    if (dirtyPrevBossExplosionTicks > 0 || bonusBossExplosionTicks > 0 || empCountdownTicks > 0 || dirtyPrevEmpTicks > 0) {
+    if (dirtyPrevBossExplosionTicks > 0 || bonusBossExplosionTicks > 0) {
         AddDirtyRect(0, HUD_H, SCREEN_W, SCREEN_H - HUD_H);
     }
     dirtyPrevBossX = bonusBossX;
@@ -1092,9 +1111,12 @@ static void BeginGameplayDirtyRects(void)
 
     ClearDirtyRects();
 
-    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen || empCountdownTicks > 0 || dirtyPrevEmpTicks > 0 || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) {
+    if (roundCountdownTicks > 0 || pauseMenuOpen || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) {
         ForceGameplayFullPresent();
     }
+
+    MarkDirtyRoundGoOverlay();
+    MarkDirtyEmpOverlay();
 
     for (i = 0; i < robotCount; i++) {
         if (dirtyPrevRobotValid[i]) AddDirtyRobotAt(dirtyPrevRobotPx[i], dirtyPrevRobotPy[i], i);
@@ -1142,9 +1164,11 @@ static void FinishGameplayDirtyRects(void)
     }
 
     MarkDirtyBossArea();
+    MarkDirtyRoundGoOverlay();
+    MarkDirtyEmpOverlay();
     MarkDirtyHudIfChanged();
 
-    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen || empCountdownTicks > 0 || dirtyPrevEmpTicks > 0 || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) ForceGameplayFullPresent();
+    if (roundCountdownTicks > 0 || pauseMenuOpen || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) ForceGameplayFullPresent();
 }
 #endif
 
@@ -4993,11 +5017,17 @@ static void DrawEmpCountdown(void)
     snprintf(b, sizeof(b), "EMP %d", secondsLeft);
 
     SetAPen(&renderRP, 1);
-    RectFill(&renderRP, 106, 50, 214, 82);
+    RectFill(&renderRP, EMP_COUNTDOWN_LEFT, EMP_COUNTDOWN_TOP,
+             EMP_COUNTDOWN_LEFT + EMP_COUNTDOWN_W - 1,
+             EMP_COUNTDOWN_TOP + EMP_COUNTDOWN_H - 1);
     SetAPen(&renderRP, 12);
-    RectFill(&renderRP, 108, 52, 212, 80);
+    RectFill(&renderRP, EMP_COUNTDOWN_LEFT + 2, EMP_COUNTDOWN_TOP + 2,
+             EMP_COUNTDOWN_LEFT + EMP_COUNTDOWN_W - 3,
+             EMP_COUNTDOWN_TOP + EMP_COUNTDOWN_H - 3);
     SetAPen(&renderRP, 0);
-    RectFill(&renderRP, 110, 54, 210, 78);
+    RectFill(&renderRP, EMP_COUNTDOWN_LEFT + 4, EMP_COUNTDOWN_TOP + 4,
+             EMP_COUNTDOWN_LEFT + EMP_COUNTDOWN_W - 5,
+             EMP_COUNTDOWN_TOP + EMP_COUNTDOWN_H - 5);
     MiniTextCentered(&renderRP, 60, b, 14, 3);
 }
 
@@ -5181,6 +5211,28 @@ static BOOL BonusBossIntersectsRect(struct DirtyRect *rect)
     return RectIntersects(rect->x, rect->y, rect->w, rect->h, 80, 36, 160, 14);
 }
 
+static BOOL RoundGoOverlayIntersectsRect(struct DirtyRect *rect)
+{
+    if (!rect || roundGoTicks <= 0 || roundCountdownTicks > 0) return FALSE;
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h,
+                          ROUND_START_OVERLAY_LEFT, ROUND_START_OVERLAY_TOP,
+                          ROUND_START_OVERLAY_W, ROUND_START_OVERLAY_H);
+}
+
+static BOOL EmpOverlayIntersectsRect(struct DirtyRect *rect)
+{
+    if (!rect || empCountdownTicks <= 0) return FALSE;
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h,
+                          EMP_COUNTDOWN_LEFT, EMP_COUNTDOWN_TOP,
+                          EMP_COUNTDOWN_W, EMP_COUNTDOWN_H);
+}
+
+static void DrawGameplayDirtyOverlays(struct DirtyRect *rect)
+{
+    if (EmpOverlayIntersectsRect(rect)) DrawEmpCountdown();
+    if (RoundGoOverlayIntersectsRect(rect)) DrawRoundStartOverlay();
+}
+
 static void DrawGameplayDirtyRects(void)
 {
     WORD i;
@@ -5198,6 +5250,7 @@ static void DrawGameplayDirtyRects(void)
         DrawRobotsIntersectingRect(&rect);
         DrawBoltsIntersectingRect(&rect);
         if (BonusBossIntersectsRect(&rect)) DrawBonusBoss();
+        DrawGameplayDirtyOverlays(&rect);
     }
 }
 #endif
@@ -5315,8 +5368,8 @@ static BOOL DirtyGameplayRectsReady(void)
     if (!dirtyRectsValid) return FALSE;
     if (dirtyRectCount <= 0) return FALSE;
     if (dirtyForceFullFrame) return FALSE;
-    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) return FALSE;
-    if (empCountdownTicks > 0 || bonusBossExplosionTicks > 0) return FALSE;
+    if (roundCountdownTicks > 0 || pauseMenuOpen) return FALSE;
+    if (bonusBossExplosionTicks > 0) return FALSE;
     return TRUE;
 }
 
