@@ -73,6 +73,17 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DIRTY_RECT_DEBUG_PRINTF 0
 #endif
 
+#define DIRTY_RECT_MAX_DRAW_RECTS 14
+#define DIRTY_RECT_LOW_MAX_DRAW_RECTS 8
+#define DIRTY_RECT_FALLBACK_AREA ((SCREEN_W * SCREEN_H) * 3 / 5)
+#define DIRTY_RECT_LOW_FALLBACK_AREA ((SCREEN_W * SCREEN_H) / 2)
+#define DIRTY_RECT_CLOSE_MERGE_PAD 6
+#define DIRTY_RECT_LOW_CLOSE_MERGE_PAD 10
+#define DIRTY_RECT_CLOSE_MERGE_MAX_AREA 4096
+#define DIRTY_RECT_STRIP_MAX 4
+#define DIRTY_RECT_STRIP_MIN_SAVED_RECTS 3
+#define DIRTY_RECT_STRIP_MAX_HEIGHT 72
+
 #define TILE_SIZE   16
 #define MAP_W       20
 #define MAP_H       14
@@ -124,7 +135,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROBOT_SCALE2_W (ROBOT_W * 2)
 #define ROBOT_SCALE2_H (ROBOT_H * 2)
 #define MAX_ROBOTS  10
-#define MAX_DIRTY_RECTS 64
+#define MAX_DIRTY_RECTS 96
 #define MAX_HUMAN_PLAYERS 2
 #define ROBOT_VARIANTS 7
 #define AI_RECENT_TILE_COUNT 4
@@ -569,9 +580,24 @@ static BOOL dirtyForceFullFrame = TRUE;
 static ULONG fallbackFullFrameCount = 0;
 static ULONG dirtyFrameCount = 0;
 static ULONG dirtyRectTotal = 0;
+static WORD dirtyRectPreMergeCount = 0;
+static WORD dirtyRectPostMergeCount = 0;
+static ULONG dirtyRectAreaTotal = 0;
+static ULONG dirtyRectLastArea = 0;
+static ULONG dirtyStripFrameCount = 0;
 static LONG dirtyPrevRobotPx[MAX_ROBOTS];
 static LONG dirtyPrevRobotPy[MAX_ROBOTS];
 static BOOL dirtyPrevRobotValid[MAX_ROBOTS];
+static UBYTE dirtyPrevRobotSpriteIndex[MAX_ROBOTS];
+static UBYTE dirtyPrevRobotPrevSpriteIndex[MAX_ROBOTS];
+static UBYTE dirtyPrevRobotPowerType[MAX_ROBOTS];
+static WORD dirtyPrevRobotPowerMovesLeft[MAX_ROBOTS];
+static WORD dirtyPrevRobotStunTicks[MAX_ROBOTS];
+static WORD dirtyPrevRobotBattery[MAX_ROBOTS];
+static WORD dirtyPrevRobotTurnTicks[MAX_ROBOTS];
+static WORD dirtyPrevRobotTurnDirection[MAX_ROBOTS];
+static UBYTE dirtyPrevRobotQuadActive[MAX_ROBOTS];
+static UBYTE dirtyPrevRobotTileUnder[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPx[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPy[MAX_ROBOTS];
 static BOOL dirtyPrevPlayerBoltActive[MAX_ROBOTS];
@@ -790,6 +816,9 @@ static void AddDirtyTile(WORD tx, WORD ty);
 static void AddDirtyRobot(WORD id);
 static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WORD *w, WORD *h);
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id);
+static BOOL RobotNeedsCurrentDirtyRect(WORD id);
+static void StoreDirtyRobotVisualState(WORD id);
+static void OptimiseDirtyRects(void);
 static void AddDirtyBolt(struct Bolt *bolt);
 static void AddDirtyBoltAt(LONG px, LONG py);
 static void AddDirtyBossExplosionAt(WORD ticks);
@@ -798,6 +827,7 @@ static void AddDirtyEmpRobotVisual(WORD id);
 static void MarkDirtyEmpRobotVisuals(void);
 static BOOL RectIntersects(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh);
 static BOOL DirtyGameplayRectsReady(void);
+static BOOL DirtyGameplayNoChanges(void);
 static void RestoreDirtyRectFromRoom(struct DirtyRect *rect);
 static void DrawRobotsIntersectingRect(struct DirtyRect *rect);
 static void DrawBoltsIntersectingRect(struct DirtyRect *rect);
@@ -955,26 +985,8 @@ static void ClearDirtyRects(void)
     dirtyRectsBuiltForFrame = TRUE;
 }
 
-static BOOL DirtyRectsOverlapOrTouch(struct DirtyRect *a, WORD x, WORD y, WORD w, WORD h)
-{
-    WORD ar = a->x + a->w;
-    WORD ab = a->y + a->h;
-    WORD br = x + w;
-    WORD bb = y + h;
-
-    if (br < a->x) return FALSE;
-    if (x > ar) return FALSE;
-    if (bb < a->y) return FALSE;
-    if (y > ab) return FALSE;
-    return TRUE;
-}
-
 static void AddDirtyRect(WORD x, WORD y, WORD w, WORD h)
 {
-    WORD i;
-    WORD right;
-    WORD bottom;
-
     if (!dirtyRectsValid || w <= 0 || h <= 0) return;
 
     if (x < 0) { w += x; x = 0; }
@@ -982,23 +994,6 @@ static void AddDirtyRect(WORD x, WORD y, WORD w, WORD h)
     if (x >= SCREEN_W || y >= SCREEN_H || w <= 0 || h <= 0) return;
     if (x + w > SCREEN_W) w = SCREEN_W - x;
     if (y + h > SCREEN_H) h = SCREEN_H - y;
-
-    right = x + w;
-    bottom = y + h;
-    for (i = 0; i < dirtyRectCount; i++) {
-        struct DirtyRect *r = &dirtyRects[i];
-        if (DirtyRectsOverlapOrTouch(r, x, y, w, h)) {
-            WORD rRight = r->x + r->w;
-            WORD rBottom = r->y + r->h;
-            if (x < r->x) r->x = x;
-            if (y < r->y) r->y = y;
-            if (right > rRight) rRight = right;
-            if (bottom > rBottom) rBottom = bottom;
-            r->w = rRight - r->x;
-            r->h = rBottom - r->y;
-            return;
-        }
-    }
 
     if (dirtyRectCount >= MAX_DIRTY_RECTS) {
         dirtyRectsValid = FALSE;
@@ -1018,6 +1013,267 @@ static void AddDirtyTile(WORD tx, WORD ty)
     AddDirtyRect(MAP_X + tx * TILE_SIZE, MAP_Y + ty * TILE_SIZE, TILE_SIZE, TILE_SIZE);
 }
 
+static UBYTE DirtyRobotTileUnder(WORD id)
+{
+    WORD tx;
+    WORD ty;
+
+    if (id < 0 || id >= robotCount) return TILE_FLOOR;
+    tx = robots[id].tileX;
+    ty = robots[id].tileY;
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return TILE_FLOOR;
+    return map[ty][tx];
+}
+
+static BOOL DirtyRectIntersectsRobotBounds(struct DirtyRect *rect, WORD id)
+{
+    WORD x;
+    WORD y;
+    WORD w;
+    WORD h;
+
+    if (!rect || id < 0 || id >= robotCount) return FALSE;
+    GetRobotDirtyBounds(robots[id].px, robots[id].py, id, &x, &y, &w, &h);
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, w, h);
+}
+
+static BOOL DirtyOverlayIntersectsRobot(WORD id)
+{
+    struct DirtyRect rect;
+
+    if (id < 0 || id >= robotCount) return FALSE;
+
+    if (roundGoTicks > 0 || dirtyPrevRoundGoTicks > 0) {
+        rect.x = ROUND_GO_TEXT_LEFT;
+        rect.y = ROUND_GO_TEXT_TOP;
+        rect.w = ROUND_GO_TEXT_W;
+        rect.h = ROUND_GO_TEXT_H;
+        if (DirtyRectIntersectsRobotBounds(&rect, id)) return TRUE;
+    }
+
+    if (dirtyPrevEmpVisible[id]) {
+        GetEmpRobotVisualRectFromScreen(dirtyPrevEmpScreenX[id], dirtyPrevEmpScreenY[id], &rect);
+        if (DirtyRectIntersectsRobotBounds(&rect, id)) return TRUE;
+    }
+    if (GetEmpRobotVisualRect(id, &rect)) {
+        if (DirtyRectIntersectsRobotBounds(&rect, id)) return TRUE;
+    }
+
+    return FALSE;
+}
+
+static BOOL RobotNeedsCurrentDirtyRect(WORD id)
+{
+    UBYTE quadActive;
+
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (!dirtyPrevRobotValid[id]) return TRUE;
+    if (robots[id].px != dirtyPrevRobotPx[id] || robots[id].py != dirtyPrevRobotPy[id]) return TRUE;
+
+    quadActive = (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) ? 1 : 0;
+    if (robots[id].spriteIndex != dirtyPrevRobotSpriteIndex[id]) return TRUE;
+    if (robots[id].prevSpriteIndex != dirtyPrevRobotPrevSpriteIndex[id]) return TRUE;
+    if (robots[id].powerType != dirtyPrevRobotPowerType[id]) return TRUE;
+    if (robots[id].powerMovesLeft != dirtyPrevRobotPowerMovesLeft[id]) return TRUE;
+    if (robots[id].stunTicks != dirtyPrevRobotStunTicks[id]) return TRUE;
+    if (robots[id].battery != dirtyPrevRobotBattery[id]) return TRUE;
+    if (robots[id].turnTicks != dirtyPrevRobotTurnTicks[id]) return TRUE;
+    if (robots[id].turnDirection != dirtyPrevRobotTurnDirection[id]) return TRUE;
+    if (quadActive != dirtyPrevRobotQuadActive[id]) return TRUE;
+    if (DirtyRobotTileUnder(id) != dirtyPrevRobotTileUnder[id]) return TRUE;
+    if (DirtyOverlayIntersectsRobot(id)) return TRUE;
+
+    return FALSE;
+}
+
+static void StoreDirtyRobotVisualState(WORD id)
+{
+    if (id < 0 || id >= robotCount) return;
+
+    dirtyPrevRobotPx[id] = robots[id].px;
+    dirtyPrevRobotPy[id] = robots[id].py;
+    dirtyPrevRobotValid[id] = TRUE;
+    dirtyPrevRobotSpriteIndex[id] = robots[id].spriteIndex;
+    dirtyPrevRobotPrevSpriteIndex[id] = robots[id].prevSpriteIndex;
+    dirtyPrevRobotPowerType[id] = robots[id].powerType;
+    dirtyPrevRobotPowerMovesLeft[id] = robots[id].powerMovesLeft;
+    dirtyPrevRobotStunTicks[id] = robots[id].stunTicks;
+    dirtyPrevRobotBattery[id] = robots[id].battery;
+    dirtyPrevRobotTurnTicks[id] = robots[id].turnTicks;
+    dirtyPrevRobotTurnDirection[id] = robots[id].turnDirection;
+    dirtyPrevRobotQuadActive[id] = (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) ? 1 : 0;
+    dirtyPrevRobotTileUnder[id] = DirtyRobotTileUnder(id);
+}
+
+static ULONG DirtyRectArea(struct DirtyRect *rect)
+{
+    if (!rect || rect->w <= 0 || rect->h <= 0) return 0;
+    return (ULONG)rect->w * (ULONG)rect->h;
+}
+
+static ULONG DirtyRectsTotalArea(void)
+{
+    WORD i;
+    ULONG area = 0;
+
+    for (i = 0; i < dirtyRectCount; i++) area += DirtyRectArea(&dirtyRects[i]);
+    return area;
+}
+
+static BOOL DirtyRectsShouldMerge(struct DirtyRect *a, struct DirtyRect *b, WORD pad)
+{
+    WORD left;
+    WORD top;
+    WORD right;
+    WORD bottom;
+    ULONG mergedArea;
+    ULONG oldArea;
+
+    if (!a || !b) return FALSE;
+
+    if (RectIntersects(a->x - pad, a->y - pad, a->w + pad * 2, a->h + pad * 2,
+                       b->x, b->y, b->w, b->h)) {
+        left = (a->x < b->x) ? a->x : b->x;
+        top = (a->y < b->y) ? a->y : b->y;
+        right = (a->x + a->w > b->x + b->w) ? a->x + a->w : b->x + b->w;
+        bottom = (a->y + a->h > b->y + b->h) ? a->y + a->h : b->y + b->h;
+        mergedArea = (ULONG)(right - left) * (ULONG)(bottom - top);
+        oldArea = DirtyRectArea(a) + DirtyRectArea(b);
+        if (mergedArea <= oldArea + DIRTY_RECT_CLOSE_MERGE_MAX_AREA) return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void MergeDirtyRectPair(WORD dst, WORD src)
+{
+    WORD left;
+    WORD top;
+    WORD right;
+    WORD bottom;
+
+    if (dst < 0 || src < 0 || dst >= dirtyRectCount || src >= dirtyRectCount || dst == src) return;
+
+    left = (dirtyRects[dst].x < dirtyRects[src].x) ? dirtyRects[dst].x : dirtyRects[src].x;
+    top = (dirtyRects[dst].y < dirtyRects[src].y) ? dirtyRects[dst].y : dirtyRects[src].y;
+    right = (dirtyRects[dst].x + dirtyRects[dst].w > dirtyRects[src].x + dirtyRects[src].w) ?
+            dirtyRects[dst].x + dirtyRects[dst].w : dirtyRects[src].x + dirtyRects[src].w;
+    bottom = (dirtyRects[dst].y + dirtyRects[dst].h > dirtyRects[src].y + dirtyRects[src].h) ?
+             dirtyRects[dst].y + dirtyRects[dst].h : dirtyRects[src].y + dirtyRects[src].h;
+
+    dirtyRects[dst].x = left;
+    dirtyRects[dst].y = top;
+    dirtyRects[dst].w = right - left;
+    dirtyRects[dst].h = bottom - top;
+
+    dirtyRectCount--;
+    if (src != dirtyRectCount) dirtyRects[src] = dirtyRects[dirtyRectCount];
+}
+
+static void CoalesceDirtyRects(WORD pad)
+{
+    BOOL merged;
+
+    do {
+        WORD i;
+        merged = FALSE;
+        for (i = 0; i < dirtyRectCount && !merged; i++) {
+            WORD j;
+            for (j = i + 1; j < dirtyRectCount; j++) {
+                if (DirtyRectsShouldMerge(&dirtyRects[i], &dirtyRects[j], pad)) {
+                    MergeDirtyRectPair(i, j);
+                    merged = TRUE;
+                    break;
+                }
+            }
+        }
+    } while (merged);
+}
+
+static BOOL BuildDirtyHorizontalStrips(void)
+{
+    struct DirtyRect source[MAX_DIRTY_RECTS];
+    struct DirtyRect strips[DIRTY_RECT_STRIP_MAX];
+    WORD sourceCount;
+    WORD stripCount = 0;
+    WORD i;
+    ULONG stripArea = 0;
+    ULONG normalArea;
+
+    if (effectQuality != EFFECT_LOW) return FALSE;
+    if (dirtyRectCount <= DIRTY_RECT_STRIP_MAX + DIRTY_RECT_STRIP_MIN_SAVED_RECTS) return FALSE;
+
+    sourceCount = dirtyRectCount;
+    normalArea = DirtyRectsTotalArea();
+    for (i = 0; i < sourceCount; i++) source[i] = dirtyRects[i];
+
+    for (i = 0; i < sourceCount; i++) {
+        WORD best = -1;
+        WORD j;
+        for (j = 0; j < stripCount; j++) {
+            if (RectIntersects(0, strips[j].y - DIRTY_RECT_LOW_CLOSE_MERGE_PAD,
+                               SCREEN_W, strips[j].h + DIRTY_RECT_LOW_CLOSE_MERGE_PAD * 2,
+                               0, source[i].y, SCREEN_W, source[i].h)) {
+                best = j;
+                break;
+            }
+        }
+
+        if (best < 0) {
+            if (stripCount >= DIRTY_RECT_STRIP_MAX) return FALSE;
+            strips[stripCount].x = 0;
+            strips[stripCount].y = source[i].y;
+            strips[stripCount].w = SCREEN_W;
+            strips[stripCount].h = source[i].h;
+            stripCount++;
+        } else {
+            WORD top = (strips[best].y < source[i].y) ? strips[best].y : source[i].y;
+            WORD bottom = (strips[best].y + strips[best].h > source[i].y + source[i].h) ?
+                          strips[best].y + strips[best].h : source[i].y + source[i].h;
+            strips[best].y = top;
+            strips[best].h = bottom - top;
+        }
+    }
+
+    for (i = 0; i < stripCount; i++) {
+        if (strips[i].h > DIRTY_RECT_STRIP_MAX_HEIGHT) return FALSE;
+        stripArea += DirtyRectArea(&strips[i]);
+    }
+
+    if (stripCount >= sourceCount) return FALSE;
+    if (stripArea >= normalArea && sourceCount <= DIRTY_RECT_LOW_MAX_DRAW_RECTS) return FALSE;
+    if (stripArea > DIRTY_RECT_LOW_FALLBACK_AREA) return FALSE;
+
+    dirtyRectCount = stripCount;
+    for (i = 0; i < stripCount; i++) dirtyRects[i] = strips[i];
+    dirtyStripFrameCount++;
+    return TRUE;
+}
+
+static void OptimiseDirtyRects(void)
+{
+    WORD maxRects;
+    ULONG maxArea;
+
+    if (!dirtyRectsValid || dirtyForceFullFrame || dirtyRectCount <= 0) return;
+
+    dirtyRectPreMergeCount = dirtyRectCount;
+    CoalesceDirtyRects((effectQuality == EFFECT_LOW) ? DIRTY_RECT_LOW_CLOSE_MERGE_PAD : DIRTY_RECT_CLOSE_MERGE_PAD);
+    dirtyRectPostMergeCount = dirtyRectCount;
+
+    if (effectQuality == EFFECT_LOW) BuildDirtyHorizontalStrips();
+
+    dirtyRectLastArea = DirtyRectsTotalArea();
+    dirtyRectAreaTotal += dirtyRectLastArea;
+
+    maxRects = (effectQuality == EFFECT_LOW) ? DIRTY_RECT_LOW_MAX_DRAW_RECTS : DIRTY_RECT_MAX_DRAW_RECTS;
+    maxArea = (effectQuality == EFFECT_LOW) ? DIRTY_RECT_LOW_FALLBACK_AREA : DIRTY_RECT_FALLBACK_AREA;
+
+    if (dirtyRectCount > maxRects || dirtyRectLastArea > maxArea) {
+        ForceGameplayFullPresent();
+    }
+}
+
 static BOOL RobotDirtyBoundsUseQuad(WORD id)
 {
     if (id < 0 || id >= robotCount) return FALSE;
@@ -1025,8 +1281,8 @@ static BOOL RobotDirtyBoundsUseQuad(WORD id)
     if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) return TRUE;
 
     if (dirtyPrevRobotValid[id] &&
-        dirtyPrevPowerType[id] == POWER_QUAD &&
-        dirtyPrevPowerMoves[id] > 0) {
+        dirtyPrevRobotPowerType[id] == POWER_QUAD &&
+        dirtyPrevRobotPowerMovesLeft[id] > 0) {
         return TRUE;
     }
 
@@ -1261,10 +1517,6 @@ static void BeginGameplayDirtyRects(void)
     MarkDirtyEmpOverlay();
 
     for (i = 0; i < robotCount; i++) {
-        if (dirtyPrevRobotValid[i]) AddDirtyRobotAt(dirtyPrevRobotPx[i], dirtyPrevRobotPy[i], i);
-        else AddDirtyRobot(i);
-    }
-    for (i = 0; i < robotCount; i++) {
         if (dirtyPrevPlayerBoltActive[i]) AddDirtyBoltAt(dirtyPrevPlayerBoltPx[i], dirtyPrevPlayerBoltPy[i]);
     }
     for (i = 0; i < MAX_BOSS_BOLTS; i++) {
@@ -1283,10 +1535,11 @@ static void FinishGameplayDirtyRects(void)
     }
 
     for (i = 0; i < robotCount; i++) {
-        AddDirtyRobot(i);
-        dirtyPrevRobotPx[i] = robots[i].px;
-        dirtyPrevRobotPy[i] = robots[i].py;
-        dirtyPrevRobotValid[i] = TRUE;
+        if (RobotNeedsCurrentDirtyRect(i)) {
+            if (dirtyPrevRobotValid[i]) AddDirtyRobotAt(dirtyPrevRobotPx[i], dirtyPrevRobotPy[i], i);
+            AddDirtyRobot(i);
+        }
+        StoreDirtyRobotVisualState(i);
     }
     for (i = robotCount; i < MAX_ROBOTS; i++) dirtyPrevRobotValid[i] = FALSE;
 
@@ -1311,6 +1564,8 @@ static void FinishGameplayDirtyRects(void)
     MarkDirtyHudIfChanged();
 
     if (roundCountdownTicks > 0 || pauseMenuOpen) ForceGameplayFullPresent();
+
+    OptimiseDirtyRects();
 }
 #endif
 
@@ -5809,6 +6064,9 @@ static void DrawFrame(void)
 
 #if USE_DIRTY_RECTS
     if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+        if (DirtyGameplayNoChanges()) {
+            return;
+        }
         if (DirtyGameplayRectsReady()) {
             DrawGameplayDirtyRects();
             return;
@@ -5877,6 +6135,18 @@ static BOOL DirtyGameplayRectsReady(void)
     return TRUE;
 }
 
+
+static BOOL DirtyGameplayNoChanges(void)
+{
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return FALSE;
+    if (!dirtyRectsBuiltForFrame) return FALSE;
+    if (!dirtyRectsValid) return FALSE;
+    if (dirtyForceFullFrame) return FALSE;
+    if (dirtyRectCount > 0) return FALSE;
+    if (roundCountdownTicks > 0 || pauseMenuOpen) return FALSE;
+    return TRUE;
+}
+
 static void PresentDirtyGameplayRects(void)
 {
     WORD i;
@@ -5895,14 +6165,22 @@ static void PresentDirtyGameplayRects(void)
     dirtyRectTotal += dirtyRectCount;
 #if DIRTY_RECT_DEBUG_PRINTF
     if ((dirtyFrameCount & 0x3F) == 0) {
-        printf("dirty rects:%ld dirty frames:%ld fallback full:%ld\n",
-               (LONG)dirtyRectTotal, (LONG)dirtyFrameCount, (LONG)fallbackFullFrameCount);
+        printf("dirty pre:%d post:%d draw:%d area:%ld avgrect:%ld frames:%ld strips:%ld fallback full:%ld\n",
+               dirtyRectPreMergeCount, dirtyRectPostMergeCount, dirtyRectCount,
+               (LONG)dirtyRectLastArea,
+               dirtyFrameCount ? (LONG)(dirtyRectTotal / dirtyFrameCount) : 0,
+               (LONG)dirtyFrameCount, (LONG)dirtyStripFrameCount, (LONG)fallbackFullFrameCount);
     }
 #endif
 }
 
 static void PresentDirtyGameplayFrame(void)
 {
+    if (DirtyGameplayNoChanges()) {
+        dirtyRectsBuiltForFrame = FALSE;
+        return;
+    }
+
     if (!DirtyGameplayRectsReady()) {
         fallbackFullFrameCount++;
 #if DIRTY_RECT_DEBUG_PRINTF
