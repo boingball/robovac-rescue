@@ -69,6 +69,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #ifndef USE_DIRTY_RECTS
 #define USE_DIRTY_RECTS 1
 #endif
+#ifndef DIRTY_RECT_DEBUG_PRINTF
+#define DIRTY_RECT_DEBUG_PRINTF 0
+#endif
 
 #define TILE_SIZE   16
 #define MAP_W       20
@@ -760,6 +763,13 @@ static void AddDirtyRobot(WORD id);
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id);
 static void AddDirtyBolt(struct Bolt *bolt);
 static void AddDirtyBoltAt(LONG px, LONG py);
+static BOOL RectIntersects(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh);
+static BOOL DirtyGameplayRectsReady(void);
+static void RestoreDirtyRectFromRoom(struct DirtyRect *rect);
+static void DrawRobotsIntersectingRect(struct DirtyRect *rect);
+static void DrawBoltsIntersectingRect(struct DirtyRect *rect);
+static void DrawHudIfDirty(struct DirtyRect *rect);
+static void DrawGameplayDirtyRects(void);
 static void ForceGameplayFullPresent(void);
 static void BeginGameplayDirtyRects(void);
 static void FinishGameplayDirtyRects(void);
@@ -884,6 +894,27 @@ static WORD AbsW(WORD v)
 }
 
 #if USE_DIRTY_RECTS
+static BOOL RectIntersects(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh)
+{
+    WORD ar;
+    WORD ab;
+    WORD br;
+    WORD bb;
+
+    if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return FALSE;
+
+    ar = ax + aw;
+    ab = ay + ah;
+    br = bx + bw;
+    bb = by + bh;
+
+    if (ar <= bx) return FALSE;
+    if (br <= ax) return FALSE;
+    if (ab <= by) return FALSE;
+    if (bb <= ay) return FALSE;
+    return TRUE;
+}
+
 static void ClearDirtyRects(void)
 {
     dirtyRectCount = 0;
@@ -958,13 +989,10 @@ static void AddDirtyRobotAt(LONG px, LONG py, WORD id)
 {
     WORD x = MAP_X + FP_TO_INT(px);
     WORD y = MAP_Y + FP_TO_INT(py);
-    WORD w = ROBOT_W;
-    WORD h = ROBOT_H;
+    WORD w = ROBOT_SCALE2_W;
+    WORD h = ROBOT_SCALE2_H;
 
-    if (id >= 0 && id < robotCount && robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
-        w = ROBOT_SCALE2_W;
-        h = ROBOT_SCALE2_H;
-    }
+    (void)id;
     AddDirtyRect(x - 2, y - 8, w + 4, h + 12);
 }
 
@@ -1013,7 +1041,12 @@ static void MarkDirtyHudIfChanged(void)
         }
     }
 
-    if (changed) AddDirtyRect(0, 0, SCREEN_W, HUD_H);
+    if (changed) {
+        AddDirtyRect(0, 0, SCREEN_W, HUD_H);
+        if (gameState == GAME_BONUS_PLAYING && dirtyPrevBossHealth != bonusBossHealth) {
+            AddDirtyRect(80, 36, 160, 14);
+        }
+    }
 
     dirtyPrevDirtLeft = dirtLeft;
     dirtyPrevMoves = moves;
@@ -1059,7 +1092,7 @@ static void BeginGameplayDirtyRects(void)
 
     ClearDirtyRects();
 
-    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) {
+    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen || empCountdownTicks > 0 || dirtyPrevEmpTicks > 0 || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) {
         ForceGameplayFullPresent();
     }
 
@@ -1111,7 +1144,7 @@ static void FinishGameplayDirtyRects(void)
     MarkDirtyBossArea();
     MarkDirtyHudIfChanged();
 
-    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) ForceGameplayFullPresent();
+    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen || empCountdownTicks > 0 || dirtyPrevEmpTicks > 0 || bonusBossExplosionTicks > 0 || dirtyPrevBossExplosionTicks > 0) ForceGameplayFullPresent();
 }
 #endif
 
@@ -5039,6 +5072,136 @@ static void DrawAiDifficultyMenu(void)
     MiniTextCentered(&renderRP, bottom - 12, "1-3/E-N-H OR ENTER", 13, 1);
 }
 
+#if USE_DIRTY_RECTS
+static void RestoreDirtyRectFromRoom(struct DirtyRect *rect)
+{
+    if (!rect || rect->w <= 0 || rect->h <= 0) return;
+
+    if (roomBM) {
+        BltBitMap(roomBM, rect->x, rect->y,
+                  renderBM, rect->x, rect->y,
+                  rect->w, rect->h,
+                  0xC0, 0xFF, NULL);
+    } else {
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, rect->x, rect->y, rect->x + rect->w - 1, rect->y + rect->h - 1);
+    }
+}
+
+static BOOL RobotIntersectsRect(WORD id, struct DirtyRect *rect)
+{
+    WORD x;
+    WORD y;
+    WORD w = ROBOT_SCALE2_W + 4;
+    WORD h = ROBOT_SCALE2_H + 12;
+
+    if (!rect || id < 0 || id >= robotCount) return FALSE;
+    x = MAP_X + FP_TO_INT(robots[id].px) - 2;
+    y = MAP_Y + FP_TO_INT(robots[id].py) - 8;
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, w, h);
+}
+
+static BOOL StunCountdownIntersectsRect(WORD id, struct DirtyRect *rect)
+{
+    WORD sx;
+    WORD sy;
+
+    if (!rect || id < 0 || id >= robotCount || robots[id].stunTicks <= 0) return FALSE;
+    sx = MAP_X + FP_TO_INT(robots[id].px) + 6;
+    sy = MAP_Y + FP_TO_INT(robots[id].py) - 6;
+    if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[id].py) + 2;
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h, sx, sy, 8, 6);
+}
+
+static void DrawRobotsIntersectingRect(struct DirtyRect *rect)
+{
+    WORD i;
+    char b[4];
+
+    for (i = humanPlayers; i < robotCount; i++) {
+        if (RobotIntersectsRect(i, rect)) DrawRobotBob(i);
+    }
+    for (i = 0; i < humanPlayers; i++) {
+        if (RobotIntersectsRect(i, rect)) DrawRobotBob(i);
+    }
+    for (i = 0; i < robotCount; i++) {
+        WORD secondsLeft;
+        WORD sx;
+        WORD sy;
+
+        if (!StunCountdownIntersectsRect(i, rect)) continue;
+        secondsLeft = ((robots[i].stunTicks - 1) / BOLT_STUN_STEP_FRAMES) + 1;
+        if (secondsLeft < 1) secondsLeft = 1;
+        if (secondsLeft > 5) secondsLeft = 5;
+        snprintf(b, sizeof(b), "%d", secondsLeft);
+        sx = MAP_X + FP_TO_INT(robots[i].px) + 6;
+        sy = MAP_Y + FP_TO_INT(robots[i].py) - 6;
+        if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[i].py) + 2;
+        MiniText(&renderRP, sx, sy, b, 10);
+    }
+}
+
+static BOOL BoltIntersectsRect(struct Bolt *bolt, struct DirtyRect *rect)
+{
+    WORD x;
+    WORD y;
+
+    if (!bolt || !bolt->active || !rect) return FALSE;
+    x = MAP_X + FP_TO_INT(bolt->px) - 1;
+    y = MAP_Y + FP_TO_INT(bolt->py) - 1;
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, ROBOT_W + 2, ROBOT_H + 2);
+}
+
+static void DrawBoltsIntersectingRect(struct DirtyRect *rect)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        if (BoltIntersectsRect(&playerBolts[i], rect)) DrawPlayerBolt(i);
+    }
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) {
+        if (BoltIntersectsRect(&bossBolts[i], rect)) DrawBoltSprite(&bossBolts[i]);
+    }
+}
+
+static void DrawHudIfDirty(struct DirtyRect *rect)
+{
+    if (!rect) return;
+    if (!RectIntersects(rect->x, rect->y, rect->w, rect->h, 0, 0, SCREEN_W, HUD_H)) return;
+    DrawHud();
+}
+
+static BOOL BonusBossIntersectsRect(struct DirtyRect *rect)
+{
+    WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
+    WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+
+    if (!rect || gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return FALSE;
+    if (RectIntersects(rect->x, rect->y, rect->w, rect->h, bonusBossX, bonusBossY, bossW, bossH)) return TRUE;
+    return RectIntersects(rect->x, rect->y, rect->w, rect->h, 80, 36, 160, 14);
+}
+
+static void DrawGameplayDirtyRects(void)
+{
+    WORD i;
+
+    if (!DirtyGameplayRectsReady()) return;
+
+    for (i = 0; i < dirtyRectCount; i++) {
+        struct DirtyRect rect = dirtyRects[i];
+        if (rect.x >= SCREEN_W || rect.y >= SCREEN_H || rect.w <= 0 || rect.h <= 0) continue;
+        if (rect.x + rect.w > SCREEN_W) rect.w = SCREEN_W - rect.x;
+        if (rect.y + rect.h > SCREEN_H) rect.h = SCREEN_H - rect.y;
+
+        RestoreDirtyRectFromRoom(&rect);
+        DrawHudIfDirty(&rect);
+        DrawRobotsIntersectingRect(&rect);
+        DrawBoltsIntersectingRect(&rect);
+        if (BonusBossIntersectsRect(&rect)) DrawBonusBoss();
+    }
+}
+#endif
+
 static void DrawFrame(void)
 {
     WORD i;
@@ -5084,6 +5247,15 @@ static void DrawFrame(void)
     }
 
     DisableTitleCopperGradient(TRUE);
+
+#if USE_DIRTY_RECTS
+    if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+        if (DirtyGameplayRectsReady()) {
+            DrawGameplayDirtyRects();
+            return;
+        }
+    }
+#endif
 
     if (roomBM) {
         BltBitMap(roomBM, 0, 0,
@@ -5144,6 +5316,7 @@ static BOOL DirtyGameplayRectsReady(void)
     if (dirtyRectCount <= 0) return FALSE;
     if (dirtyForceFullFrame) return FALSE;
     if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) return FALSE;
+    if (empCountdownTicks > 0 || bonusBossExplosionTicks > 0) return FALSE;
     return TRUE;
 }
 
@@ -5163,12 +5336,22 @@ static void PresentDirtyGameplayRects(void)
     }
     dirtyFrameCount++;
     dirtyRectTotal += dirtyRectCount;
+#if DIRTY_RECT_DEBUG_PRINTF
+    if ((dirtyFrameCount & 0x3F) == 0) {
+        printf("dirty rects:%ld dirty frames:%ld fallback full:%ld\n",
+               (LONG)dirtyRectTotal, (LONG)dirtyFrameCount, (LONG)fallbackFullFrameCount);
+    }
+#endif
 }
 
 static void PresentDirtyGameplayFrame(void)
 {
     if (!DirtyGameplayRectsReady()) {
         fallbackFullFrameCount++;
+#if DIRTY_RECT_DEBUG_PRINTF
+        printf("dirty fallback full:%ld rects:%d valid:%d forced:%d built:%d\n",
+               (LONG)fallbackFullFrameCount, dirtyRectCount, dirtyRectsValid, dirtyForceFullFrame, dirtyRectsBuiltForFrame);
+#endif
         PresentFullFrame();
         dirtyForceFullFrame = FALSE;
         dirtyRectsBuiltForFrame = FALSE;
