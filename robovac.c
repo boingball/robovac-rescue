@@ -764,6 +764,7 @@ static void ClearDirtyRects(void);
 static void AddDirtyRect(WORD x, WORD y, WORD w, WORD h);
 static void AddDirtyTile(WORD tx, WORD ty);
 static void AddDirtyRobot(WORD id);
+static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WORD *w, WORD *h);
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id);
 static void AddDirtyBolt(struct Bolt *bolt);
 static void AddDirtyBoltAt(LONG px, LONG py);
@@ -989,15 +990,68 @@ static void AddDirtyTile(WORD tx, WORD ty)
     AddDirtyRect(MAP_X + tx * TILE_SIZE, MAP_Y + ty * TILE_SIZE, TILE_SIZE, TILE_SIZE);
 }
 
+static BOOL RobotDirtyBoundsUseQuad(WORD id)
+{
+    if (id < 0 || id >= robotCount) return FALSE;
+
+    if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) return TRUE;
+
+    if (dirtyPrevRobotValid[id] &&
+        dirtyPrevPowerType[id] == POWER_QUAD &&
+        dirtyPrevPowerMoves[id] > 0) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WORD *w, WORD *h)
+{
+    WORD sx = MAP_X + FP_TO_INT(px);
+    WORD sy = MAP_Y + FP_TO_INT(py);
+    WORD left;
+    WORD top;
+    WORD right;
+    WORD bottom;
+    const WORD margin = 2;
+
+    if (RobotDirtyBoundsUseQuad(id)) {
+        left = sx - (ROBOT_W / 2);
+        top = sy - (ROBOT_H / 2);
+        right = left + ROBOT_SCALE2_W;
+        bottom = top + ROBOT_SCALE2_H;
+
+        if (sx < left) left = sx;
+        if (sy + 21 < top) top = sy + 21;
+        if (sx + 24 > right) right = sx + 24;
+        if (sy + 25 > bottom) bottom = sy + 25;
+    } else {
+        left = sx;
+        top = sy;
+        right = sx + ROBOT_W;
+        bottom = sy + ROBOT_H;
+
+        if (sx + 4 < left) left = sx + 4;
+        if (sy + 13 < top) top = sy + 13;
+        if (sx + 13 > right) right = sx + 13;
+        if (sy + 15 > bottom) bottom = sy + 15;
+    }
+
+    *x = left - margin;
+    *y = top - margin;
+    *w = (right - left) + (margin * 2);
+    *h = (bottom - top) + (margin * 2);
+}
+
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id)
 {
-    WORD x = MAP_X + FP_TO_INT(px);
-    WORD y = MAP_Y + FP_TO_INT(py);
-    WORD w = ROBOT_SCALE2_W;
-    WORD h = ROBOT_SCALE2_H;
+    WORD x;
+    WORD y;
+    WORD w;
+    WORD h;
 
-    (void)id;
-    AddDirtyRect(x - 2, y - 8, w + 4, h + 12);
+    GetRobotDirtyBounds(px, py, id, &x, &y, &w, &h);
+    AddDirtyRect(x, y, w, h);
 }
 
 static void AddDirtyRobot(WORD id)
@@ -5122,12 +5176,11 @@ static BOOL RobotIntersectsRect(WORD id, struct DirtyRect *rect)
 {
     WORD x;
     WORD y;
-    WORD w = ROBOT_SCALE2_W + 4;
-    WORD h = ROBOT_SCALE2_H + 12;
+    WORD w;
+    WORD h;
 
     if (!rect || id < 0 || id >= robotCount) return FALSE;
-    x = MAP_X + FP_TO_INT(robots[id].px) - 2;
-    y = MAP_Y + FP_TO_INT(robots[id].py) - 8;
+    GetRobotDirtyBounds(robots[id].px, robots[id].py, id, &x, &y, &w, &h);
     return RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, w, h);
 }
 
