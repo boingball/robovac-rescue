@@ -224,8 +224,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROUND_START_OVERLAY_W 233
 #define ROUND_START_OVERLAY_H 115
 #define ROUND_START_OVERLAY_COUNT 4
-#define EMP_ROBOT_VISUAL_W 32
-#define EMP_ROBOT_VISUAL_H 16
+#define EMP_ROBOT_VISUAL_W 7
+#define EMP_ROBOT_VISUAL_H 7
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -3428,8 +3428,8 @@ static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *
 
     if (!rect) return;
 
-    left = sx - 8;
-    top = sy - 20;
+    left = sx + ((ROBOT_W - EMP_ROBOT_VISUAL_W) / 2);
+    top = sy - EMP_ROBOT_VISUAL_H - 2;
     width = EMP_ROBOT_VISUAL_W;
     height = EMP_ROBOT_VISUAL_H;
 
@@ -3484,14 +3484,10 @@ static void DrawEmpRobotVisual(WORD id)
     snprintf(b, sizeof(b), "%d", secondsLeft);
     pen = (robots[id].stunTicks & 4) ? 14 : 10;
 
-    SetAPen(&renderRP, pen);
-    RectFill(&renderRP, rect.x + 5, rect.y, rect.x + rect.w - 6, rect.y);
-    RectFill(&renderRP, rect.x + 5, rect.y + rect.h - 1, rect.x + rect.w - 6, rect.y + rect.h - 1);
-    RectFill(&renderRP, rect.x, rect.y + 4, rect.x, rect.y + rect.h - 5);
-    RectFill(&renderRP, rect.x + rect.w - 1, rect.y + 4, rect.x + rect.w - 1, rect.y + rect.h - 5);
-
     textX = rect.x + ((rect.w - MiniTextWidth(b, 1)) / 2);
-    textY = rect.y + 4;
+    textY = rect.y + 1;
+
+    MiniText(&renderRP, textX + 1, textY + 1, b, 1);
     MiniText(&renderRP, textX, textY, b, pen);
 }
 
