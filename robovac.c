@@ -127,6 +127,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAX_DIRTY_RECTS 64
 #define MAX_HUMAN_PLAYERS 2
 #define ROBOT_VARIANTS 7
+#define AI_RECENT_TILE_COUNT 4
 
 #define START_X     1
 #define START_Y     1
@@ -361,6 +362,8 @@ static UBYTE map[MAP_H][MAP_W];
 static struct Robot robots[MAX_ROBOTS];
 static WORD aiPrevTileX[MAX_ROBOTS];
 static WORD aiPrevTileY[MAX_ROBOTS];
+static WORD aiRecentTileX[MAX_ROBOTS][AI_RECENT_TILE_COUNT];
+static WORD aiRecentTileY[MAX_ROBOTS][AI_RECENT_TILE_COUNT];
 static WORD aiTargetDirtX[MAX_ROBOTS];
 static WORD aiTargetDirtY[MAX_ROBOTS];
 static WORD robotCount = 2;
@@ -3653,6 +3656,13 @@ static void InitRobots(void)
         SetRobotTile(i, RobotStartX(i), RobotStartY(i));
         aiPrevTileX[i] = RobotStartX(i);
         aiPrevTileY[i] = RobotStartY(i);
+        {
+            WORD h;
+            for (h = 0; h < AI_RECENT_TILE_COUNT; h++) {
+                aiRecentTileX[i][h] = RobotStartX(i);
+                aiRecentTileY[i][h] = RobotStartY(i);
+            }
+        }
         aiTargetDirtX[i] = -1;
         aiTargetDirtY[i] = -1;
         robots[i].battery = maxBattery;
@@ -3976,6 +3986,13 @@ static void FinishRobotTileMove(WORD id)
     ty = robots[id].targetY;
 
     if (robots[id].ai) {
+        WORD h;
+        for (h = AI_RECENT_TILE_COUNT - 1; h > 0; h--) {
+            aiRecentTileX[id][h] = aiRecentTileX[id][h - 1];
+            aiRecentTileY[id][h] = aiRecentTileY[id][h - 1];
+        }
+        aiRecentTileX[id][0] = robots[id].tileX;
+        aiRecentTileY[id][0] = robots[id].tileY;
         aiPrevTileX[id] = robots[id].tileX;
         aiPrevTileY[id] = robots[id].tileY;
     }
@@ -4076,32 +4093,6 @@ static WORD AiDirtContestPenalty(WORD id, WORD targetX, WORD targetY)
     return penalty;
 }
 
-static WORD AiTwoStepScore(WORD id, WORD fromX, WORD fromY, WORD targetX, WORD targetY)
-{
-    static const WORD dirX[4] = {1, 0, -1, 0};   /* right, down, left, up */
-    static const WORD dirY[4] = {0, 1, 0, -1};
-    WORD firstDist;
-    WORD bestNextDist;
-    WORD dir;
-
-    firstDist = AbsW(targetX - fromX) + AbsW(targetY - fromY);
-    bestNextDist = firstDist;
-
-    for (dir = 0; dir < 4; dir++) {
-        WORD nextX = fromX + dirX[dir];
-        WORD nextY = fromY + dirY[dir];
-        WORD nextDist;
-
-        if (!RobotCanPassTile(id, nextX, nextY)) continue;
-        if (RobotAtTile(nextX, nextY, id)) continue;
-
-        nextDist = AbsW(targetX - nextX) + AbsW(targetY - nextY);
-        if (nextDist < bestNextDist) bestNextDist = nextDist;
-    }
-
-    return bestNextDist * 16 + firstDist;
-}
-
 static void ShuffleAiDirs(WORD dirs[4])
 {
     WORD i;
@@ -4115,18 +4106,149 @@ static void ShuffleAiDirs(WORD dirs[4])
     }
 }
 
+static WORD AiRecentVisitPenalty(WORD id, WORD tileX, WORD tileY)
+{
+    WORD h;
+    WORD penalty = 0;
+
+    if (id < humanPlayers || id >= robotCount) return 0;
+    for (h = 0; h < AI_RECENT_TILE_COUNT; h++) {
+        if (aiRecentTileX[id][h] == tileX && aiRecentTileY[id][h] == tileY) {
+            penalty += (WORD)(AI_RECENT_TILE_COUNT - h) * 3;
+        }
+    }
+
+    return penalty;
+}
+
+static void OrderAiPathDirs(WORD id, WORD curX, WORD curY, WORD targetX, WORD targetY, WORD dirs[4])
+{
+    WORD i;
+    WORD j;
+    static const WORD dirX[4] = {1, 0, -1, 0};   /* right, down, left, up */
+    static const WORD dirY[4] = {0, 1, 0, -1};
+
+    for (i = 0; i < 4; i++) dirs[i] = i;
+
+    for (i = 0; i < 3; i++) {
+        for (j = i + 1; j < 4; j++) {
+            WORD ia = dirs[i];
+            WORD ib = dirs[j];
+            WORD ax = curX + dirX[ia];
+            WORD ay = curY + dirY[ia];
+            WORD bx = curX + dirX[ib];
+            WORD by = curY + dirY[ib];
+            WORD scoreA = AbsW(targetX - ax) + AbsW(targetY - ay);
+            WORD scoreB = AbsW(targetX - bx) + AbsW(targetY - by);
+
+            if (ax == aiPrevTileX[id] && ay == aiPrevTileY[id]) scoreA += 8;
+            if (bx == aiPrevTileX[id] && by == aiPrevTileY[id]) scoreB += 8;
+            scoreA += AiRecentVisitPenalty(id, ax, ay);
+            scoreB += AiRecentVisitPenalty(id, bx, by);
+
+            if (scoreB < scoreA) {
+                WORD t = dirs[i];
+                dirs[i] = dirs[j];
+                dirs[j] = t;
+            }
+        }
+    }
+}
+
+static BOOL AiFindPathStep(WORD id, WORD targetX, WORD targetY, WORD *outDx, WORD *outDy, WORD *outDist)
+{
+    static const WORD dirX[4] = {1, 0, -1, 0};   /* right, down, left, up */
+    static const WORD dirY[4] = {0, 1, 0, -1};
+    WORD queueX[MAP_W * MAP_H];
+    WORD queueY[MAP_W * MAP_H];
+    WORD dist[MAP_H][MAP_W];
+    WORD firstDir[MAP_H][MAP_W];
+    WORD dirs[4];
+    WORD head = 0;
+    WORD tail = 0;
+    WORD x;
+    WORD y;
+    WORD i;
+    WORD curX;
+    WORD curY;
+
+    if (outDx) *outDx = 0;
+    if (outDy) *outDy = 0;
+    if (outDist) *outDist = 32767;
+    if (id < humanPlayers || id >= robotCount) return FALSE;
+    if (targetX < 0 || targetY < 0 || targetX >= MAP_W || targetY >= MAP_H) return FALSE;
+
+    curX = robots[id].tileX;
+    curY = robots[id].tileY;
+    if (curX == targetX && curY == targetY) {
+        if (outDist) *outDist = 0;
+        return TRUE;
+    }
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            dist[y][x] = 32767;
+            firstDir[y][x] = -1;
+        }
+    }
+
+    OrderAiPathDirs(id, curX, curY, targetX, targetY, dirs);
+    dist[curY][curX] = 0;
+    queueX[tail] = curX;
+    queueY[tail] = curY;
+    tail++;
+
+    while (head < tail) {
+        WORD fromX = queueX[head];
+        WORD fromY = queueY[head];
+        WORD nextDist = dist[fromY][fromX] + 1;
+        head++;
+
+        for (i = 0; i < 4; i++) {
+            WORD dir = dirs[i];
+            WORD nx = fromX + dirX[dir];
+            WORD ny = fromY + dirY[dir];
+            WORD stepDir;
+
+            if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+            if (dist[ny][nx] != 32767) continue;
+            if (!RobotCanPassTile(id, nx, ny)) continue;
+            if (RobotAtTile(nx, ny, id)) continue;
+
+            stepDir = firstDir[fromY][fromX];
+            if (stepDir < 0) stepDir = dir;
+            dist[ny][nx] = nextDist;
+            firstDir[ny][nx] = stepDir;
+
+            if (nx == targetX && ny == targetY) {
+                if (outDx) *outDx = dirX[stepDir];
+                if (outDy) *outDy = dirY[stepDir];
+                if (outDist) *outDist = nextDist;
+                return TRUE;
+            }
+
+            if (tail < MAP_W * MAP_H) {
+                queueX[tail] = nx;
+                queueY[tail] = ny;
+                tail++;
+            }
+        }
+    }
+
+    return FALSE;
+}
+
 static void ChooseAiMove(WORD id)
 {
     WORD x;
     WORD y;
     WORD bestX = -1;
     WORD bestY = -1;
-    WORD bestDist = 9999;
-    WORD curX;
-    WORD curY;
+    WORD bestPathDist = 32767;
     WORD bestMoveDx = 0;
     WORD bestMoveDy = 0;
-    WORD bestMoveScore = 32767;
+    WORD curX;
+    WORD curY;
     BOOL targetingDirt = FALSE;
     static const WORD dirX[4] = {1, 0, -1, 0};   /* right, down, left, up */
     static const WORD dirY[4] = {0, 1, 0, -1};
@@ -4136,17 +4258,18 @@ static void ChooseAiMove(WORD id)
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
 
-    if (robots[id].battery <= 25 || (robots[id].battery <= 0 && (AbsW(robots[id].tileX - RobotDockX(id)) + AbsW(robots[id].tileY - RobotDockY(id)) <= 4))) {
+    curX = robots[id].tileX;
+    curY = robots[id].tileY;
+
+    if (robots[id].battery <= 25 || (robots[id].battery <= 0 && (AbsW(curX - RobotDockX(id)) + AbsW(curY - RobotDockY(id)) <= 4))) {
         bestX = RobotDockX(id);
         bestY = RobotDockY(id);
+        AiFindPathStep(id, bestX, bestY, &bestMoveDx, &bestMoveDy, &bestPathDist);
     } else if (robots[id].battery < batteryCostPerMove) {
         aiTargetDirtX[id] = -1;
         aiTargetDirtY[id] = -1;
         return;
     }
-
-    curX = robots[id].tileX;
-    curY = robots[id].tileY;
 
     if (bestX < 0) {
         WORD i;
@@ -4158,17 +4281,31 @@ static void ChooseAiMove(WORD id)
                 RebuildDirtList();
                 bestX = -1;
                 bestY = -1;
-                bestDist = 9999;
+                bestPathDist = 32767;
+                bestMoveDx = 0;
+                bestMoveDy = 0;
                 i = -1;
                 continue;
             }
             {
-                WORD d = AbsW(x - curX) + AbsW(y - curY);
-                d += AiDirtContestPenalty(id, x, y);
-                if (d < bestDist) {
-                    bestDist = d;
+                WORD pathDx = 0;
+                WORD pathDy = 0;
+                WORD pathDist = 32767;
+                WORD score;
+
+                if (!AiFindPathStep(id, x, y, &pathDx, &pathDy, &pathDist)) continue;
+
+                score = pathDist * 16 + AiDirtContestPenalty(id, x, y);
+                if (x == aiTargetDirtX[id] && y == aiTargetDirtY[id]) score -= 2;
+                if (pathDx + curX == aiPrevTileX[id] && pathDy + curY == aiPrevTileY[id]) score += 4;
+                score += AiRecentVisitPenalty(id, curX + pathDx, curY + pathDy);
+
+                if (score < bestPathDist) {
+                    bestPathDist = score;
                     bestX = x;
                     bestY = y;
+                    bestMoveDx = pathDx;
+                    bestMoveDy = pathDy;
                 }
             }
         }
@@ -4180,44 +4317,35 @@ static void ChooseAiMove(WORD id)
         aiTargetDirtY[id] = -1;
     }
 
-    if (bestX >= 0) {
-        for (dir = 0; dir < 4; dir++) {
-            WORD nx = curX + dirX[dir];
-            WORD ny = curY + dirY[dir];
-            WORD score;
-            BOOL backtrack;
+    if (bestX >= 0 && curX == bestX && curY == bestY) return;
 
-            if (!RobotCanPassTile(id, nx, ny)) continue;
-            if (RobotAtTile(nx, ny, id)) continue;
-            score = AiTwoStepScore(id, nx, ny, bestX, bestY);
-            backtrack = (nx == aiPrevTileX[id] && ny == aiPrevTileY[id]) ? TRUE : FALSE;
-            if (backtrack) score += 6; /* prefer forward progress over ping-ponging */
+    if (bestX >= 0 && bestMoveDx == 0 && bestMoveDy == 0) {
+        AiFindPathStep(id, bestX, bestY, &bestMoveDx, &bestMoveDy, NULL);
+    }
 
-            if (score < bestMoveScore) {
-                bestMoveScore = score;
-                bestMoveDx = dirX[dir];
-                bestMoveDy = dirY[dir];
+    if (bestX >= 0 && (bestMoveDx != 0 || bestMoveDy != 0)) {
+        if (StartRobotMove(id, bestMoveDx, bestMoveDy)) {
+            if (targetingDirt) {
+                aiTargetDirtX[id] = bestX;
+                aiTargetDirtY[id] = bestY;
             }
-        }
-
-        if (bestMoveScore < 32767) {
-            if (StartRobotMove(id, bestMoveDx, bestMoveDy)) {
-                if (targetingDirt) {
-                    aiTargetDirtX[id] = bestX;
-                    aiTargetDirtY[id] = bestY;
-                }
-                return;
-            }
+            return;
         }
     }
 
-    /* Final fallback random movement if no directional move is available */
+    /* Final fallback random movement if no pathable target is available. */
     {
         WORD dirs[4];
 
         aiTargetDirtX[id] = -1;
         aiTargetDirtY[id] = -1;
         ShuffleAiDirs(dirs);
+        for (dir = 0; dir < 4; dir++) {
+            WORD r = dirs[dir];
+            if (curX + dirX[r] == aiPrevTileX[id] && curY + dirY[r] == aiPrevTileY[id]) continue;
+            if (AiRecentVisitPenalty(id, curX + dirX[r], curY + dirY[r]) > 0) continue;
+            if (StartRobotMove(id, dirX[r], dirY[r])) return;
+        }
         for (dir = 0; dir < 4; dir++) {
             WORD r = dirs[dir];
             if (StartRobotMove(id, dirX[r], dirY[r])) return;
