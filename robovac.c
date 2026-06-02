@@ -6126,7 +6126,7 @@ static void DrawIntroTitleImage(void)
     dstY = (SCREEN_H - introTitleH) / 2;
     effectTick = introTicks - INTRO_HOLD_FRAMES;
 
-    if (effectTick > 0) {
+    if (effectTick > 0 && effectQuality != EFFECT_LOW) {
         DrawIntroTitleBobEffect(dstX, dstY, effectTick);
         return;
     }
