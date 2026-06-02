@@ -224,10 +224,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROUND_START_OVERLAY_W 233
 #define ROUND_START_OVERLAY_H 115
 #define ROUND_START_OVERLAY_COUNT 4
-#define EMP_COUNTDOWN_LEFT 106
-#define EMP_COUNTDOWN_TOP 50
-#define EMP_COUNTDOWN_W 109
-#define EMP_COUNTDOWN_H 33
+#define EMP_ROBOT_VISUAL_W 32
+#define EMP_ROBOT_VISUAL_H 16
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -576,6 +574,10 @@ static WORD dirtyPrevStunTicks[MAX_ROBOTS];
 static WORD dirtyPrevPowerMoves[MAX_ROBOTS];
 static UBYTE dirtyPrevPowerType[MAX_ROBOTS];
 static WORD dirtyPrevLastPowerTicks = -1;
+static WORD dirtyPrevEmpCountdown[MAX_ROBOTS];
+static WORD dirtyPrevEmpScreenX[MAX_ROBOTS];
+static WORD dirtyPrevEmpScreenY[MAX_ROBOTS];
+static BOOL dirtyPrevEmpVisible[MAX_ROBOTS];
 static WORD dirtyPrevEmpTicks = -1;
 static WORD dirtyPrevRoundGoTicks = -1;
 static WORD dirtyPrevCountdownTicks = -1;
@@ -722,9 +724,15 @@ static BOOL ActivateSpaceOrFireAction(void);
 static BOOL EnableTitleCopperGradient(void);
 static void DrawTitleCarousel(void);
 static void DrawHud(void);
+static WORD EmpRobotCountdownNumber(WORD id);
+static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect);
+static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect);
+static void DrawEmpRobotVisual(WORD id);
+static void DrawEmpRobotVisuals(void);
 static void MarkTitlePanelDirty(void);
 static void MarkTitleAllDirty(void);
 static void PrepareTitlePresentation(void);
+static WORD MiniTextWidth(const char *s, WORD scale);
 static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen);
 static void TriggerRobotPower(WORD id);
 static WORD NextPowerCleanTarget(WORD useCount);
@@ -768,6 +776,9 @@ static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WOR
 static void AddDirtyRobotAt(LONG px, LONG py, WORD id);
 static void AddDirtyBolt(struct Bolt *bolt);
 static void AddDirtyBoltAt(LONG px, LONG py);
+static void AddDirtyEmpRobotVisualAt(WORD sx, WORD sy);
+static void AddDirtyEmpRobotVisual(WORD id);
+static void MarkDirtyEmpRobotVisuals(void);
 static BOOL RectIntersects(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh);
 static BOOL DirtyGameplayRectsReady(void);
 static void RestoreDirtyRectFromRoom(struct DirtyRect *rect);
@@ -1071,6 +1082,55 @@ static void AddDirtyBolt(struct Bolt *bolt)
     AddDirtyBoltAt(bolt->px, bolt->py);
 }
 
+static void AddDirtyEmpRobotVisualAt(WORD sx, WORD sy)
+{
+    struct DirtyRect rect;
+
+    GetEmpRobotVisualRectFromScreen(sx, sy, &rect);
+    if (rect.w > 0 && rect.h > 0) AddDirtyRect(rect.x, rect.y, rect.w, rect.h);
+}
+
+static void AddDirtyEmpRobotVisual(WORD id)
+{
+    struct DirtyRect rect;
+
+    if (!GetEmpRobotVisualRect(id, &rect)) return;
+    AddDirtyRect(rect.x, rect.y, rect.w, rect.h);
+}
+
+static void MarkDirtyEmpRobotVisuals(void)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        WORD countdown = EmpRobotCountdownNumber(i);
+        WORD sx = MAP_X + FP_TO_INT(robots[i].px);
+        WORD sy = MAP_Y + FP_TO_INT(robots[i].py);
+
+        if (dirtyPrevEmpVisible[i]) {
+            AddDirtyEmpRobotVisualAt(dirtyPrevEmpScreenX[i], dirtyPrevEmpScreenY[i]);
+        }
+        if (countdown > 0) {
+            if (dirtyPrevEmpCountdown[i] != countdown) {
+                AddDirtyEmpRobotVisualAt(sx, sy);
+            }
+            AddDirtyEmpRobotVisual(i);
+        }
+
+        dirtyPrevEmpVisible[i] = countdown > 0;
+        dirtyPrevEmpCountdown[i] = countdown;
+        dirtyPrevEmpScreenX[i] = sx;
+        dirtyPrevEmpScreenY[i] = sy;
+    }
+    for (i = robotCount; i < MAX_ROBOTS; i++) {
+        if (dirtyPrevEmpVisible[i]) {
+            AddDirtyEmpRobotVisualAt(dirtyPrevEmpScreenX[i], dirtyPrevEmpScreenY[i]);
+        }
+        dirtyPrevEmpVisible[i] = FALSE;
+        dirtyPrevEmpCountdown[i] = 0;
+    }
+}
+
 static void ForceGameplayFullPresent(void)
 {
     dirtyForceFullFrame = TRUE;
@@ -1132,10 +1192,7 @@ static void MarkDirtyRoundGoOverlay(void)
 
 static void MarkDirtyEmpOverlay(void)
 {
-    if (empCountdownTicks > 0 || dirtyPrevEmpTicks > 0) {
-        AddDirtyRect(EMP_COUNTDOWN_LEFT, EMP_COUNTDOWN_TOP,
-                     EMP_COUNTDOWN_W, EMP_COUNTDOWN_H);
-    }
+    MarkDirtyEmpRobotVisuals();
 }
 
 static void MarkDirtyBossArea(void)
@@ -3349,28 +3406,101 @@ static void DrawBossBolts(void)
     }
 }
 
-static void DrawStunCountdowns(void)
+static WORD EmpRobotCountdownNumber(WORD id)
+{
+    WORD secondsLeft;
+
+    if (id < 0 || id >= robotCount) return 0;
+    if (robots[id].stunTicks <= 0) return 0;
+
+    secondsLeft = ((robots[id].stunTicks - 1) / BOLT_STUN_STEP_FRAMES) + 1;
+    if (secondsLeft < 1) secondsLeft = 1;
+    if (secondsLeft > 5) secondsLeft = 5;
+    return secondsLeft;
+}
+
+static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect)
+{
+    WORD left;
+    WORD top;
+    WORD width;
+    WORD height;
+
+    if (!rect) return;
+
+    left = sx - 8;
+    top = sy - 20;
+    width = EMP_ROBOT_VISUAL_W;
+    height = EMP_ROBOT_VISUAL_H;
+
+    if (top < 0) top = 0;
+    if (left < 0) {
+        width += left;
+        left = 0;
+    }
+    if (left >= SCREEN_W || top >= SCREEN_H || width <= 0 || height <= 0) {
+        rect->x = 0;
+        rect->y = 0;
+        rect->w = 0;
+        rect->h = 0;
+        return;
+    }
+    if (left + width > SCREEN_W) width = SCREEN_W - left;
+    if (top + height > SCREEN_H) height = SCREEN_H - top;
+
+    rect->x = left;
+    rect->y = top;
+    rect->w = width;
+    rect->h = height;
+}
+
+static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect)
+{
+    WORD sx;
+    WORD sy;
+
+    if (!rect || id < 0 || id >= robotCount) return FALSE;
+    if (EmpRobotCountdownNumber(id) <= 0) return FALSE;
+
+    sx = MAP_X + FP_TO_INT(robots[id].px);
+    sy = MAP_Y + FP_TO_INT(robots[id].py);
+    GetEmpRobotVisualRectFromScreen(sx, sy, rect);
+    return rect->w > 0 && rect->h > 0;
+}
+
+static void DrawEmpRobotVisual(WORD id)
+{
+    struct DirtyRect rect;
+    WORD secondsLeft;
+    WORD pen;
+    WORD textX;
+    WORD textY;
+    char b[4];
+
+    secondsLeft = EmpRobotCountdownNumber(id);
+    if (secondsLeft <= 0) return;
+    if (!GetEmpRobotVisualRect(id, &rect)) return;
+
+    snprintf(b, sizeof(b), "%d", secondsLeft);
+    pen = (robots[id].stunTicks & 4) ? 14 : 10;
+
+    SetAPen(&renderRP, pen);
+    RectFill(&renderRP, rect.x + 5, rect.y, rect.x + rect.w - 6, rect.y);
+    RectFill(&renderRP, rect.x + 5, rect.y + rect.h - 1, rect.x + rect.w - 6, rect.y + rect.h - 1);
+    RectFill(&renderRP, rect.x, rect.y + 4, rect.x, rect.y + rect.h - 5);
+    RectFill(&renderRP, rect.x + rect.w - 1, rect.y + 4, rect.x + rect.w - 1, rect.y + rect.h - 5);
+
+    textX = rect.x + ((rect.w - MiniTextWidth(b, 1)) / 2);
+    textY = rect.y + 4;
+    MiniText(&renderRP, textX, textY, b, pen);
+}
+
+static void DrawEmpRobotVisuals(void)
 {
     WORD i;
 
     for (i = 0; i < robotCount; i++) {
-        WORD secondsLeft;
-        WORD sx;
-        WORD sy;
-        char b[4];
-
-        if (robots[i].stunTicks <= 0) continue;
-
-        secondsLeft = ((robots[i].stunTicks - 1) / BOLT_STUN_STEP_FRAMES) + 1;
-        if (secondsLeft < 1) secondsLeft = 1;
-        if (secondsLeft > 5) secondsLeft = 5;
-        snprintf(b, sizeof(b), "%d", secondsLeft);
-
-        sx = MAP_X + FP_TO_INT(robots[i].px) + 6;
-        sy = MAP_Y + FP_TO_INT(robots[i].py) - 6;
-        if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[i].py) + 2;
-
-        MiniText(&renderRP, sx, sy, b, 10);
+        DrawEmpRobotVisual(i);
     }
 }
 
@@ -5058,32 +5188,6 @@ static void DrawPauseMenu(void)
     MiniTextCentered(&renderRP, bottom - 12, "ARROWS ENTER", 13, 1);
 }
 
-static void DrawEmpCountdown(void)
-{
-    WORD secondsLeft;
-    char b[16];
-
-    if (empCountdownTicks <= 0) return;
-
-    secondsLeft = ((empCountdownTicks - 1) / POWERUP_EMP_STEP_FRAMES) + 1;
-    if (secondsLeft < 1) secondsLeft = 1;
-    if (secondsLeft > 5) secondsLeft = 5;
-    snprintf(b, sizeof(b), "EMP %d", secondsLeft);
-
-    SetAPen(&renderRP, 1);
-    RectFill(&renderRP, EMP_COUNTDOWN_LEFT, EMP_COUNTDOWN_TOP,
-             EMP_COUNTDOWN_LEFT + EMP_COUNTDOWN_W - 1,
-             EMP_COUNTDOWN_TOP + EMP_COUNTDOWN_H - 1);
-    SetAPen(&renderRP, 12);
-    RectFill(&renderRP, EMP_COUNTDOWN_LEFT + 2, EMP_COUNTDOWN_TOP + 2,
-             EMP_COUNTDOWN_LEFT + EMP_COUNTDOWN_W - 3,
-             EMP_COUNTDOWN_TOP + EMP_COUNTDOWN_H - 3);
-    SetAPen(&renderRP, 0);
-    RectFill(&renderRP, EMP_COUNTDOWN_LEFT + 4, EMP_COUNTDOWN_TOP + 4,
-             EMP_COUNTDOWN_LEFT + EMP_COUNTDOWN_W - 5,
-             EMP_COUNTDOWN_TOP + EMP_COUNTDOWN_H - 5);
-    MiniTextCentered(&renderRP, 60, b, 14, 3);
-}
 
 static void DrawAiSelectMenu(void)
 {
@@ -5184,43 +5288,15 @@ static BOOL RobotIntersectsRect(WORD id, struct DirtyRect *rect)
     return RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, w, h);
 }
 
-static BOOL StunCountdownIntersectsRect(WORD id, struct DirtyRect *rect)
-{
-    WORD sx;
-    WORD sy;
-
-    if (!rect || id < 0 || id >= robotCount || robots[id].stunTicks <= 0) return FALSE;
-    sx = MAP_X + FP_TO_INT(robots[id].px) + 6;
-    sy = MAP_Y + FP_TO_INT(robots[id].py) - 6;
-    if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[id].py) + 2;
-    return RectIntersects(rect->x, rect->y, rect->w, rect->h, sx, sy, 8, 6);
-}
-
 static void DrawRobotsIntersectingRect(struct DirtyRect *rect)
 {
     WORD i;
-    char b[4];
 
     for (i = humanPlayers; i < robotCount; i++) {
         if (RobotIntersectsRect(i, rect)) DrawRobotBob(i);
     }
     for (i = 0; i < humanPlayers; i++) {
         if (RobotIntersectsRect(i, rect)) DrawRobotBob(i);
-    }
-    for (i = 0; i < robotCount; i++) {
-        WORD secondsLeft;
-        WORD sx;
-        WORD sy;
-
-        if (!StunCountdownIntersectsRect(i, rect)) continue;
-        secondsLeft = ((robots[i].stunTicks - 1) / BOLT_STUN_STEP_FRAMES) + 1;
-        if (secondsLeft < 1) secondsLeft = 1;
-        if (secondsLeft > 5) secondsLeft = 5;
-        snprintf(b, sizeof(b), "%d", secondsLeft);
-        sx = MAP_X + FP_TO_INT(robots[i].px) + 6;
-        sy = MAP_Y + FP_TO_INT(robots[i].py) - 6;
-        if (sy < HUD_H) sy = MAP_Y + FP_TO_INT(robots[i].py) + 2;
-        MiniText(&renderRP, sx, sy, b, 10);
     }
 }
 
@@ -5272,18 +5348,29 @@ static BOOL RoundGoOverlayIntersectsRect(struct DirtyRect *rect)
                           ROUND_START_OVERLAY_W, ROUND_START_OVERLAY_H);
 }
 
-static BOOL EmpOverlayIntersectsRect(struct DirtyRect *rect)
+static BOOL EmpRobotVisualIntersectsRect(WORD id, struct DirtyRect *rect)
 {
-    if (!rect || empCountdownTicks <= 0) return FALSE;
+    struct DirtyRect empRect;
+
+    if (!rect) return FALSE;
+    if (!GetEmpRobotVisualRect(id, &empRect)) return FALSE;
     return RectIntersects(rect->x, rect->y, rect->w, rect->h,
-                          EMP_COUNTDOWN_LEFT, EMP_COUNTDOWN_TOP,
-                          EMP_COUNTDOWN_W, EMP_COUNTDOWN_H);
+                          empRect.x, empRect.y, empRect.w, empRect.h);
+}
+
+static void DrawEmpRobotVisualsIntersectingRect(struct DirtyRect *rect)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        if (EmpRobotVisualIntersectsRect(i, rect)) DrawEmpRobotVisual(i);
+    }
 }
 
 static void DrawGameplayDirtyOverlays(struct DirtyRect *rect)
 {
-    if (EmpOverlayIntersectsRect(rect)) DrawEmpCountdown();
     if (RoundGoOverlayIntersectsRect(rect)) DrawRoundStartOverlay();
+    DrawEmpRobotVisualsIntersectingRect(rect);
 }
 
 static void DrawGameplayDirtyRects(void)
@@ -5381,7 +5468,6 @@ static void DrawFrame(void)
     for (i = 0; i < humanPlayers; i++) {
         DrawRobotBob(i);
     }
-    DrawStunCountdowns();
     for (i = 0; i < robotCount; i++) {
         DrawPlayerBolt(i);
     }
@@ -5389,8 +5475,8 @@ static void DrawFrame(void)
     DrawBossBolts();
     DrawBossExplosion();
     DrawBonusBoss();
-    DrawEmpCountdown();
     DrawRoundStartOverlay();
+    DrawEmpRobotVisuals();
 
     if (pauseMenuOpen) {
         DrawPauseMenu();
