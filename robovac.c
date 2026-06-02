@@ -26,6 +26,7 @@
  *   Q          - open in-game restart/quit menu
  *   0/1/2/3    - choose AI rivals from two-player AI prompt
  *   1/2/3      - choose one-player AI rivals from title screen
+ *   4          - cycle game speed on title screen (low/normal/high)
  *   1/2/3,E/N/H - choose Easy/Normal/Hard when AI difficulty is prompted
  *   O          - hidden 9-rival mode (battle mode)
  *   Esc       - quit
@@ -176,6 +177,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_1       0x01
 #define RAW_2       0x02
 #define RAW_3       0x03
+#define RAW_4       0x04
 #define RAW_O       0x18
 #define RAW_B       0x35
 #define RAW_N       0x36
@@ -335,6 +337,17 @@ static struct BitMap *titleStaticBM = NULL;
 static BOOL titleStaticDirty = TRUE;
 static BOOL titlePanelDirty = TRUE;
 static BOOL titleFullPresentPending = TRUE;
+
+enum GameSpeed {
+    GAME_SPEED_LOW = 0,
+    GAME_SPEED_NORMAL = 1,
+    GAME_SPEED_HIGH = 2
+};
+
+static enum GameSpeed gameSpeed = GAME_SPEED_NORMAL;
+static WORD gameSpeedFrameCounter = 0;
+static const char *gameSpeedNames[3] = { "LOW 50", "NORMAL 66", "HIGH 100" };
+
 enum TitleEffectQuality {
     EFFECT_LOW = 0,
     EFFECT_NORMAL = 1,
@@ -496,6 +509,35 @@ static void PrepareTitlePresentation(void)
 {
     if (gameState != GAME_TITLE) return;
     EnableTitleCopperGradient();
+    MarkTitleAllDirty();
+}
+
+static void ResetGameplaySpeedFrameCounter(void)
+{
+    gameSpeedFrameCounter = 0;
+}
+
+static BOOL ShouldAdvanceGameplayFrame(void)
+{
+    if (gameSpeed == GAME_SPEED_HIGH) return TRUE;
+
+    gameSpeedFrameCounter++;
+    if (gameSpeed == GAME_SPEED_LOW) {
+        if (gameSpeedFrameCounter >= 2) gameSpeedFrameCounter = 0;
+        return (gameSpeedFrameCounter != 0) ? TRUE : FALSE;
+    }
+
+    if (gameSpeedFrameCounter >= 3) {
+        gameSpeedFrameCounter = 0;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void CycleGameSpeed(void)
+{
+    gameSpeed = (enum GameSpeed)(((WORD)gameSpeed + 1) % 3);
+    ResetGameplaySpeedFrameCounter();
     MarkTitleAllDirty();
 }
 
@@ -4158,6 +4200,7 @@ static void ResetLevel(void)
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
     gameState = GAME_PLAYING;
@@ -4961,6 +5004,7 @@ static void StartBonusRound(void)
     roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
     roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
     bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
@@ -5082,6 +5126,12 @@ static void StepGame(void)
         } else {
             roundGoTicks -= frameTicks;
         }
+    }
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        FinishGameplayDirtyRects();
+        return;
     }
 
     StepBonusBoss();
@@ -5417,6 +5467,8 @@ static void BuildTitleStaticCache(void)
         MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
         MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
         MiniTextCentered(&renderRP, 134, "EMP/DIRT NEED 5 7 10", 14, 2);
+        snprintf(b, sizeof(b), "SPEED 4 %s", gameSpeedNames[gameSpeed]);
+        MiniTextCentered(&renderRP, 62, b, 13, 2);
     } else {
         SetAPen(&renderRP, 0);
         RectFill(&renderRP, 0, TITLE_DIRTY_TOP, SCREEN_W - 1, SCREEN_H - 1);
@@ -6907,6 +6959,7 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
         if (code == RAW_3) { StartWithRivals(3); return; }
+        if (code == RAW_4) { CycleGameSpeed(); return; }
         if (code == RAW_O) { StartWithRivals(9); return; }
         if (code == RAW_E) { maxBattery = 110; batteryCostPerMove = 1; return; }
         if (code == RAW_S) { maxBattery = 55; batteryCostPerMove = 2; return; }
