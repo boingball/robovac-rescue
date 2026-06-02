@@ -121,6 +121,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROBOT_SCALE2_W (ROBOT_W * 2)
 #define ROBOT_SCALE2_H (ROBOT_H * 2)
 #define MAX_ROBOTS  10
+#define MAX_DIRTY_RECTS 64
 #define MAX_HUMAN_PLAYERS 2
 #define ROBOT_VARIANTS 7
 
@@ -531,6 +532,49 @@ struct Bolt {
 static struct Bolt playerBolts[MAX_ROBOTS];
 static struct Bolt bossBolts[MAX_BOSS_BOLTS];
 
+struct DirtyRect {
+    WORD x;
+    WORD y;
+    WORD w;
+    WORD h;
+};
+
+#if USE_DIRTY_RECTS
+static struct DirtyRect dirtyRects[MAX_DIRTY_RECTS];
+static WORD dirtyRectCount = 0;
+static BOOL dirtyRectsValid = FALSE;
+static BOOL dirtyRectsBuiltForFrame = FALSE;
+static BOOL dirtyForceFullFrame = TRUE;
+static ULONG fallbackFullFrameCount = 0;
+static ULONG dirtyFrameCount = 0;
+static ULONG dirtyRectTotal = 0;
+static LONG dirtyPrevRobotPx[MAX_ROBOTS];
+static LONG dirtyPrevRobotPy[MAX_ROBOTS];
+static BOOL dirtyPrevRobotValid[MAX_ROBOTS];
+static LONG dirtyPrevPlayerBoltPx[MAX_ROBOTS];
+static LONG dirtyPrevPlayerBoltPy[MAX_ROBOTS];
+static BOOL dirtyPrevPlayerBoltActive[MAX_ROBOTS];
+static LONG dirtyPrevBossBoltPx[MAX_BOSS_BOLTS];
+static LONG dirtyPrevBossBoltPy[MAX_BOSS_BOLTS];
+static BOOL dirtyPrevBossBoltActive[MAX_BOSS_BOLTS];
+static WORD dirtyPrevBossX = 0;
+static WORD dirtyPrevBossY = 0;
+static WORD dirtyPrevBossHealth = 0;
+static WORD dirtyPrevBossExplosionTicks = 0;
+static WORD dirtyPrevDirtLeft = -1;
+static WORD dirtyPrevMoves = -1;
+static WORD dirtyPrevBattery[MAX_ROBOTS];
+static WORD dirtyPrevScore[MAX_ROBOTS];
+static WORD dirtyPrevStunTicks[MAX_ROBOTS];
+static WORD dirtyPrevPowerMoves[MAX_ROBOTS];
+static UBYTE dirtyPrevPowerType[MAX_ROBOTS];
+static WORD dirtyPrevLastPowerTicks = -1;
+static WORD dirtyPrevEmpTicks = -1;
+static WORD dirtyPrevRoundGoTicks = -1;
+static WORD dirtyPrevCountdownTicks = -1;
+static WORD dirtyPrevRobotCount = -1;
+#endif
+
 static ULONG rng = 0x1234ABCD;
 
 static const WORD robotStartXOnePlayer[MAX_ROBOTS] = {1, 18, 1, 18, 17, 2, 1, 18, 17, 18};
@@ -708,6 +752,23 @@ static void AudioReleaseChannel(WORD channel, UBYTE owner);
 static void AudioSafeWait(void);
 static void StartRoundCountdownAudio(void);
 static void StopGetReadySample(void);
+#if USE_DIRTY_RECTS
+static void ClearDirtyRects(void);
+static void AddDirtyRect(WORD x, WORD y, WORD w, WORD h);
+static void AddDirtyTile(WORD tx, WORD ty);
+static void AddDirtyRobot(WORD id);
+static void AddDirtyRobotAt(LONG px, LONG py, WORD id);
+static void AddDirtyBolt(struct Bolt *bolt);
+static void AddDirtyBoltAt(LONG px, LONG py);
+static void ForceGameplayFullPresent(void);
+static void BeginGameplayDirtyRects(void);
+static void FinishGameplayDirtyRects(void);
+#else
+#define AddDirtyTile(tx, ty) ((void)0)
+#define ForceGameplayFullPresent() ((void)0)
+#define BeginGameplayDirtyRects() ((void)0)
+#define FinishGameplayDirtyRects() ((void)0)
+#endif
 static void StopCountdownSample(void);
 static void StopGoSample(void);
 static void StopRoundStartSamples(void);
@@ -821,6 +882,238 @@ static WORD AbsW(WORD v)
 {
     return v < 0 ? -v : v;
 }
+
+#if USE_DIRTY_RECTS
+static void ClearDirtyRects(void)
+{
+    dirtyRectCount = 0;
+    dirtyRectsValid = TRUE;
+    dirtyRectsBuiltForFrame = TRUE;
+}
+
+static BOOL DirtyRectsOverlapOrTouch(struct DirtyRect *a, WORD x, WORD y, WORD w, WORD h)
+{
+    WORD ar = a->x + a->w;
+    WORD ab = a->y + a->h;
+    WORD br = x + w;
+    WORD bb = y + h;
+
+    if (br < a->x) return FALSE;
+    if (x > ar) return FALSE;
+    if (bb < a->y) return FALSE;
+    if (y > ab) return FALSE;
+    return TRUE;
+}
+
+static void AddDirtyRect(WORD x, WORD y, WORD w, WORD h)
+{
+    WORD i;
+    WORD right;
+    WORD bottom;
+
+    if (!dirtyRectsValid || w <= 0 || h <= 0) return;
+
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x >= SCREEN_W || y >= SCREEN_H || w <= 0 || h <= 0) return;
+    if (x + w > SCREEN_W) w = SCREEN_W - x;
+    if (y + h > SCREEN_H) h = SCREEN_H - y;
+
+    right = x + w;
+    bottom = y + h;
+    for (i = 0; i < dirtyRectCount; i++) {
+        struct DirtyRect *r = &dirtyRects[i];
+        if (DirtyRectsOverlapOrTouch(r, x, y, w, h)) {
+            WORD rRight = r->x + r->w;
+            WORD rBottom = r->y + r->h;
+            if (x < r->x) r->x = x;
+            if (y < r->y) r->y = y;
+            if (right > rRight) rRight = right;
+            if (bottom > rBottom) rBottom = bottom;
+            r->w = rRight - r->x;
+            r->h = rBottom - r->y;
+            return;
+        }
+    }
+
+    if (dirtyRectCount >= MAX_DIRTY_RECTS) {
+        dirtyRectsValid = FALSE;
+        dirtyForceFullFrame = TRUE;
+        return;
+    }
+
+    dirtyRects[dirtyRectCount].x = x;
+    dirtyRects[dirtyRectCount].y = y;
+    dirtyRects[dirtyRectCount].w = w;
+    dirtyRects[dirtyRectCount].h = h;
+    dirtyRectCount++;
+}
+
+static void AddDirtyTile(WORD tx, WORD ty)
+{
+    AddDirtyRect(MAP_X + tx * TILE_SIZE, MAP_Y + ty * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+}
+
+static void AddDirtyRobotAt(LONG px, LONG py, WORD id)
+{
+    WORD x = MAP_X + FP_TO_INT(px);
+    WORD y = MAP_Y + FP_TO_INT(py);
+    WORD w = ROBOT_W;
+    WORD h = ROBOT_H;
+
+    if (id >= 0 && id < robotCount && robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+        w = ROBOT_SCALE2_W;
+        h = ROBOT_SCALE2_H;
+    }
+    AddDirtyRect(x - 2, y - 8, w + 4, h + 12);
+}
+
+static void AddDirtyRobot(WORD id)
+{
+    if (id < 0 || id >= robotCount) return;
+    AddDirtyRobotAt(robots[id].px, robots[id].py, id);
+}
+
+static void AddDirtyBoltAt(LONG px, LONG py)
+{
+    AddDirtyRect(MAP_X + FP_TO_INT(px) - 1, MAP_Y + FP_TO_INT(py) - 1, ROBOT_W + 2, ROBOT_H + 2);
+}
+
+static void AddDirtyBolt(struct Bolt *bolt)
+{
+    if (!bolt || !bolt->active) return;
+    AddDirtyBoltAt(bolt->px, bolt->py);
+}
+
+static void ForceGameplayFullPresent(void)
+{
+    dirtyForceFullFrame = TRUE;
+    dirtyRectsValid = FALSE;
+}
+
+static void MarkDirtyHudIfChanged(void)
+{
+    WORD i;
+    BOOL changed = FALSE;
+
+    if (dirtyPrevDirtLeft != dirtLeft || dirtyPrevMoves != moves ||
+        dirtyPrevLastPowerTicks != lastPowerTicks || dirtyPrevEmpTicks != empCountdownTicks ||
+        dirtyPrevRoundGoTicks != roundGoTicks || dirtyPrevCountdownTicks != roundCountdownTicks ||
+        dirtyPrevRobotCount != robotCount ||
+        (gameState == GAME_BONUS_PLAYING && dirtyPrevBossHealth != bonusBossHealth)) {
+        changed = TRUE;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        if (dirtyPrevBattery[i] != robots[i].battery || dirtyPrevScore[i] != robots[i].score ||
+            dirtyPrevStunTicks[i] != robots[i].stunTicks || dirtyPrevPowerMoves[i] != robots[i].powerMovesLeft ||
+            dirtyPrevPowerType[i] != robots[i].powerType) {
+            changed = TRUE;
+            break;
+        }
+    }
+
+    if (changed) AddDirtyRect(0, 0, SCREEN_W, HUD_H);
+
+    dirtyPrevDirtLeft = dirtLeft;
+    dirtyPrevMoves = moves;
+    dirtyPrevLastPowerTicks = lastPowerTicks;
+    dirtyPrevEmpTicks = empCountdownTicks;
+    dirtyPrevRoundGoTicks = roundGoTicks;
+    dirtyPrevCountdownTicks = roundCountdownTicks;
+    dirtyPrevRobotCount = robotCount;
+    dirtyPrevBossHealth = bonusBossHealth;
+    for (i = 0; i < robotCount; i++) {
+        dirtyPrevBattery[i] = robots[i].battery;
+        dirtyPrevScore[i] = robots[i].score;
+        dirtyPrevStunTicks[i] = robots[i].stunTicks;
+        dirtyPrevPowerMoves[i] = robots[i].powerMovesLeft;
+        dirtyPrevPowerType[i] = robots[i].powerType;
+    }
+}
+
+static void MarkDirtyBossArea(void)
+{
+    WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
+    WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+
+    if (gameState != GAME_BONUS_PLAYING) return;
+    if (dirtyPrevBossHealth > 0) AddDirtyRect(dirtyPrevBossX - 8, dirtyPrevBossY - 8, bossW + 16, bossH + 16);
+    if (bonusBossHealth > 0) AddDirtyRect(bonusBossX - 8, bonusBossY - 8, bossW + 16, bossH + 16);
+    if (dirtyPrevBossExplosionTicks > 0 || bonusBossExplosionTicks > 0 || empCountdownTicks > 0 || dirtyPrevEmpTicks > 0) {
+        AddDirtyRect(0, HUD_H, SCREEN_W, SCREEN_H - HUD_H);
+    }
+    dirtyPrevBossX = bonusBossX;
+    dirtyPrevBossY = bonusBossY;
+    dirtyPrevBossExplosionTicks = bonusBossExplosionTicks;
+}
+
+static void BeginGameplayDirtyRects(void)
+{
+    WORD i;
+
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
+        dirtyRectsBuiltForFrame = FALSE;
+        return;
+    }
+
+    ClearDirtyRects();
+
+    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) {
+        ForceGameplayFullPresent();
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        if (dirtyPrevRobotValid[i]) AddDirtyRobotAt(dirtyPrevRobotPx[i], dirtyPrevRobotPy[i], i);
+        else AddDirtyRobot(i);
+    }
+    for (i = 0; i < robotCount; i++) {
+        if (dirtyPrevPlayerBoltActive[i]) AddDirtyBoltAt(dirtyPrevPlayerBoltPx[i], dirtyPrevPlayerBoltPy[i]);
+    }
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) {
+        if (dirtyPrevBossBoltActive[i]) AddDirtyBoltAt(dirtyPrevBossBoltPx[i], dirtyPrevBossBoltPy[i]);
+    }
+    MarkDirtyBossArea();
+}
+
+static void FinishGameplayDirtyRects(void)
+{
+    WORD i;
+
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
+        ForceGameplayFullPresent();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        AddDirtyRobot(i);
+        dirtyPrevRobotPx[i] = robots[i].px;
+        dirtyPrevRobotPy[i] = robots[i].py;
+        dirtyPrevRobotValid[i] = TRUE;
+    }
+    for (i = robotCount; i < MAX_ROBOTS; i++) dirtyPrevRobotValid[i] = FALSE;
+
+    for (i = 0; i < robotCount; i++) {
+        AddDirtyBolt(&playerBolts[i]);
+        dirtyPrevPlayerBoltActive[i] = playerBolts[i].active;
+        dirtyPrevPlayerBoltPx[i] = playerBolts[i].px;
+        dirtyPrevPlayerBoltPy[i] = playerBolts[i].py;
+    }
+    for (i = robotCount; i < MAX_ROBOTS; i++) dirtyPrevPlayerBoltActive[i] = FALSE;
+
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) {
+        AddDirtyBolt(&bossBolts[i]);
+        dirtyPrevBossBoltActive[i] = bossBolts[i].active;
+        dirtyPrevBossBoltPx[i] = bossBolts[i].px;
+        dirtyPrevBossBoltPy[i] = bossBolts[i].py;
+    }
+
+    MarkDirtyBossArea();
+    MarkDirtyHudIfChanged();
+
+    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) ForceGameplayFullPresent();
+}
+#endif
 
 static void PutText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen)
 {
@@ -1733,6 +2026,7 @@ static void UpdateRoomTile(WORD tx, WORD ty)
     } else {
         BlitTileTo(&roomRP, map[ty][tx], tx, ty);
     }
+    AddDirtyTile(tx, ty);
 }
 
 static void BuildRoomBuffer(void)
@@ -1948,6 +2242,7 @@ static void DisableTitleCopperGradient(BOOL reloadPalette)
 
     if (reloadPalette) {
         LoadRGB4(&scr->ViewPort, palette, 32);
+        ForceGameplayFullPresent();
     }
 }
 
@@ -2031,6 +2326,7 @@ static void LoadGamePalette(void)
     DisableTitleCopperGradient(FALSE);
     LoadRGB4(&scr->ViewPort, palette, 32);
     introPaletteActive = FALSE;
+    ForceGameplayFullPresent();
 }
 
 static void LoadIntroPaletteLevel(WORD level)
@@ -3244,6 +3540,7 @@ static void ResetLevel(void)
     InitRobots();
     CountDirt();
     BuildRoomBuffer();
+    ForceGameplayFullPresent();
     StartRoundCountdownAudio();
     roundCountdownLastSoundNumber = 0;
 }
@@ -3760,6 +4057,7 @@ static void StartBonusRound(void)
     CountDirt();
     ResetBonusBoss();
     BuildRoomBuffer();
+    ForceGameplayFullPresent();
     StartRoundCountdownAudio();
     roundCountdownLastSoundNumber = 0;
 }
@@ -3822,8 +4120,13 @@ static void StepGame(void)
     }
 
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
+
+    BeginGameplayDirtyRects();
+
     if (pauseMenuOpen) {
         ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
         return;
     }
 
@@ -3837,6 +4140,8 @@ static void StepGame(void)
                 PlayCountdownSample();
                 roundCountdownLastSoundNumber = roundCountdownSoundNumber;
             }
+            ForceGameplayFullPresent();
+            FinishGameplayDirtyRects();
             return;
         }
 
@@ -3913,6 +4218,7 @@ static void StepGame(void)
     ServiceHooverMoveSample();
     CheckEndState();
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) StopGameplaySamples();
+    FinishGameplayDirtyRects();
 }
 
 /* -------------------------------------------------------------------------
@@ -4832,18 +5138,45 @@ static BOOL DirtyGameplayRectsReady(void)
      * StepGame() on the one-tick-per-TOF cadence instead of letting the dirty
      * renderer skip, replay, or add simulation ticks while waiting for rects.
      */
-    return FALSE;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return FALSE;
+    if (!dirtyRectsBuiltForFrame) return FALSE;
+    if (!dirtyRectsValid) return FALSE;
+    if (dirtyRectCount <= 0) return FALSE;
+    if (dirtyForceFullFrame) return FALSE;
+    if (roundCountdownTicks > 0 || roundGoTicks > 0 || pauseMenuOpen) return FALSE;
+    return TRUE;
+}
+
+static void PresentDirtyGameplayRects(void)
+{
+    WORD i;
+
+    for (i = 0; i < dirtyRectCount; i++) {
+        struct DirtyRect rect = dirtyRects[i];
+        if (rect.x >= SCREEN_W || rect.y >= SCREEN_H || rect.w <= 0 || rect.h <= 0) continue;
+        if (rect.x + rect.w > SCREEN_W) rect.w = SCREEN_W - rect.x;
+        if (rect.y + rect.h > SCREEN_H) rect.h = SCREEN_H - rect.y;
+        BltBitMap(renderBM, rect.x, rect.y,
+                  scr->RastPort.BitMap, rect.x, rect.y,
+                  rect.w, rect.h,
+                  0xC0, 0xFF, NULL);
+    }
+    dirtyFrameCount++;
+    dirtyRectTotal += dirtyRectCount;
 }
 
 static void PresentDirtyGameplayFrame(void)
 {
     if (!DirtyGameplayRectsReady()) {
+        fallbackFullFrameCount++;
         PresentFullFrame();
+        dirtyForceFullFrame = FALSE;
+        dirtyRectsBuiltForFrame = FALSE;
         return;
     }
 
-    /* The gameplay dirty-rect renderer can blit its complete rect set here. */
-    PresentFullFrame();
+    PresentDirtyGameplayRects();
+    dirtyRectsBuiltForFrame = FALSE;
 }
 #endif
 
@@ -4900,6 +5233,7 @@ static void OpenPauseMenu(void)
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     pauseMenuOpen = TRUE;
     pauseMenuSelection = 0;
+    ForceGameplayFullPresent();
     ClearMovementKeys();
 }
 
@@ -4907,6 +5241,7 @@ static void ClosePauseMenu(void)
 {
     pauseMenuOpen = FALSE;
     pauseMenuSelection = 0;
+    ForceGameplayFullPresent();
     ClearMovementKeys();
 }
 
