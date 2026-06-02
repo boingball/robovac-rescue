@@ -267,6 +267,8 @@ struct Robot {
     WORD targetY;
     LONG px;
     LONG py;
+    LONG targetPx;
+    LONG targetPy;
     WORD battery;
     WORD score;
     WORD stunTicks;
@@ -334,6 +336,9 @@ static WORD titleCarouselFrameCount = 0;
 static WORD titleCarouselPhaseFrame[TITLE_SPIN_STEPS];
 static struct RastPort titleStaticRP;
 static struct BitMap *titleStaticBM = NULL;
+static struct RastPort bonusBossCacheRP;
+static struct BitMap *bonusBossCacheBM = NULL;
+static struct BitMap *bonusBossCacheMaskBM = NULL;
 static BOOL titleStaticDirty = TRUE;
 static BOOL titlePanelDirty = TRUE;
 static BOOL titleFullPresentPending = TRUE;
@@ -592,6 +597,10 @@ static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
 static WORD lastPowerTicks = 0;
+static char cachedBossHpText[32] = "";
+static BOOL dirtyBossHpText = TRUE;
+static char cachedHudStatusText[160] = "";
+static BOOL dirtyHudStatusText = TRUE;
 static WORD empCountdownTicks = 0;
 static WORD empCountdownOwner = -1;
 
@@ -612,6 +621,16 @@ struct DirtyRect {
     WORD w;
     WORD h;
 };
+
+static void MarkBossHpTextDirty(void)
+{
+    dirtyBossHpText = TRUE;
+}
+
+static void MarkHudStatusTextDirty(void)
+{
+    dirtyHudStatusText = TRUE;
+}
 
 #if USE_DIRTY_RECTS
 static struct DirtyRect dirtyRects[MAX_DIRTY_RECTS];
@@ -830,6 +849,8 @@ static void OpenAiDifficultyMenu(WORD players, WORD rivals);
 static void StartMatch(WORD players, WORD rivals);
 static void StartBonusRound(void);
 static void FinishBonusRound(void);
+static BOOL BuildBonusBossCache(void);
+static void FreeBonusBossCache(void);
 static void StartBonusBossExplosion(void);
 static void ClearMovementKeys(void);
 static BOOL LoadMenuMusicSample(void);
@@ -1638,6 +1659,7 @@ static void RebuildDirtList(void)
     }
 
     dirtLeft = dirtListCount;
+    MarkHudStatusTextDirty();
     dirtListValid = TRUE;
 }
 
@@ -1650,6 +1672,7 @@ static void ClearDirtList(void)
 {
     dirtListCount = 0;
     dirtLeft = 0;
+    MarkHudStatusTextDirty();
     dirtListValid = TRUE;
 }
 
@@ -1681,6 +1704,7 @@ static void AddDirtListTile(WORD x, WORD y)
     dirtList[dirtListCount].y = y;
     dirtListCount++;
     dirtLeft = dirtListCount;
+    MarkHudStatusTextDirty();
 }
 
 static void RemoveDirtListTile(WORD x, WORD y)
@@ -1699,6 +1723,7 @@ static void RemoveDirtListTile(WORD x, WORD y)
                 dirtList[i] = dirtList[dirtListCount];
             }
             dirtLeft = dirtListCount;
+            MarkHudStatusTextDirty();
             return;
         }
     }
@@ -1779,6 +1804,8 @@ static BOOL MoveRobotToNearestFreeTile(WORD id)
     robots[id].targetY = bestY;
     robots[id].px = TO_FP(bestX * TILE_SIZE);
     robots[id].py = TO_FP(bestY * TILE_SIZE);
+    robots[id].targetPx = robots[id].px;
+    robots[id].targetPy = robots[id].py;
     robots[id].moving = FALSE;
     snprintf(lastPowerText, sizeof(lastPowerText), "%s PHASED FREE", RobotTag(id));
     lastPowerTicks = 60;
@@ -3931,6 +3958,8 @@ static void SetRobotTile(WORD id, WORD tx, WORD ty)
     robots[id].targetY = ty;
     robots[id].px = TO_FP(tx * TILE_SIZE);
     robots[id].py = TO_FP(ty * TILE_SIZE);
+    robots[id].targetPx = robots[id].px;
+    robots[id].targetPy = robots[id].py;
     robots[id].moving = FALSE;
     robots[id].spriteIndex = SPR_READY;
     robots[id].prevSpriteIndex = SPR_READY;
@@ -4090,6 +4119,8 @@ static void TriggerRobotPower(WORD id)
                     robots[i].tileY = robots[i].targetY;
                     robots[i].px = TO_FP(robots[i].tileX * TILE_SIZE);
                     robots[i].py = TO_FP(robots[i].tileY * TILE_SIZE);
+                    robots[i].targetPx = robots[i].px;
+                    robots[i].targetPy = robots[i].py;
                     robots[i].moving = FALSE;
                 }
             }
@@ -4168,6 +4199,7 @@ static void ResetLevel(void)
     StopRoundStartSamples();
 
     roomType = RandRange(5);
+    MarkHudStatusTextDirty();
     layout = roomLayouts[roomType];
 
     for (y = 0; y < MAP_H; y++) {
@@ -4247,6 +4279,8 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
 
     robots[id].targetX = nx;
     robots[id].targetY = ny;
+    robots[id].targetPx = TO_FP(nx * TILE_SIZE);
+    robots[id].targetPy = TO_FP(ny * TILE_SIZE);
     robots[id].moving = TRUE;
     if (dx < 0) SetRobotMoveSprite(id, SPR_LEFT);
     else if (dx > 0) SetRobotMoveSprite(id, SPR_RIGHT);
@@ -4297,8 +4331,8 @@ static void FinishRobotTileMove(WORD id)
 
     robots[id].tileX = tx;
     robots[id].tileY = ty;
-    robots[id].px = TO_FP(tx * TILE_SIZE);
-    robots[id].py = TO_FP(ty * TILE_SIZE);
+    robots[id].px = robots[id].targetPx;
+    robots[id].py = robots[id].targetPy;
     robots[id].moving = FALSE;
 
     if ((robots[id].powerType != POWER_QUAD || robots[id].powerMovesLeft <= 0) &&
@@ -4341,8 +4375,8 @@ static void StepRobotMovement(WORD id)
 
     if (!robots[id].moving) return;
 
-    targetPx = TO_FP(robots[id].targetX * TILE_SIZE);
-    targetPy = TO_FP(robots[id].targetY * TILE_SIZE);
+    targetPx = robots[id].targetPx;
+    targetPy = robots[id].targetPy;
 
     dx = targetPx - robots[id].px;
     dy = targetPy - robots[id].py;
@@ -4649,7 +4683,10 @@ static void ChooseAiMove(WORD id)
     WORD bestMoveDy = 0;
     WORD curX;
     WORD curY;
+    WORD cachedTargetX;
+    WORD cachedTargetY;
     BOOL targetingDirt = FALSE;
+    BOOL bestMoveReady = FALSE;
     static const WORD dirX[4] = {1, 0, -1, 0};   /* right, down, left, up */
     static const WORD dirY[4] = {0, 1, 0, -1};
     WORD dir;
@@ -4660,11 +4697,13 @@ static void ChooseAiMove(WORD id)
 
     curX = robots[id].tileX;
     curY = robots[id].tileY;
+    cachedTargetX = aiTargetDirtX[id];
+    cachedTargetY = aiTargetDirtY[id];
 
     if (robots[id].battery <= 25 || (robots[id].battery <= 0 && (AbsW(curX - RobotDockX(id)) + AbsW(curY - RobotDockY(id)) <= 4))) {
         bestX = RobotDockX(id);
         bestY = RobotDockY(id);
-        AiFindPathStep(id, bestX, bestY, &bestMoveDx, &bestMoveDy, NULL);
+        bestMoveReady = AiFindPathStep(id, bestX, bestY, &bestMoveDx, &bestMoveDy, NULL);
     } else if (robots[id].battery < batteryCostPerMove) {
         aiTargetDirtX[id] = -1;
         aiTargetDirtY[id] = -1;
@@ -4679,6 +4718,7 @@ static void ChooseAiMove(WORD id)
                 bestX = x;
                 bestY = y;
                 targetingDirt = TRUE;
+                bestMoveReady = (bestMoveDx != 0 || bestMoveDy != 0);
             } else {
                 aiTargetDirtX[id] = -1;
                 aiTargetDirtY[id] = -1;
@@ -4692,6 +4732,11 @@ static void ChooseAiMove(WORD id)
     if (bestX < 0) {
         if (AiFindNearestReachableDirt(id, &bestX, &bestY, &bestMoveDx, &bestMoveDy)) {
             targetingDirt = TRUE;
+            bestMoveReady = (bestMoveDx != 0 || bestMoveDy != 0);
+            if (bestX == cachedTargetX && bestY == cachedTargetY && bestMoveReady) {
+                aiTargetDirtX[id] = bestX;
+                aiTargetDirtY[id] = bestY;
+            }
         }
     }
 
@@ -4702,8 +4747,8 @@ static void ChooseAiMove(WORD id)
 
     if (bestX >= 0 && curX == bestX && curY == bestY) return;
 
-    if (bestX >= 0 && bestMoveDx == 0 && bestMoveDy == 0) {
-        AiFindPathStep(id, bestX, bestY, &bestMoveDx, &bestMoveDy, NULL);
+    if (bestX >= 0 && !bestMoveReady && bestMoveDx == 0 && bestMoveDy == 0) {
+        bestMoveReady = AiFindPathStep(id, bestX, bestY, &bestMoveDx, &bestMoveDy, NULL);
     }
 
     if (bestX >= 0 && (bestMoveDx != 0 || bestMoveDy != 0)) {
@@ -4816,9 +4861,84 @@ static void CheckEndState(void)
 
 
 
+static void FreeBonusBossCache(void)
+{
+    if (bonusBossCacheBM) {
+        FreeBitMap(bonusBossCacheBM);
+        bonusBossCacheBM = NULL;
+    }
+
+    if (bonusBossCacheMaskBM) {
+        FreeBitMap(bonusBossCacheMaskBM);
+        bonusBossCacheMaskBM = NULL;
+    }
+
+    bonusBossCacheRP.BitMap = NULL;
+}
+
+static BOOL BuildBonusBossCache(void)
+{
+    struct RastPort maskRP;
+    WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
+    WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+    WORD variant;
+    WORD srcX;
+    WORD px;
+    WORD py;
+    WORD robotId = (finalWinner >= 0 && finalWinner < robotCount) ? finalWinner : 0;
+
+    FreeBonusBossCache();
+
+    if (!robotCacheBM || robotId < 0 || robotId >= robotCount) return FALSE;
+
+    bonusBossCacheBM = AllocBitMap(bossW, bossH, DEPTH,
+                                   BMF_CLEAR | BMF_DISPLAYABLE,
+                                   scr ? scr->RastPort.BitMap : NULL);
+    bonusBossCacheMaskBM = AllocBitMap(bossW, bossH, 1,
+                                       BMF_CLEAR | BMF_DISPLAYABLE,
+                                       scr ? scr->RastPort.BitMap : NULL);
+
+    if (!bonusBossCacheBM || !bonusBossCacheMaskBM) {
+        FreeBonusBossCache();
+        return FALSE;
+    }
+
+    InitRastPort(&bonusBossCacheRP);
+    bonusBossCacheRP.BitMap = bonusBossCacheBM;
+    InitRastPort(&maskRP);
+    maskRP.BitMap = bonusBossCacheMaskBM;
+
+    variant = robots[robotId].spriteVariant;
+    if (variant >= ROBOT_VARIANTS) variant = 0;
+    srcX = (variant * SPR_STATE_COUNT + SPR_DOWN) * ROBOT_W;
+
+    for (py = 0; py < ROBOT_H; py++) {
+        for (px = 0; px < ROBOT_W; px++) {
+            LONG pen = ReadPixel(&robotRP, srcX + px, py);
+            if (pen <= 0) continue;
+            SetAPen(&bonusBossCacheRP, (UBYTE)pen);
+            RectFill(&bonusBossCacheRP,
+                     px * BONUS_BOSS_SCALE,
+                     py * BONUS_BOSS_SCALE,
+                     ((px + 1) * BONUS_BOSS_SCALE) - 1,
+                     ((py + 1) * BONUS_BOSS_SCALE) - 1);
+            SetAPen(&maskRP, 1);
+            RectFill(&maskRP,
+                     px * BONUS_BOSS_SCALE,
+                     py * BONUS_BOSS_SCALE,
+                     ((px + 1) * BONUS_BOSS_SCALE) - 1,
+                     ((py + 1) * BONUS_BOSS_SCALE) - 1);
+        }
+    }
+
+    return TRUE;
+}
+
 static void ResetBonusBoss(void)
 {
     bonusBossHealth = BONUS_BOSS_MAX_HEALTH;
+    MarkBossHpTextDirty();
+    MarkHudStatusTextDirty();
     bonusBossX = (SCREEN_W - (ROBOT_W * BONUS_BOSS_SCALE)) / 2;
     bonusBossY = MAP_Y + ((MAP_H * TILE_SIZE) - (ROBOT_H * BONUS_BOSS_SCALE)) / 2;
     bonusBossDx = 1;
@@ -4840,6 +4960,8 @@ static void BossStunRobot(WORD id, const char *label)
         robots[id].tileY = robots[id].targetY;
         robots[id].px = TO_FP(robots[id].tileX * TILE_SIZE);
         robots[id].py = TO_FP(robots[id].tileY * TILE_SIZE);
+        robots[id].targetPx = robots[id].px;
+        robots[id].targetPy = robots[id].py;
         robots[id].moving = FALSE;
     }
     snprintf(lastPowerText, sizeof(lastPowerText), "%s %s STUN 5S", RobotTag(id), label);
@@ -4938,6 +5060,8 @@ static void StartBonusBossExplosion(void)
     bonusBossExplosionX = bonusBossX;
     bonusBossExplosionY = bonusBossY;
     bonusBossHealth = 0;
+    MarkBossHpTextDirty();
+    MarkHudStatusTextDirty();
     bonusBossExplosionTicks = BONUS_BOSS_EXPLOSION_TICKS;
     for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
     for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
@@ -4955,7 +5079,10 @@ static void FinishBonusRound(void)
     }
     bonusAvailable = FALSE;
     bonusBossHealth = 0;
+    MarkBossHpTextDirty();
+    MarkHudStatusTextDirty();
     bonusBossExplosionTicks = 0;
+    FreeBonusBossCache();
     gameState = GAME_BONUS_END;
     StopGameplaySamples();
     ClearMovementKeys();
@@ -4970,6 +5097,7 @@ static void StartBonusRound(void)
     StopRoundStartSamples();
     roundIndex = 5;
     roomType = 0;
+    MarkHudStatusTextDirty();
 
     for (y = 0; y < MAP_H; y++) {
         for (x = 0; x < MAP_W; x++) {
@@ -5013,6 +5141,7 @@ static void StartBonusRound(void)
     ClosePauseMenu();
 
     InitRobots();
+    BuildBonusBossCache();
     for (x = 0; x < robotCount; x++) {
         robots[x].score = 0;
         robots[x].cleanStreak = 0;
@@ -5768,12 +5897,26 @@ static void DrawBossExplosion(void)
 
 static void DrawBonusBoss(void)
 {
-    char b[32];
+    WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
+    WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
 
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
-    DrawRobotLarge(finalWinner >= 0 ? finalWinner : 0, bonusBossX, bonusBossY, BONUS_BOSS_SCALE, bonusBossPhase);
-    snprintf(b, sizeof(b), "BOSS HP:%d", bonusBossHealth);
-    MiniTextCentered(&renderRP, 40, b, 14, 1);
+
+    if (bonusBossCacheBM && bonusBossCacheMaskBM && bonusBossCacheMaskBM->Planes[0]) {
+        BltMaskBitMapRastPort(bonusBossCacheBM, 0, 0,
+                              &renderRP, bonusBossX, bonusBossY,
+                              bossW, bossH,
+                              (ABC | ABNC | ANBC),
+                              bonusBossCacheMaskBM->Planes[0]);
+    } else {
+        DrawRobotLarge(finalWinner >= 0 ? finalWinner : 0, bonusBossX, bonusBossY, BONUS_BOSS_SCALE, bonusBossPhase);
+    }
+
+    if (dirtyBossHpText) {
+        snprintf(cachedBossHpText, sizeof(cachedBossHpText), "BOSS HP:%d", bonusBossHealth);
+        dirtyBossHpText = FALSE;
+    }
+    MiniTextCentered(&renderRP, 40, cachedBossHpText, 14, 1);
 }
 
 static void DrawHud(void)
@@ -5812,9 +5955,17 @@ static void DrawHud(void)
     if (lastPowerTicks > 0 && lastPowerText[0]) {
         PutText(&renderRP, 4, 8, lastPowerText, 14);
     } else {
-        if (gameState == GAME_BONUS_PLAYING) snprintf(b, sizeof(b), "R6 BONUS BOSS:%d MOVE:%d", bonusBossHealth, batteryCostPerMove);
-        else snprintf(b, sizeof(b), "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
-        PutText(&renderRP, 4, 8, b, 7);
+        if (dirtyHudStatusText) {
+            if (gameState == GAME_BONUS_PLAYING) {
+                snprintf(cachedHudStatusText, sizeof(cachedHudStatusText),
+                         "R6 BONUS BOSS:%d MOVE:%d", bonusBossHealth, batteryCostPerMove);
+            } else {
+                snprintf(cachedHudStatusText, sizeof(cachedHudStatusText),
+                         "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
+            }
+            dirtyHudStatusText = FALSE;
+        }
+        PutText(&renderRP, 4, 8, cachedHudStatusText, 7);
     }
     DrawRobotHealthStrip();
 }
@@ -6578,6 +6729,7 @@ static void StartMatch(WORD players, WORD rivals)
     if (aiRivals < 0) aiRivals = 0;
     if (aiRivals > MAX_ROBOTS - humanPlayers) aiRivals = MAX_ROBOTS - humanPlayers;
     roundIndex = 0;
+    MarkHudStatusTextDirty();
     bonusAvailable = FALSE;
     bonusBossHealth = 0;
     for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
@@ -6715,6 +6867,8 @@ static void StepPlayerBolt(WORD ownerId)
         if (boltX >= bonusBossX && boltX <= bonusBossX + bossW &&
             boltY >= bonusBossY && boltY <= bonusBossY + bossH) {
             bonusBossHealth--;
+            MarkBossHpTextDirty();
+            MarkHudStatusTextDirty();
             robots[ownerId].score += BONUS_BOSS_HIT_POINTS;
             totalScores[ownerId] += BONUS_BOSS_HIT_POINTS;
             snprintf(lastPowerText, sizeof(lastPowerText), "%s BOSS HIT +%d HP:%d", RobotTag(ownerId), BONUS_BOSS_HIT_POINTS, bonusBossHealth);
@@ -6908,7 +7062,7 @@ static void StepBossBolts(void)
 
 static BOOL ActivateSpaceOrFireAction(void)
 {
-    if (gameState == GAME_ROUND_END) { roundIndex++; ResetLevel(); return TRUE; }
+    if (gameState == GAME_ROUND_END) { roundIndex++; MarkHudStatusTextDirty(); ResetLevel(); return TRUE; }
     if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); return TRUE; }
     if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
@@ -6961,9 +7115,9 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_3) { StartWithRivals(3); return; }
         if (code == RAW_4) { CycleGameSpeed(); return; }
         if (code == RAW_O) { StartWithRivals(9); return; }
-        if (code == RAW_E) { maxBattery = 110; batteryCostPerMove = 1; return; }
-        if (code == RAW_S) { maxBattery = 55; batteryCostPerMove = 2; return; }
-        if (code == RAW_H) { maxBattery = 36; batteryCostPerMove = 3; return; }
+        if (code == RAW_E) { maxBattery = 110; batteryCostPerMove = 1; MarkHudStatusTextDirty(); return; }
+        if (code == RAW_S) { maxBattery = 55; batteryCostPerMove = 2; MarkHudStatusTextDirty(); return; }
+        if (code == RAW_H) { maxBattery = 36; batteryCostPerMove = 3; MarkHudStatusTextDirty(); return; }
     }
 
     if (!keyUpEvent && code == RAW_B) { FirePlayerBolt(0); return; }
@@ -7356,6 +7510,7 @@ static void CloseGameScreen(void)
     FreeIntroTitleImage();
     FreeTitleStaticCache();
     FreeTitleCarouselCache();
+    FreeBonusBossCache();
     FreeBoltCache();
     FreeRobotScaledCache();
 
