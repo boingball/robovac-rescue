@@ -248,6 +248,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define ROUND_START_OVERLAY_COUNT 4
 #define EMP_ROBOT_VISUAL_W 7
 #define EMP_ROBOT_VISUAL_H 7
+#define EMP_PALETTE_CYCLE_FRAMES 4
+#define EMP_FLOOR_PEN 9
+#define EMP_ROBOT_LIGHT_PEN_A 29
+#define EMP_ROBOT_LIGHT_PEN_B 30
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -606,6 +610,8 @@ static char cachedHudStatusText[160] = "";
 static BOOL dirtyHudStatusText = TRUE;
 static WORD empCountdownTicks = 0;
 static WORD empCountdownOwner = -1;
+static BOOL empPaletteCycleActive = FALSE;
+static WORD empPaletteCyclePhase = -1;
 
 struct Bolt {
     BOOL active;
@@ -954,6 +960,8 @@ static ULONG ReadBE32(const UBYTE *p);
 static LONG GetFileSize(BPTR fh);
 static BOOL RoundStartLocked(void);
 static void CloseGameScreen(void);
+static void UpdateEmpPaletteCycle(void);
+static void StopEmpPaletteCycle(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -2966,9 +2974,67 @@ static void FreeTitleCopperGradient(void)
     titleCopperActive = FALSE;
 }
 
+static WORD EmpPalettePhase(void)
+{
+    WORD phase;
+
+    if (empCountdownTicks <= 0) return 0;
+    phase = (WORD)((POWERUP_EMP_TICKS - empCountdownTicks) / EMP_PALETTE_CYCLE_FRAMES);
+    phase %= 5;
+    if (phase < 0) phase = 0;
+    return phase;
+}
+
+static UBYTE EmpWarningPen(void)
+{
+    static const UBYTE warningPens[5] = { 13, 10, 13, 13, 12 };
+    return warningPens[EmpPalettePhase()];
+}
+
+static void StopEmpPaletteCycle(void)
+{
+    if (!empPaletteCycleActive && empPaletteCyclePhase < 0) return;
+    empPaletteCycleActive = FALSE;
+    empPaletteCyclePhase = -1;
+    if (scr) LoadRGB4(&scr->ViewPort, palette, 32);
+}
+
+static void UpdateEmpPaletteCycle(void)
+{
+    static const UWORD floorCycle[5] = { 0xBDB, 0x8B8, 0x585, 0x353, 0x171 };
+    static const UWORD lightCycleA[5] = { 0xFD0, 0x0F8, 0xFD0, 0xF72, 0xF22 };
+    static const UWORD lightCycleB[5] = { 0xFF6, 0x7F7, 0xFF6, 0xFA4, 0xF44 };
+    UWORD cycled[32];
+    WORD phase;
+    WORD i;
+
+    if (!scr) return;
+
+    if ((gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) || empCountdownTicks <= 0) {
+        StopEmpPaletteCycle();
+        return;
+    }
+
+    phase = EmpPalettePhase();
+
+    if (empPaletteCycleActive && empPaletteCyclePhase == phase) return;
+
+    for (i = 0; i < 32; i++) cycled[i] = palette[i];
+
+    cycled[EMP_FLOOR_PEN] = floorCycle[phase];
+    cycled[EMP_ROBOT_LIGHT_PEN_A] = lightCycleA[phase];
+    cycled[EMP_ROBOT_LIGHT_PEN_B] = lightCycleB[phase];
+
+    LoadRGB4(&scr->ViewPort, cycled, 32);
+    empPaletteCycleActive = TRUE;
+    empPaletteCyclePhase = phase;
+}
+
 static void LoadGamePalette(void)
 {
     DisableTitleCopperGradient(FALSE);
+    empPaletteCycleActive = FALSE;
+    empPaletteCyclePhase = -1;
     LoadRGB4(&scr->ViewPort, palette, 32);
     introPaletteActive = FALSE;
     ForceGameplayFullPresent();
@@ -3827,6 +3893,13 @@ static void DrawRobotBob(WORD id)
         SetAPen(&renderRP, 16 + 1);
         RectFill(&renderRP, sx + 2, sy + 2, sx + 13, sy + 13);
     }
+
+    if (robots[id].stunTicks > 0) {
+        UBYTE warningPen = EmpWarningPen();
+        SetAPen(&renderRP, warningPen);
+        RectFill(&renderRP, sx + 5, sy + 4, sx + 6, sy + 5);
+        RectFill(&renderRP, sx + 10, sy + 4, sx + 11, sy + 5);
+    }
 }
 
 static WORD BoltFrameForDirection(struct Bolt *bolt)
@@ -4173,6 +4246,8 @@ static void TriggerRobotPower(WORD id)
                 }
             }
         }
+        UpdateEmpPaletteCycle();
+        ForceGameplayFullPresent();
         robots[id].powerMovesLeft = 0;
         robots[id].powerType = POWER_NONE;
     } else if (robots[id].powerType == POWER_DIRT_DROP) {
@@ -5263,7 +5338,12 @@ static void StepGame(void)
         return;
     }
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
+        StopEmpPaletteCycle();
+        return;
+    }
+
+    UpdateEmpPaletteCycle();
 
     BeginGameplayDirtyRects();
 
@@ -5350,7 +5430,12 @@ static void StepGame(void)
     if (bonusBossExplosionTicks > 0) bonusBossExplosionTicks--;
     if (empCountdownTicks > 0) {
         empCountdownTicks--;
-        if (empCountdownTicks <= 0) empCountdownOwner = -1;
+        if (empCountdownTicks <= 0) {
+            empCountdownOwner = -1;
+            StopEmpPaletteCycle();
+        }
+    } else {
+        StopEmpPaletteCycle();
     }
     if (lastPowerTicks > 0) lastPowerTicks--;
 
