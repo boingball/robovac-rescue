@@ -41,7 +41,8 @@ The HUD shows each robot's current clean-streak count, flashes `P` while a timed
 - A match is 5 rounds.
 - Each round picks a random room type.
 - Dirt cleaned is scored as points.
-- Hitting another robot with an energy bolt is worth 2 points.
+- Hitting another robot with an energy bolt is worth 2 points. A bolted robot cannot be bolted again while stunned, and gets 2 seconds of bolt immunity after the stun ends so it can escape.
+- Dirt targets scale up by active robot count: 1-2 robots get 20% more dirt than the base round target, 3 robots get 30% more, and 4+ robots get 40% more.
 - Round winner = robot with the most points that round.
 - After round 5, the final winner is the robot with the highest total points.
 - The match-end screen celebrates the winner with a large rotating robot image, then shows 2nd place, 3rd place, and the full leaderboard.

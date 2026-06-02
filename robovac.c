@@ -121,6 +121,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BOLT_STUN_STEP_FRAMES    17
 #define BOLT_STUN_TICKS          (5 * BOLT_STUN_STEP_FRAMES)
 #define BOLT_STUN_DAMAGE         5
+#define BOLT_ESCAPE_IMMUNE_TICKS  (2 * BOLT_STUN_STEP_FRAMES)
 #define MAIN_AI_FIRE_CHANCE      18
 #define MAIN_AI_FIRE_RANGE_NORMAL 3
 #define MAIN_AI_FIRE_RANGE_HARD   8
@@ -272,6 +273,8 @@ struct Robot {
     WORD battery;
     WORD score;
     WORD stunTicks;
+    WORD boltImmuneTicks;
+    BOOL boltStunned;
     WORD emergencyMovesLeft;
     WORD chargeTicks;
     WORD cleanStreak;
@@ -819,6 +822,34 @@ static const char *RobotControlLabel(WORD id)
 }
 
 static const WORD roundDirtTargets[5] = {14, 20, 26, 32, 38};
+
+static WORD ActiveRobotCountForDirt(void)
+{
+    WORD count = humanPlayers + aiRivals;
+
+    if (humanPlayers < 1) count = 1 + aiRivals;
+    if (humanPlayers > MAX_HUMAN_PLAYERS) count = MAX_HUMAN_PLAYERS + aiRivals;
+    if (count < 1) count = 1;
+    if (count > MAX_ROBOTS) count = MAX_ROBOTS;
+    return count;
+}
+
+static WORD RoundDirtTarget(WORD round)
+{
+    WORD base;
+    WORD robotsInRound;
+    WORD multiplier = 120;
+
+    if (round < 0) round = 0;
+    if (round > 4) round = 4;
+
+    base = roundDirtTargets[round];
+    robotsInRound = ActiveRobotCountForDirt();
+    if (robotsInRound >= 4) multiplier = 140;
+    else if (robotsInRound >= 3) multiplier = 130;
+
+    return (WORD)(((LONG)base * multiplier + 99) / 100);
+}
 static void StepPlayerBolts(void);
 static void StepBossBolts(void);
 static void StepBonusAiFire(void);
@@ -3994,6 +4025,8 @@ static void InitRobots(void)
         robots[i].battery = maxBattery;
         robots[i].score = 0;
         robots[i].stunTicks = 0;
+        robots[i].boltImmuneTicks = 0;
+        robots[i].boltStunned = FALSE;
         robots[i].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
         robots[i].chargeTicks = 0;
         robots[i].cleanStreak = 0;
@@ -4087,6 +4120,19 @@ static void SetRobotMoveSprite(WORD id, UBYTE newSpriteIndex)
     }
 }
 
+static BOOL ApplyBoltStun(WORD id, WORD damage)
+{
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (robots[id].stunTicks > 0 || robots[id].boltImmuneTicks > 0) return FALSE;
+
+    robots[id].stunTicks = BOLT_STUN_TICKS;
+    robots[id].boltStunned = TRUE;
+    robots[id].boltImmuneTicks = 0;
+    robots[id].battery -= damage;
+    if (robots[id].battery < 0) robots[id].battery = 0;
+    return TRUE;
+}
+
 static void TriggerRobotPower(WORD id)
 {
     WORD i;
@@ -4114,6 +4160,8 @@ static void TriggerRobotPower(WORD id)
         for (i = 0; i < robotCount; i++) {
             if (i != id) {
                 robots[i].stunTicks = POWERUP_EMP_TICKS;
+                robots[i].boltStunned = FALSE;
+                robots[i].boltImmuneTicks = 0;
                 if (robots[i].moving) {
                     robots[i].tileX = robots[i].targetX;
                     robots[i].tileY = robots[i].targetY;
@@ -4220,7 +4268,7 @@ static void ResetLevel(void)
     map[11][18] = TILE_DOCK;
 
     ClearDirtList();
-    SpawnRoundDirt(roundDirtTargets[roundIndex]);
+    SpawnRoundDirt(RoundDirtTarget(roundIndex));
     ClearMovementKeys();
     { WORD bi; for (bi = 0; bi < MAX_ROBOTS; bi++) playerBolts[bi].active = FALSE; }
     { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
@@ -4955,6 +5003,8 @@ static void BossStunRobot(WORD id, const char *label)
     if (id < 0 || id >= robotCount) return;
 
     robots[id].stunTicks = BONUS_BOSS_TOUCH_STUN_TICKS;
+    robots[id].boltStunned = FALSE;
+    robots[id].boltImmuneTicks = 0;
     if (robots[id].moving) {
         robots[id].tileX = robots[id].targetX;
         robots[id].tileY = robots[id].targetY;
@@ -5268,15 +5318,20 @@ static void StepGame(void)
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
         if (robots[i].turnTicks > 0) robots[i].turnTicks--;
-        if (robots[i].stunTicks > 0) robots[i].stunTicks--;
+        if (robots[i].stunTicks > 0) {
+            robots[i].stunTicks--;
+            if (robots[i].stunTicks <= 0 && robots[i].boltStunned) {
+                robots[i].boltStunned = FALSE;
+                robots[i].boltImmuneTicks = BOLT_ESCAPE_IMMUNE_TICKS;
+            }
+        } else if (robots[i].boltImmuneTicks > 0) {
+            robots[i].boltImmuneTicks--;
+        }
         if (robots[i].powerType == POWER_BOLT && robots[i].powerMovesLeft > 0 && (RandRange(24) == 0)) {
             WORD j;
             for (j = 0; j < robotCount; j++) {
                 if (j != i && AbsW(robots[j].tileX - robots[i].tileX) + AbsW(robots[j].tileY - robots[i].tileY) <= 3) {
-                    robots[j].stunTicks = BOLT_STUN_TICKS;
-                    robots[j].battery -= 3;
-                    if (robots[j].battery < 0) robots[j].battery = 0;
-                    break;
+                    if (ApplyBoltStun(j, 3)) break;
                 }
             }
         }
@@ -6884,12 +6939,11 @@ static void StepPlayerBolt(WORD ownerId)
     for (i = 0; i < robotCount; i++) {
         if (i == ownerId) continue;
         if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
-            robots[i].stunTicks = BOLT_STUN_TICKS;
-            robots[i].battery -= BOLT_STUN_DAMAGE;
-            if (robots[i].battery < 0) robots[i].battery = 0;
-            robots[ownerId].score += BONUS_BOSS_HIT_POINTS;
-            snprintf(lastPowerText, sizeof(lastPowerText), "%s BOLT +%d", RobotTag(ownerId), BONUS_BOSS_HIT_POINTS);
-            lastPowerTicks = 80;
+            if (ApplyBoltStun(i, BOLT_STUN_DAMAGE)) {
+                robots[ownerId].score += BONUS_BOSS_HIT_POINTS;
+                snprintf(lastPowerText, sizeof(lastPowerText), "%s BOLT +%d", RobotTag(ownerId), BONUS_BOSS_HIT_POINTS);
+                lastPowerTicks = 80;
+            }
             bolt->active = FALSE;
             return;
         }
