@@ -104,8 +104,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define EMERGENCY_DOCK_MOVES  5
 #define DOCK_CHARGE_TICKS     250
 #define POWERUP_CLEAN_TARGET    5
-#define POWERUP_CLEAN_TARGET_2  7
-#define POWERUP_CLEAN_TARGET_3  10
+#define POWERUP_CLEAN_TARGET_2  15
+#define POWERUP_CLEAN_TARGET_3  30
 #define POWERUP_DURATION_MOVES  20
 #define POWERUP_BOLT_MOVES      10
 #define POWERUP_EMP_STEP_FRAMES  17
@@ -5735,7 +5735,7 @@ static void BuildTitleStaticCache(void)
         MiniTextCentered(&renderRP, 86, "A TINY AMIGA ROBOT CLEANER", 7, 2);
         MiniTextCentered(&renderRP, 108, "CLEAN MORE DIRT THAN", 9, 2);
         MiniTextCentered(&renderRP, 122, "THE AI ROBOTS", 9, 2);
-        MiniTextCentered(&renderRP, 134, "EMP/DIRT NEED 5 7 10", 14, 2);
+        MiniTextCentered(&renderRP, 134, "EMP/DIRT NEED 5 15 30", 14, 2);
         snprintf(b, sizeof(b), "SPEED 4 %s", gameSpeedNames[gameSpeed]);
         MiniTextCentered(&renderRP, 62, b, 13, 2);
     } else {
