@@ -2428,7 +2428,12 @@ static void StartMenuMusic(void)
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = secondChunkWords;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + secondChunkOffset);
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = secondChunkWords;
-
+  /* chunk1 is in Paula's play buffer, chunk2 is in Paula's reload buffer.
+       Count down chunk2's duration so we queue chunk3 at the right time. */
+    menuMusicNextOffsetBytes = firstChunkBytes;
+    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
+    /* currentChunkTicks counts the QUEUED chunk (chunk2), not the playing one */
+    menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
     menuMusicSample.playing  = TRUE;
     menuMusicStreaming        = TRUE;
     menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
