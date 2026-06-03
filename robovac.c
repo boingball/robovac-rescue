@@ -263,7 +263,6 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD3 0x0008
 #endif
 #define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
-#define MENU_MUSIC_STREAM_PREROLL_FRAMES 6
 
 struct Robot {
     WORD tileX;
@@ -907,6 +906,7 @@ static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
 static void AudioPrepareChannel(WORD channel, UBYTE owner);
 static void AudioReleaseChannel(WORD channel, UBYTE owner);
 static void AudioSafeWait(void);
+static void AudioDmaLatchWait(void);
 static void StartRoundCountdownAudio(void);
 static void StopGetReadySample(void);
 #if USE_DIRTY_RECTS
@@ -1916,6 +1916,15 @@ static void AudioSafeWait(void)
     }
 }
 
+static void AudioDmaLatchWait(void)
+{
+    volatile WORD i;
+
+    for (i = 0; i < 1024; i++) {
+        ;
+    }
+}
+
 static void AudioPrepareChannel(WORD channel, UBYTE owner)
 {
     UWORD dmaBit;
@@ -2359,9 +2368,18 @@ static void ServiceMenuMusicStream(void)
 
     if (!menuMusicStreaming || !menuMusicSample.playing) return;
 
-    if (menuMusicCurrentChunkTicks > 0) menuMusicCurrentChunkTicks--;
-    if (menuMusicCurrentChunkTicks > MENU_MUSIC_STREAM_PREROLL_FRAMES) return;
+    if (menuMusicCurrentChunkTicks > 0) {
+        menuMusicCurrentChunkTicks--;
+        if (menuMusicCurrentChunkTicks > 0) return;
+    }
 
+    /*
+     * Paula has just moved the reload buffer into its internal playback
+     * registers, so the visible AUDxLC/AUDxLEN registers are now free for
+     * the following chunk.  Do not write them before the current chunk has
+     * expired: doing so replaces the reload buffer before Paula can latch it,
+     * which makes the stream repeat an earlier chunk instead of advancing.
+     */
     offsetBytes = menuMusicNextOffsetBytes;
     menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
     if (menuMusicCurrentChunkTicks < 1) menuMusicCurrentChunkTicks = 1;
@@ -2410,12 +2428,14 @@ static void StartMenuMusic(void)
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
 
-    /* Enable DMA — Paula latches chunk 1 as the play buffer */
+    /* Enable DMA and give Paula time to latch chunk 1 into its internal
+       playback registers before the visible registers become chunk 2. */
     custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
+    AudioDmaLatchWait();
 
-    /* NOW immediately write chunk 2 so Paula latches it as the reload buffer.
-       This must happen before Paula finishes its first DMA cycle (~2 CPU cycles
-       after DMACON write — in practice we have a full raster line of slack). */
+    /* Queue chunk 2 as Paula's reload buffer.  The frame service owns all
+       later chunks and only writes the registers after the previous queued
+       buffer has latched. */
     secondChunkOffset = firstChunkBytes;
     if (secondChunkOffset >= (ULONG)menuMusicSample.dataSize) secondChunkOffset = 0;
     secondChunkBytes = (ULONG)menuMusicSample.dataSize - secondChunkOffset;
@@ -2428,25 +2448,24 @@ static void StartMenuMusic(void)
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = secondChunkWords;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + secondChunkOffset);
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = secondChunkWords;
-  /* chunk1 is in Paula's play buffer, chunk2 is in Paula's reload buffer.
-       Count down chunk2's duration so we queue chunk3 at the right time. */
-/* Paula is now playing chunk1. chunk2 is in the reload regs (written above).
-       Count down chunk1's duration; when it expires Paula will have just started
-       chunk2, so it is safe to write chunk3 into the reload regs. */
+
     menuMusicSample.playing = TRUE;
     menuMusicStreaming = TRUE;
-    menuMusicNextOffsetBytes = firstChunkBytes;
-    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
-    /* chunk1 is playing, chunk2 is already in Paula's reload regs.
-       Count down BOTH durations so we don't overwrite chunk2 before Paula uses it. */
-    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes) + menuMusicQueuedChunkTicks;
+    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
+    menuMusicQueuedChunkTicks = MenuMusicChunkTicks(secondChunkBytes);
+    secondChunkOffset += secondChunkBytes;
+    if (secondChunkOffset >= (ULONG)menuMusicSample.dataSize) secondChunkOffset = 0;
+    menuMusicNextOffsetBytes = secondChunkOffset;
 }
 
 static void ServiceMenuMusicForState(void)
 {
+    BOOL wasPlaying;
+
     if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
+        wasPlaying = menuMusicSample.playing;
         StartMenuMusic();
-        ServiceMenuMusicStream();
+        if (wasPlaying) ServiceMenuMusicStream();
     } else if (menuMusicSample.playing) {
         StopMenuMusic();
     }
