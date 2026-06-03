@@ -2433,13 +2433,13 @@ static void StartMenuMusic(void)
 /* Paula is now playing chunk1. chunk2 is in the reload regs (written above).
        Count down chunk1's duration; when it expires Paula will have just started
        chunk2, so it is safe to write chunk3 into the reload regs. */
-    menuMusicSample.playing        = TRUE;
-    menuMusicStreaming              = TRUE;
-    menuMusicCurrentChunkTicks     = MenuMusicChunkTicks(firstChunkBytes);   /* chunk1 duration */
-    menuMusicNextOffsetBytes       = secondChunkOffset + secondChunkBytes;   /* chunk3 start   */
-    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize)
-        menuMusicNextOffsetBytes = 0;
-    menuMusicQueuedChunkTicks      = MenuMusicChunkTicks(secondChunkBytes);  /* chunk2 duration */
+    menuMusicSample.playing = TRUE;
+    menuMusicStreaming = TRUE;
+    menuMusicNextOffsetBytes = firstChunkBytes;
+    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
+    /* chunk1 is playing, chunk2 is already in Paula's reload regs.
+       Count down BOTH durations so we don't overwrite chunk2 before Paula uses it. */
+    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes) + menuMusicQueuedChunkTicks;
 }
 
 static void ServiceMenuMusicForState(void)
