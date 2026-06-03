@@ -2370,9 +2370,16 @@ static void ServiceMenuMusicStream(void)
 
 static void StartMenuMusic(void)
 {
-    UWORD leftDmaBit;
-    UWORD rightDmaBit;
     ULONG firstChunkBytes;
+    UWORD leftDmaBit, rightDmaBit;
+    UWORD secondChunkWords;
+    ULONG secondChunkOffset;
+    ULONG secondChunkBytes;
+
+    menuMusicStreaming = FALSE;
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentChunkTicks = 0;
+    menuMusicQueuedChunkTicks = 0;
 
     if (menuMusicSample.playing) return;
     if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
@@ -2380,33 +2387,55 @@ static void StartMenuMusic(void)
     if ((ULONG)menuMusicSample.dataSize <= 131070UL) {
         PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
         PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+        menuMusicStreaming = FALSE;
         return;
     }
 
     firstChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
     if (firstChunkBytes > (ULONG)menuMusicSample.dataSize) firstChunkBytes = (ULONG)menuMusicSample.dataSize;
     firstChunkBytes &= ~1UL;
-    if (firstChunkBytes < 2UL) return;
 
-    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
+    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL,  AUDIO_OWNER_MENU_MUSIC);
     AudioPrepareChannel(MENU_MUSIC_RIGHT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
-    leftDmaBit = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    leftDmaBit  = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
+
+    /* Write chunk 1 as the current play buffer */
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)menuMusicSample.data;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = (UWORD)(firstChunkBytes / 2UL);
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per  = menuMusicSample.period;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol  = menuMusicSample.volume;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
+
+    /* Enable DMA — Paula latches chunk 1 as the play buffer */
     custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
 
-    menuMusicSample.playing = TRUE;
-    menuMusicStreaming = TRUE;
+    /* NOW immediately write chunk 2 so Paula latches it as the reload buffer.
+       This must happen before Paula finishes its first DMA cycle (~2 CPU cycles
+       after DMACON write — in practice we have a full raster line of slack). */
+    secondChunkOffset = firstChunkBytes;
+    if (secondChunkOffset >= (ULONG)menuMusicSample.dataSize) secondChunkOffset = 0;
+    secondChunkBytes = (ULONG)menuMusicSample.dataSize - secondChunkOffset;
+    if (secondChunkBytes > MENU_MUSIC_STREAM_CHUNK_BYTES) secondChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
+    secondChunkBytes &= ~1UL;
+    if (secondChunkBytes < 2UL) { secondChunkOffset = 0; secondChunkBytes = firstChunkBytes; }
+    secondChunkWords = (UWORD)(secondChunkBytes / 2UL);
+
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)(menuMusicSample.data + secondChunkOffset);
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = secondChunkWords;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + secondChunkOffset);
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = secondChunkWords;
+
+    menuMusicSample.playing  = TRUE;
+    menuMusicStreaming        = TRUE;
     menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
-    menuMusicNextOffsetBytes = firstChunkBytes;
-    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
+    /* ServiceMenuMusicStream will advance from secondChunkOffset onward */
+    menuMusicNextOffsetBytes  = secondChunkOffset + secondChunkBytes;
+    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize) menuMusicNextOffsetBytes = 0;
+    menuMusicQueuedChunkTicks = MenuMusicChunkTicks(secondChunkBytes);
 }
 
 static void ServiceMenuMusicForState(void)
