@@ -2430,17 +2430,16 @@ static void StartMenuMusic(void)
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = secondChunkWords;
   /* chunk1 is in Paula's play buffer, chunk2 is in Paula's reload buffer.
        Count down chunk2's duration so we queue chunk3 at the right time. */
-    menuMusicNextOffsetBytes = firstChunkBytes;
-    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
-    /* currentChunkTicks counts the QUEUED chunk (chunk2), not the playing one */
-    menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
-    menuMusicSample.playing  = TRUE;
-    menuMusicStreaming        = TRUE;
-    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
-    /* ServiceMenuMusicStream will advance from secondChunkOffset onward */
-    menuMusicNextOffsetBytes  = secondChunkOffset + secondChunkBytes;
-    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize) menuMusicNextOffsetBytes = 0;
-    menuMusicQueuedChunkTicks = MenuMusicChunkTicks(secondChunkBytes);
+/* Paula is now playing chunk1. chunk2 is in the reload regs (written above).
+       Count down chunk1's duration; when it expires Paula will have just started
+       chunk2, so it is safe to write chunk3 into the reload regs. */
+    menuMusicSample.playing        = TRUE;
+    menuMusicStreaming              = TRUE;
+    menuMusicCurrentChunkTicks     = MenuMusicChunkTicks(firstChunkBytes);   /* chunk1 duration */
+    menuMusicNextOffsetBytes       = secondChunkOffset + secondChunkBytes;   /* chunk3 start   */
+    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize)
+        menuMusicNextOffsetBytes = 0;
+    menuMusicQueuedChunkTicks      = MenuMusicChunkTicks(secondChunkBytes);  /* chunk2 duration */
 }
 
 static void ServiceMenuMusicForState(void)
