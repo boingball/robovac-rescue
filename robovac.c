@@ -2394,13 +2394,13 @@ static void StartMenuMusic(void)
     ULONG secondChunkOffset;
     ULONG secondChunkBytes;
 
+    if (menuMusicSample.playing) return;
+    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
+
     menuMusicStreaming = FALSE;
     menuMusicNextOffsetBytes = 0;
     menuMusicCurrentChunkTicks = 0;
     menuMusicQueuedChunkTicks = 0;
-
-    if (menuMusicSample.playing) return;
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
 
     if ((ULONG)menuMusicSample.dataSize <= 131070UL) {
         PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
