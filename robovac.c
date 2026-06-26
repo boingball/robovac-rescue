@@ -263,7 +263,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD3 0x0008
 #endif
 #define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
-#define MENU_MUSIC_STREAM_PREROLL_FRAMES 8
+#define MENU_MUSIC_STREAM_PREROLL_FRAMES 0
 
 struct Robot {
     WORD tileX;
@@ -2333,6 +2333,7 @@ static WORD MenuMusicChunkTicks(ULONG chunkBytes)
 
     if (menuMusicSample.sampleRate == 0) return 1;
     ticks = ((chunkBytes * 50UL) + (ULONG)menuMusicSample.sampleRate - 1UL) / (ULONG)menuMusicSample.sampleRate;
+    ticks = (ticks + 1UL) / 2UL;
     if (ticks < 1UL) ticks = 1UL;
     if (ticks > 32767UL) ticks = 32767UL;
     return (WORD)ticks;
