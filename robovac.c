@@ -263,6 +263,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD3 0x0008
 #endif
 #define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
+#define MENU_MUSIC_STREAM_PREROLL_FRAMES 8
 
 struct Robot {
     WORD tileX;
@@ -1991,6 +1992,7 @@ static void PlayOneShotSample(struct OneShotSample *sample, WORD channel)
     custom.aud[channel].ac_per = sample->period;
     custom.aud[channel].ac_vol = sample->volume;
     custom.dmacon = DMAF_SETCLR | dmaBit;
+    AudioDmaLatchWait();
 
     if (audioSilenceWord) {
         custom.aud[channel].ac_ptr = audioSilenceWord;
@@ -2021,10 +2023,14 @@ static void PlayLoopedSample(struct OneShotSample *sample, WORD channel)
     custom.aud[channel].ac_per = sample->period;
     custom.aud[channel].ac_vol = sample->volume;
     custom.dmacon = DMAF_SETCLR | dmaBit;
+    AudioDmaLatchWait();
 
     if (sample->loopLengthWords > 0) {
         custom.aud[channel].ac_ptr = (UWORD *)(sample->data + ((ULONG)sample->loopStartWords * 2UL));
         custom.aud[channel].ac_len = sample->loopLengthWords;
+    } else {
+        custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+        custom.aud[channel].ac_len = sample->lengthWords;
     }
 
     sample->ticksRemaining = 0;
@@ -2044,6 +2050,7 @@ static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel)
     custom.aud[channel].ac_per = sample->period;
     custom.aud[channel].ac_vol = sample->volume;
     custom.dmacon = DMAF_SETCLR | dmaBit;
+    AudioDmaLatchWait();
 
     custom.aud[channel].ac_ptr = (UWORD *)sample->data;
     custom.aud[channel].ac_len = sample->lengthWords;
@@ -2364,35 +2371,32 @@ static WORD QueueMenuMusicChunk(ULONG offsetBytes)
 
 static void ServiceMenuMusicStream(void)
 {
-    ULONG offsetBytes;
+    WORD nextChunkTicks;
 
     if (!menuMusicStreaming || !menuMusicSample.playing) return;
 
     if (menuMusicCurrentChunkTicks > 0) {
         menuMusicCurrentChunkTicks--;
-        if (menuMusicCurrentChunkTicks > 0) return;
+        if (menuMusicCurrentChunkTicks > MENU_MUSIC_STREAM_PREROLL_FRAMES) return;
     }
 
     /*
-     * Paula has just moved the reload buffer into its internal playback
-     * registers, so the visible AUDxLC/AUDxLEN registers are now free for
-     * the following chunk.  Do not write them before the current chunk has
-     * expired: doing so replaces the reload buffer before Paula can latch it,
-     * which makes the stream repeat an earlier chunk instead of advancing.
+     * Queue the next song chunk shortly before the current chunk finishes.
+     * This keeps Paula's reload registers primed without waiting for a frame
+     * after the handoff.  Waiting until zero is fragile on real hardware: if
+     * the service pass is even one frame late, Paula reloads the previous
+     * buffer and the menu song appears to loop the same section several times.
      */
-    offsetBytes = menuMusicNextOffsetBytes;
-    menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
-    if (menuMusicCurrentChunkTicks < 1) menuMusicCurrentChunkTicks = 1;
-    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(offsetBytes);
+    nextChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
+    if (nextChunkTicks < 1) nextChunkTicks = 1;
+    menuMusicCurrentChunkTicks += nextChunkTicks;
+    menuMusicQueuedChunkTicks = nextChunkTicks;
 }
 
 static void StartMenuMusic(void)
 {
     ULONG firstChunkBytes;
     UWORD leftDmaBit, rightDmaBit;
-    UWORD secondChunkWords;
-    ULONG secondChunkOffset;
-    ULONG secondChunkBytes;
 
     if (menuMusicSample.playing) return;
     if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
@@ -2433,29 +2437,17 @@ static void StartMenuMusic(void)
     custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
     AudioDmaLatchWait();
 
-    /* Queue chunk 2 as Paula's reload buffer.  The frame service owns all
-       later chunks and only writes the registers after the previous queued
-       buffer has latched. */
-    secondChunkOffset = firstChunkBytes;
-    if (secondChunkOffset >= (ULONG)menuMusicSample.dataSize) secondChunkOffset = 0;
-    secondChunkBytes = (ULONG)menuMusicSample.dataSize - secondChunkOffset;
-    if (secondChunkBytes > MENU_MUSIC_STREAM_CHUNK_BYTES) secondChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
-    secondChunkBytes &= ~1UL;
-    if (secondChunkBytes < 2UL) { secondChunkOffset = 0; secondChunkBytes = firstChunkBytes; }
-    secondChunkWords = (UWORD)(secondChunkBytes / 2UL);
-
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)(menuMusicSample.data + secondChunkOffset);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = secondChunkWords;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + secondChunkOffset);
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = secondChunkWords;
-
     menuMusicSample.playing = TRUE;
     menuMusicStreaming = TRUE;
     menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
-    menuMusicQueuedChunkTicks = MenuMusicChunkTicks(secondChunkBytes);
-    secondChunkOffset += secondChunkBytes;
-    if (secondChunkOffset >= (ULONG)menuMusicSample.dataSize) secondChunkOffset = 0;
-    menuMusicNextOffsetBytes = secondChunkOffset;
+    menuMusicQueuedChunkTicks = 0;
+
+    /* The service routine queues chunk 2 shortly before chunk 1 ends.  Keeping
+       one simple "time until current chunk ends" counter avoids the previous
+       double-buffer bookkeeping path that could leave Paula replaying the same
+       64K reload buffer several times before the offset advanced. */
+    menuMusicNextOffsetBytes = firstChunkBytes;
+    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize) menuMusicNextOffsetBytes = 0;
 }
 
 static void ServiceMenuMusicForState(void)
@@ -5350,6 +5342,14 @@ static void EnterTitleScreen(void)
     joyEnabled[0] = FALSE;
     joyEnabled[1] = FALSE;
     ClearMovementKeys();
+#if USE_DIRTY_RECTS
+    dirtyRectsBuiltForFrame = FALSE;
+    dirtyRectsValid = FALSE;
+    dirtyForceFullFrame = TRUE;
+#endif
+    titleStaticDirty = TRUE;
+    titlePanelDirty = TRUE;
+    titleFullPresentPending = TRUE;
     LoadGamePalette();
     PrepareTitlePresentation();
 }
@@ -7353,11 +7353,11 @@ static BOOL ReadJoystickFire(WORD id)
 {
     UBYTE pra = ciaa.ciapra;
 
-    /* Keep fire lines matched to PR90: J1/P1 is CIAA PRA bit 6,
-     * J2/P2 is CIAA PRA bit 7.  Fire inputs are active low.
+    /* J1 is in Amiga joystick port (port 1): CIAA PRA bit 7 (0x80), active low.
+     * J2 is in Amiga mouse port (port 0): CIAA PRA bit 6 (0x40), active low.
      */
-    if (id == 0) return (pra & 0x40) ? FALSE : TRUE;
-    return (pra & 0x80) ? FALSE : TRUE;
+    if (id == 0) return (pra & 0x80) ? FALSE : TRUE;
+    return (pra & 0x40) ? FALSE : TRUE;
 }
 
 static void HandleAiDifficultyJoystick(BOOL up, BOOL down, BOOL firePressed)
@@ -7499,8 +7499,8 @@ static void PollJoysticks(void)
     UWORD dat[MAX_HUMAN_PLAYERS];
     WORD i;
 
-    dat[0] = custom.joy0dat;
-    dat[1] = custom.joy1dat;
+    dat[0] = custom.joy1dat;
+    dat[1] = custom.joy0dat;
 
     for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
         WORD stateBefore = gameState;
