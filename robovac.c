@@ -302,6 +302,7 @@ struct OneShotSample {
     LONG dataSize;
     UWORD lengthWords;
     UWORD period;
+    UWORD sampleRate;
     UWORD playbackTicks;
     WORD ticksRemaining;
     UWORD loopStartWords;
@@ -2265,6 +2266,7 @@ static BOOL LoadOneShotSample(const char *path, struct OneShotSample *sample, co
     sample->lengthWords = (UWORD)(allocSize / 2);
     sample->period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
     if (sample->period < 124) sample->period = 124;
+    sample->sampleRate = (UWORD)sampleRate;
     playbackTicks = (((ULONG)bodySize * 50UL) + (ULONG)sampleRate - 1UL) / (ULONG)sampleRate;
     if (playbackTicks < 1UL) playbackTicks = 1UL;
     if (playbackTicks > 32767UL) playbackTicks = 32767UL;
@@ -2329,9 +2331,8 @@ static WORD MenuMusicChunkTicks(ULONG chunkBytes)
 {
     ULONG ticks;
 
-    if (menuMusicSample.dataSize <= 0 || menuMusicSample.playbackTicks == 0) return 1;
-    ticks = (chunkBytes * (ULONG)menuMusicSample.playbackTicks + (ULONG)menuMusicSample.dataSize - 1UL) /
-            (ULONG)menuMusicSample.dataSize;
+    if (menuMusicSample.sampleRate == 0) return 1;
+    ticks = ((chunkBytes * 50UL) + (ULONG)menuMusicSample.sampleRate - 1UL) / (ULONG)menuMusicSample.sampleRate;
     if (ticks < 1UL) ticks = 1UL;
     if (ticks > 32767UL) ticks = 32767UL;
     return (WORD)ticks;
@@ -2448,6 +2449,13 @@ static void StartMenuMusic(void)
        64K reload buffer several times before the offset advanced. */
     menuMusicNextOffsetBytes = firstChunkBytes;
     if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize) menuMusicNextOffsetBytes = 0;
+
+    /* Prime chunk 2 immediately after Paula has latched chunk 1.  Without this,
+       the first service tick may arrive too late and Paula can replay chunk 1.
+       The fixed MenuMusicChunkTicks() above now uses the actual 8SVX sample
+       rate, so later chunks are queued just before the audible chunk finishes
+       instead of after several repeats. */
+    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
 }
 
 static void ServiceMenuMusicForState(void)
@@ -7353,8 +7361,10 @@ static BOOL ReadJoystickFire(WORD id)
 {
     UBYTE pra = ciaa.ciapra;
 
-    /* J1 is in Amiga joystick port (port 1): CIAA PRA bit 7 (0x80), active low.
-     * J2 is in Amiga mouse port (port 0): CIAA PRA bit 6 (0x40), active low.
+    /* Player 1 deliberately uses the physical Amiga joystick port (port 2 / J2):
+     * JOY1DAT plus CIAA PRA bit 7.  The mouse port (JOY0DAT / bit 6) is only
+     * accepted for player 2 after directional joystick activity, so a normal
+     * mouse click in the mouse port cannot start or control the game.
      */
     if (id == 0) return (pra & 0x80) ? FALSE : TRUE;
     return (pra & 0x40) ? FALSE : TRUE;
@@ -7499,8 +7509,8 @@ static void PollJoysticks(void)
     UWORD dat[MAX_HUMAN_PLAYERS];
     WORD i;
 
-    dat[0] = custom.joy1dat;
-    dat[1] = custom.joy0dat;
+    dat[0] = custom.joy1dat; /* P1 = physical joystick port / J2 */
+    dat[1] = custom.joy0dat; /* P2 optional = mouse port / J1 */
 
     for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
         WORD stateBefore = gameState;
@@ -7509,7 +7519,18 @@ static void PollJoysticks(void)
         BOOL up = JOY_UP(dat[i]);
         BOOL down = JOY_DOWN(dat[i]);
         BOOL fire = ReadJoystickFire(i);
+        BOOL directionActive = left || right || up || down;
         BOOL firePressed;
+
+        /* Ignore fire-only input from the mouse port.  A mouse left click is
+         * electrically the same as J1 fire, so do not let it enable the second
+         * joystick, start the title screen, or steal menu control.  Once a real
+         * joystick direction has been seen on that port, fire works normally
+         * for player 2.
+         */
+        if (i == 1 && !joyEnabled[i] && !directionActive) {
+            fire = FALSE;
+        }
 
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
 
