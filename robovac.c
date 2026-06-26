@@ -2378,19 +2378,28 @@ static void ServiceMenuMusicStream(void)
 
     if (menuMusicCurrentChunkTicks > 0) {
         menuMusicCurrentChunkTicks--;
-        if (menuMusicCurrentChunkTicks > MENU_MUSIC_STREAM_PREROLL_FRAMES) return;
+        if (menuMusicCurrentChunkTicks > 0) return;
     }
 
     /*
-     * Queue the next song chunk shortly before the current chunk finishes.
-     * This keeps Paula's reload registers primed without waiting for a frame
-     * after the handoff.  Waiting until zero is fragile on real hardware: if
-     * the service pass is even one frame late, Paula reloads the previous
-     * buffer and the menu song appears to loop the same section several times.
+     * Paula has two relevant states here: the chunk currently being played
+     * internally, and the visible AUDx pointer/length registers used as the
+     * reload buffer.  StartMenuMusic() primes those visible registers with the
+     * second chunk after chunk 1 is latched.
+     *
+     * Do not overwrite the visible registers before the current chunk ends, or
+     * the already-queued chunk is skipped/repeated.  Once our current-chunk
+     * timer expires, the queued chunk has become the current audio, so promote
+     * its tick count and write exactly one following chunk as the next reload.
      */
+    if (menuMusicQueuedChunkTicks > 0) {
+        menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
+    } else {
+        menuMusicCurrentChunkTicks = 1;
+    }
+
     nextChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
     if (nextChunkTicks < 1) nextChunkTicks = 1;
-    menuMusicCurrentChunkTicks += nextChunkTicks;
     menuMusicQueuedChunkTicks = nextChunkTicks;
 }
 
