@@ -139,7 +139,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAX_ROBOTS  10
 #define MAX_DIRTY_RECTS 96
 #define MAX_HUMAN_PLAYERS 2
-#define JOY_CONFIRM_HOLD_FRAMES 100  /* 2 seconds at PAL 50Hz */
+#define JOY_CONFIRM_HOLD_FRAMES 50   /* 1 second at PAL 50Hz */
 #ifndef JOY_DEBUG
 #define JOY_DEBUG 0
 #endif
@@ -395,6 +395,7 @@ static BOOL menuMusicStreaming = FALSE;
 static ULONG menuMusicNextOffsetBytes = 0;
 static WORD menuMusicCurrentChunkTicks = 0;
 static WORD menuMusicQueuedChunkTicks = 0;
+static BOOL menuMusicStreamDisabledLogged = FALSE;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
@@ -620,6 +621,7 @@ static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyPlayPausePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -2336,8 +2338,16 @@ static void FreeRoundStartSamples(void)
 
 static BOOL LoadMenuMusicSample(void)
 {
-    if (menuMusicSample.loaded) return TRUE;
-    return LoadOneShotSample(MENU_MUSIC_SAMPLE_PATH, &menuMusicSample, "menu music");
+    /* Menu music is optional. The previous title path kept the whole 8SVX in
+     * chip RAM and chunked from that resident sample, which could repeat chunks
+     * and starve gameplay audio. Disable it cleanly until a true DOS-backed
+     * double-buffer streamer is available.
+     */
+    if (!menuMusicStreamDisabledLogged) {
+        printf("Menu music stream disabled\n");
+        menuMusicStreamDisabledLogged = TRUE;
+    }
+    return FALSE;
 }
 
 static void StopMenuMusic(void)
@@ -2350,158 +2360,9 @@ static void StopMenuMusic(void)
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
 
-static WORD MenuMusicChunkTicks(ULONG chunkBytes)
-{
-    ULONG ticks;
-
-    if (menuMusicSample.sampleRate == 0) return 1;
-    ticks = ((chunkBytes * 50UL) + (ULONG)menuMusicSample.sampleRate - 1UL) / (ULONG)menuMusicSample.sampleRate;
-    ticks = (ticks + 1UL) / 2UL;
-    if (ticks < 1UL) ticks = 1UL;
-    if (ticks > 32767UL) ticks = 32767UL;
-    return (WORD)ticks;
-}
-
-static WORD QueueMenuMusicChunk(ULONG offsetBytes)
-{
-    ULONG bytesRemaining;
-    ULONG chunkBytes;
-    UWORD chunkWords;
-
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return 1;
-    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
-
-    bytesRemaining = (ULONG)menuMusicSample.dataSize - offsetBytes;
-    chunkBytes = (bytesRemaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ? MENU_MUSIC_STREAM_CHUNK_BYTES : bytesRemaining;
-    chunkBytes &= ~1UL;
-    if (chunkBytes < 2UL) {
-        offsetBytes = 0;
-        chunkBytes = ((ULONG)menuMusicSample.dataSize > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
-                     MENU_MUSIC_STREAM_CHUNK_BYTES : (ULONG)menuMusicSample.dataSize;
-        chunkBytes &= ~1UL;
-    }
-    if (chunkBytes < 2UL) return 1;
-
-    chunkWords = (UWORD)(chunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = chunkWords;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = chunkWords;
-
-    offsetBytes += chunkBytes;
-    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
-    menuMusicNextOffsetBytes = offsetBytes;
-    return MenuMusicChunkTicks(chunkBytes);
-}
-
-static void ServiceMenuMusicStream(void)
-{
-    WORD nextChunkTicks;
-
-    if (!menuMusicStreaming || !menuMusicSample.playing) return;
-
-    if (menuMusicCurrentChunkTicks > 0) {
-        menuMusicCurrentChunkTicks--;
-        if (menuMusicCurrentChunkTicks > 0) return;
-    }
-
-    /*
-     * Paula has two relevant states here: the chunk currently being played
-     * internally, and the visible AUDx pointer/length registers used as the
-     * reload buffer.  StartMenuMusic() primes those visible registers with the
-     * second chunk after chunk 1 is latched.
-     *
-     * Do not overwrite the visible registers before the current chunk ends, or
-     * the already-queued chunk is skipped/repeated.  Once our current-chunk
-     * timer expires, the queued chunk has become the current audio, so promote
-     * its tick count and write exactly one following chunk as the next reload.
-     */
-    if (menuMusicQueuedChunkTicks > 0) {
-        menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
-    } else {
-        menuMusicCurrentChunkTicks = 1;
-    }
-
-    nextChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
-    if (nextChunkTicks < 1) nextChunkTicks = 1;
-    menuMusicQueuedChunkTicks = nextChunkTicks;
-}
-
-static void StartMenuMusic(void)
-{
-    ULONG firstChunkBytes;
-    UWORD leftDmaBit, rightDmaBit;
-
-    if (menuMusicSample.playing) return;
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
-
-    menuMusicStreaming = FALSE;
-    menuMusicNextOffsetBytes = 0;
-    menuMusicCurrentChunkTicks = 0;
-    menuMusicQueuedChunkTicks = 0;
-
-    if ((ULONG)menuMusicSample.dataSize <= 131070UL) {
-        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-        menuMusicStreaming = FALSE;
-        return;
-    }
-
-    firstChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
-    if (firstChunkBytes > (ULONG)menuMusicSample.dataSize) firstChunkBytes = (ULONG)menuMusicSample.dataSize;
-    firstChunkBytes &= ~1UL;
-
-    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL,  AUDIO_OWNER_MENU_MUSIC);
-    AudioPrepareChannel(MENU_MUSIC_RIGHT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
-    leftDmaBit  = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-    rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-
-    /* Write chunk 1 as the current play buffer */
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)menuMusicSample.data;
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = (UWORD)(firstChunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per  = menuMusicSample.period;
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol  = menuMusicSample.volume;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
-
-    /* Enable DMA and give Paula time to latch chunk 1 into its internal
-       playback registers before the visible registers become chunk 2. */
-    custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
-    AudioDmaLatchWait();
-
-    menuMusicSample.playing = TRUE;
-    menuMusicStreaming = TRUE;
-    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
-    menuMusicQueuedChunkTicks = 0;
-
-    /* The service routine queues chunk 2 shortly before chunk 1 ends.  Keeping
-       one simple "time until current chunk ends" counter avoids the previous
-       double-buffer bookkeeping path that could leave Paula replaying the same
-       64K reload buffer several times before the offset advanced. */
-    menuMusicNextOffsetBytes = firstChunkBytes;
-    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize) menuMusicNextOffsetBytes = 0;
-
-    /* Prime chunk 2 immediately after Paula has latched chunk 1.  Without this,
-       the first service tick may arrive too late and Paula can replay chunk 1.
-       The fixed MenuMusicChunkTicks() above now uses the actual 8SVX sample
-       rate, so later chunks are queued just before the audible chunk finishes
-       instead of after several repeats. */
-    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
-}
-
 static void ServiceMenuMusicForState(void)
 {
-    BOOL wasPlaying;
-
-    if (gameState == GAME_TITLE) {
-        wasPlaying = menuMusicSample.playing;
-        StartMenuMusic();
-        if (wasPlaying) ServiceMenuMusicStream();
-    } else if (menuMusicSample.playing) {
-        StopMenuMusic();
-    }
+    if (menuMusicSample.playing) StopMenuMusic();
 }
 
 static void FreeMenuMusicSample(void)
@@ -2511,6 +2372,7 @@ static void FreeMenuMusicSample(void)
         FreeMem(menuMusicSample.data, menuMusicSample.dataSize);
     }
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
+    menuMusicStreamDisabledLogged = FALSE;
 }
 
 static void UnloadMenuMusicSample(void)
@@ -4345,6 +4207,7 @@ static void TriggerRobotPower(WORD id)
     UBYTE variant;
 
     if (id < 0 || id >= robotCount) return;
+    if (robots[id].battery <= 0) return;
     variant = robots[id].spriteVariant;
     if (variant >= ROBOT_VARIANTS) variant = 0;
 
@@ -4519,7 +4382,7 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     if (robots[id].moving) return FALSE;
     if (robots[id].battery < batteryCostPerMove) {
         if (robots[id].battery > 0) return FALSE;
-        if (robots[id].emergencyMovesLeft <= 0) return FALSE;
+        if (!(gameState == GAME_BONUS_PLAYING && id < humanPlayers) && robots[id].emergencyMovesLeft <= 0) return FALSE;
     }
 
     nx = robots[id].tileX + dx;
@@ -4537,6 +4400,10 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         dockDistNow = AbsW(robots[id].tileX - RobotDockX(id)) + AbsW(robots[id].tileY - RobotDockY(id));
         dockDistNext = AbsW(nx - RobotDockX(id)) + AbsW(ny - RobotDockY(id));
         if (dockDistNext >= dockDistNow) return FALSE;
+        if (gameState == GAME_BONUS_PLAYING && id < humanPlayers) {
+            snprintf(lastPowerText, sizeof(lastPowerText), "%s LIMP MODE - RECHARGE", RobotTag(id));
+            lastPowerTicks = 60;
+        }
     }
 
     robots[id].targetX = nx;
@@ -4556,7 +4423,9 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         robots[id].battery -= batteryCostPerMove;
     } else {
         robots[id].battery = 0;
-        robots[id].emergencyMovesLeft--;
+        if (!(gameState == GAME_BONUS_PLAYING && id < humanPlayers) && robots[id].emergencyMovesLeft > 0) {
+            robots[id].emergencyMovesLeft--;
+        }
     }
 
     if (robots[id].powerMovesLeft > 0) {
@@ -5153,10 +5022,10 @@ static BOOL BuildBonusBossCache(void)
 
     if (!robotCacheBM || robotId < 0 || robotId >= robotCount) return FALSE;
 
-    bonusBossCacheBM = AllocBitMap(bossW, bossH, DEPTH,
+    bonusBossCacheBM = AllocBitMap(bossW * 4, bossH, DEPTH,
                                    BMF_CLEAR | BMF_DISPLAYABLE,
                                    scr ? scr->RastPort.BitMap : NULL);
-    bonusBossCacheMaskBM = AllocBitMap(bossW, bossH, 1,
+    bonusBossCacheMaskBM = AllocBitMap(bossW * 4, bossH, 1,
                                        BMF_CLEAR | BMF_DISPLAYABLE,
                                        scr ? scr->RastPort.BitMap : NULL);
 
@@ -5172,24 +5041,25 @@ static BOOL BuildBonusBossCache(void)
 
     variant = robots[robotId].spriteVariant;
     if (variant >= ROBOT_VARIANTS) variant = 0;
-    srcX = (variant * SPR_STATE_COUNT + SPR_DOWN) * ROBOT_W;
 
-    for (py = 0; py < ROBOT_H; py++) {
-        for (px = 0; px < ROBOT_W; px++) {
-            LONG pen = ReadPixel(&robotRP, srcX + px, py);
-            if (pen <= 0) continue;
-            SetAPen(&bonusBossCacheRP, (UBYTE)pen);
-            RectFill(&bonusBossCacheRP,
-                     px * BONUS_BOSS_SCALE,
-                     py * BONUS_BOSS_SCALE,
-                     ((px + 1) * BONUS_BOSS_SCALE) - 1,
-                     ((py + 1) * BONUS_BOSS_SCALE) - 1);
-            SetAPen(&maskRP, 1);
-            RectFill(&maskRP,
-                     px * BONUS_BOSS_SCALE,
-                     py * BONUS_BOSS_SCALE,
-                     ((px + 1) * BONUS_BOSS_SCALE) - 1,
-                     ((py + 1) * BONUS_BOSS_SCALE) - 1);
+    {
+        WORD frames[4] = { SPR_DOWN, SPR_RIGHT, SPR_UP, SPR_LEFT };
+        WORD frame;
+        for (frame = 0; frame < 4; frame++) {
+            WORD dstBaseX = frame * bossW;
+            srcX = (variant * SPR_STATE_COUNT + frames[frame]) * ROBOT_W;
+            for (py = 0; py < ROBOT_H; py++) {
+                for (px = 0; px < ROBOT_W; px++) {
+                    LONG pen = ReadPixel(&robotRP, srcX + px, py);
+                    if (pen <= 0) continue;
+                    SetAPen(&bonusBossCacheRP, (UBYTE)pen);
+                    RectFill(&bonusBossCacheRP, dstBaseX + (px * BONUS_BOSS_SCALE), py * BONUS_BOSS_SCALE,
+                             dstBaseX + (((px + 1) * BONUS_BOSS_SCALE) - 1), ((py + 1) * BONUS_BOSS_SCALE) - 1);
+                    SetAPen(&maskRP, 1);
+                    RectFill(&maskRP, dstBaseX + (px * BONUS_BOSS_SCALE), py * BONUS_BOSS_SCALE,
+                             dstBaseX + (((px + 1) * BONUS_BOSS_SCALE) - 1), ((py + 1) * BONUS_BOSS_SCALE) - 1);
+                }
+            }
         }
     }
 
@@ -5281,12 +5151,17 @@ static void StepBonusBoss(void)
     bonusBossX += bonusBossDx;
     bonusBossY += bonusBossDy;
 
+    if (AbsW(bonusBossDx) >= AbsW(bonusBossDy)) bonusBossFacingState = (bonusBossDx >= 0) ? SPR_RIGHT : SPR_LEFT;
+    else bonusBossFacingState = (bonusBossDy >= 0) ? SPR_DOWN : SPR_UP;
+
     if (bonusBossX <= TILE_SIZE || bonusBossX >= SCREEN_W - TILE_SIZE - bossW) {
         bonusBossDx = -bonusBossDx;
+        bonusBossFacingState = (bonusBossDx >= 0) ? SPR_RIGHT : SPR_LEFT;
         bonusBossX += bonusBossDx;
     }
     if (bonusBossY <= minY || bonusBossY >= maxY) {
         bonusBossDy = -bonusBossDy;
+        bonusBossFacingState = (bonusBossDy >= 0) ? SPR_DOWN : SPR_UP;
         bonusBossY += bonusBossDy;
     }
 
@@ -6200,7 +6075,11 @@ static void DrawBonusBoss(void)
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
     if (bonusBossCacheBM && bonusBossCacheMaskBM && bonusBossCacheMaskBM->Planes[0]) {
-        BltMaskBitMapRastPort(bonusBossCacheBM, 0, 0,
+        WORD frame = 0;
+        if (bonusBossFacingState == SPR_RIGHT) frame = 1;
+        else if (bonusBossFacingState == SPR_UP) frame = 2;
+        else if (bonusBossFacingState == SPR_LEFT) frame = 3;
+        BltMaskBitMapRastPort(bonusBossCacheBM, frame * bossW, 0,
                               &renderRP, bonusBossX, bonusBossY,
                               bossW, bossH,
                               (ABC | ABNC | ANBC),
@@ -7104,6 +6983,7 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
     if (RoundStartLocked()) return;
     if (id < 0 || id >= robotCount) return;
     if (robots[id].stunTicks > 0) return;
+    if (useBattery && robots[id].battery <= 0) return;
     if (dirX == 0 && dirY == 0) dirY = -1;
 
     bolt = &playerBolts[id];
@@ -7484,6 +7364,7 @@ static void ResetJoystickConfirmHold(WORD id)
     joyFireHoldTicks[id] = 0;
     joyFireHoldTriggered[id] = FALSE;
     joyBluePrev[id] = FALSE;
+    joyPlayPausePrev[id] = FALSE;
 }
 
 static void ResetAllJoystickConfirmHolds(void)
@@ -7505,6 +7386,16 @@ static BOOL ReadJoystickBlueButton(WORD id)
      */
 #ifdef READ_CD32_BLUE_BUTTON
     return READ_CD32_BLUE_BUTTON(id) ? TRUE : FALSE;
+#else
+    (void)id;
+    return FALSE;
+#endif
+}
+
+static BOOL ReadJoystickPlayPauseButton(WORD id)
+{
+#ifdef READ_CD32_PLAY_PAUSE_BUTTON
+    return READ_CD32_PLAY_PAUSE_BUTTON(id) ? TRUE : FALSE;
 #else
     (void)id;
     return FALSE;
@@ -7705,46 +7596,36 @@ static void PollJoysticks(void)
         BOOL down = JOY_DOWN(dat[i]);
         BOOL fire = ReadJoystickFire(i);
         BOOL blue = ReadJoystickBlueButton(i);
+        BOOL playPause = ReadJoystickPlayPauseButton(i);
         BOOL bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
+        BOOL playPausePressed = (playPause && !joyPlayPausePrev[i]) ? TRUE : FALSE;
         BOOL directionActive = left || right || up || down;
         BOOL firePressed;
         BOOL holdConfirmed;
-        BOOL confirmPressed;
 
-        /* Outside the title screen, keep mouse-port protection: a mouse left
-         * click is electrically the same as J2/P2 fire.  During the title
-         * screen, allow fire-only input so player 2 can join/arm before moving
-         * the stick and so hold-to-confirm can be detected.
-         */
-        if (gameState != GAME_TITLE && i == 1 && !joyEnabled[i] && !directionActive) {
-            fire = FALSE;
-        }
-
+        if (gameState != GAME_TITLE && i == 1 && !joyEnabled[i] && !directionActive) fire = FALSE;
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
-        if (gameState == GAME_TITLE && i == 1 && firePressed) {
-            if (!joyEnabled[i]) MarkTitleAllDirty();
-            joyEnabled[i] = TRUE;
-            TitleArmTwoPlayer();
-            titleSelectPlayer = 1;
-            MarkTitleAllDirty();
-            MarkTitlePanelDirty();
-        }
-        if (gameState == GAME_TITLE) {
-            holdConfirmed = UpdateJoystickConfirmHold(i, fire);
-            confirmPressed = bluePressed || holdConfirmed;
-        } else {
-            ResetJoystickConfirmHold(i);
-            holdConfirmed = FALSE;
-            confirmPressed = FALSE;
-        }
+        holdConfirmed = (gameState == GAME_TITLE) ? UpdateJoystickConfirmHold(i, fire) : FALSE;
+        if (gameState != GAME_TITLE) ResetJoystickConfirmHold(i);
 
-        if (firePressed || (gameState == GAME_TITLE && fire)) {
-            if (!joyEnabled[i] && gameState == GAME_TITLE) MarkTitleAllDirty();
-            joyEnabled[i] = TRUE;
+        if ((stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING) && playPausePressed) {
+            if (pauseMenuOpen) ClosePauseMenu();
+            else OpenPauseMenu();
         }
 
         if (gameState == GAME_TITLE) {
-            HandleTitleJoystick(i, left, right, up, down, firePressed, confirmPressed);
+            if (i == 0 && (firePressed || bluePressed)) { joyEnabled[0] = TRUE; titleSelectPlayer = 0; MarkTitlePanelDirty(); }
+            if (i == 1 && (firePressed || bluePressed)) { joyEnabled[1] = TRUE; TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitleAllDirty(); MarkTitlePanelDirty(); }
+            if (aiDifficultyMenuOpen) {
+                if (joyEnabled[i]) HandleAiDifficultyJoystick(i, up, down, firePressed || bluePressed || holdConfirmed);
+                goto finish_joystick;
+            }
+            if (aiSelectMenuOpen) {
+                if (joyEnabled[i]) HandleAiSelectJoystick(i, up, down, firePressed || bluePressed || holdConfirmed);
+                goto finish_joystick;
+            }
+            if (joyEnabled[i] && (holdConfirmed || bluePressed)) { ActivateTitleJoystickConfirmAction(); goto finish_joystick; }
+            HandleTitleJoystick(i, left, right, up, down, firePressed, FALSE);
         }
 
         joyLeft[i] = joyEnabled[i] ? left : FALSE;
@@ -7757,8 +7638,11 @@ static void PollJoysticks(void)
         } else if (stateBefore != GAME_TITLE && joyEnabled[i] && firePressed) {
             ActivateSpaceOrFireAction();
         }
+
+finish_joystick:
         joyFirePrev[i] = fire;
         joyBluePrev[i] = blue;
+        joyPlayPausePrev[i] = playPause;
     }
 }
 
