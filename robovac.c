@@ -206,6 +206,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_COPPER_BANDS 32
 #define TITLE_DIRTY_TOP (TITLE_CAROUSEL_Y - 24)
 #define TITLE_MENU_DIRTY_TOP 66
+#define TITLE_FORCED_FULL_PRESENT_FRAMES 3
 
 #define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenuShort.8svx"
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
@@ -350,6 +351,9 @@ static struct BitMap *bonusBossCacheMaskBM = NULL;
 static BOOL titleStaticDirty = TRUE;
 static BOOL titlePanelDirty = TRUE;
 static BOOL titleFullPresentPending = TRUE;
+static WORD titleFullPresentFrames = 0;
+static BOOL titleFirstFullPresentDone = FALSE;
+static BOOL titleStaticCacheAllocFailedLogged = FALSE;
 
 enum GameSpeed {
     GAME_SPEED_LOW = 0,
@@ -510,17 +514,24 @@ static void MarkTitlePanelDirty(void)
     titlePanelDirty = TRUE;
 }
 
+static void RequestTitleFullPresents(void)
+{
+    titleFullPresentPending = TRUE;
+    titleFullPresentFrames = TITLE_FORCED_FULL_PRESENT_FRAMES;
+}
+
 static void MarkTitleAllDirty(void)
 {
     if (gameState != GAME_TITLE) return;
     titleStaticDirty = TRUE;
     titlePanelDirty = TRUE;
-    titleFullPresentPending = TRUE;
+    RequestTitleFullPresents();
 }
 
 static void PrepareTitlePresentation(void)
 {
     if (gameState != GAME_TITLE) return;
+    titleFirstFullPresentDone = FALSE;
     EnableTitleCopperGradient();
     MarkTitleAllDirty();
 }
@@ -874,6 +885,7 @@ static void DrawEmpRobotVisuals(void);
 static void MarkTitlePanelDirty(void);
 static void MarkTitleAllDirty(void);
 static void PrepareTitlePresentation(void);
+static void RequestTitleFullPresents(void);
 static WORD MiniTextWidth(const char *s, WORD scale);
 static void MiniText(struct RastPort *rp, WORD x, WORD y, const char *s, UBYTE pen);
 static void TriggerRobotPower(WORD id);
@@ -2558,6 +2570,7 @@ static UWORD AudioDmaBit(WORD channel)
 
 static void ServiceTitleMusicForState(void)
 {
+    if (gameState == GAME_TITLE && !titleFirstFullPresentDone) return;
     ServiceMenuMusicForState();
 }
 
@@ -3674,7 +3687,7 @@ static void FreeTitleStaticCache(void)
     titleStaticRP.BitMap = NULL;
     titleStaticDirty = TRUE;
     titlePanelDirty = TRUE;
-    titleFullPresentPending = TRUE;
+    RequestTitleFullPresents();
 }
 
 static BOOL AllocTitleStaticCache(void)
@@ -3684,13 +3697,20 @@ static BOOL AllocTitleStaticCache(void)
     titleStaticBM = AllocBitMap(SCREEN_W, SCREEN_H, DEPTH,
                                 BMF_CLEAR | BMF_DISPLAYABLE,
                                 scr->RastPort.BitMap);
-    if (!titleStaticBM) return FALSE;
+    if (!titleStaticBM) {
+        if (!titleStaticCacheAllocFailedLogged) {
+            printf("Could not allocate title static cache; direct title rendering fallback enabled\n");
+            titleStaticCacheAllocFailedLogged = TRUE;
+        }
+        return FALSE;
+    }
 
+    titleStaticCacheAllocFailedLogged = FALSE;
     InitRastPort(&titleStaticRP);
     titleStaticRP.BitMap = titleStaticBM;
     titleStaticDirty = TRUE;
     titlePanelDirty = TRUE;
-    titleFullPresentPending = TRUE;
+    RequestTitleFullPresents();
     return TRUE;
 }
 
@@ -5396,7 +5416,7 @@ static void EnterTitleScreen(void)
 #endif
     titleStaticDirty = TRUE;
     titlePanelDirty = TRUE;
-    titleFullPresentPending = TRUE;
+    RequestTitleFullPresents();
     LoadGamePalette();
     PrepareTitlePresentation();
 }
@@ -5814,18 +5834,19 @@ static void DrawTitleRobotStatic(WORD variant, WORD state, WORD dstX, WORD dstY)
     }
 }
 
-static void BuildTitleStaticCache(void)
+static BOOL BuildTitleStaticCache(void)
 {
     struct BitMap *oldBM;
+    BOOL usingCache;
     char b[80];
     WORD slot;
     static const WORD slotX[ROBOT_VARIANTS] = {24, 64, 104, 144, 184, 224, 264};
 
-    if (!AllocTitleStaticCache()) return;
-    if (!titleStaticDirty && !titlePanelDirty) return;
+    usingCache = AllocTitleStaticCache();
+    if (usingCache && !titleStaticDirty && !titlePanelDirty) return TRUE;
 
     oldBM = renderRP.BitMap;
-    renderRP.BitMap = titleStaticBM;
+    if (usingCache) renderRP.BitMap = titleStaticBM;
 
     if (titleStaticDirty) {
         SetAPen(&renderRP, 0);
@@ -5882,8 +5903,12 @@ static void BuildTitleStaticCache(void)
     }
 
     renderRP.BitMap = oldBM;
-    titleStaticDirty = FALSE;
-    titlePanelDirty = FALSE;
+    if (usingCache) {
+        titleStaticDirty = FALSE;
+        titlePanelDirty = FALSE;
+    }
+    WaitBlit();
+    return usingCache;
 }
 
 static void DrawTitleCarousel(void)
@@ -6728,7 +6753,11 @@ static void PresentFrame(void)
 {
     WORD dirtyTop;
 
-    if (gameState == GAME_TITLE && !titleFullPresentPending) {
+    if (gameState == GAME_TITLE) {
+        WaitBlit();
+    }
+
+    if (gameState == GAME_TITLE && !titleFullPresentPending && titleFullPresentFrames <= 0) {
         dirtyTop = (aiSelectMenuOpen || aiDifficultyMenuOpen) ? TITLE_MENU_DIRTY_TOP : TITLE_DIRTY_TOP;
         BltBitMap(renderBM, 0, dirtyTop,
                   scr->RastPort.BitMap, 0, dirtyTop,
@@ -6748,7 +6777,9 @@ static void PresentFrame(void)
 #endif
 
     if (gameState == GAME_TITLE) {
-        titleFullPresentPending = FALSE;
+        if (titleFullPresentFrames > 0) titleFullPresentFrames--;
+        titleFullPresentPending = (titleFullPresentFrames > 0) ? TRUE : FALSE;
+        titleFirstFullPresentDone = TRUE;
     }
 }
 
@@ -7712,6 +7743,10 @@ static BOOL OpenGameScreen(void)
         printf("Robot BOB cache allocation failed; fallback drawing enabled\n");
     }
 
+    if (!AllocTitleStaticCache()) {
+        printf("Could not reserve title static cache before menu music load; direct title rendering fallback active\n");
+    }
+
     if (!LoadIntroTitleImage()) {
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
     }
@@ -7821,10 +7856,10 @@ int main(void)
         PollWindowMessages();
         PollJoysticks();
         StepGame();
-        ServiceTitleMusicForState();
         DrawFrame();
         WaitTOF();
         PresentFrame();
+        ServiceTitleMusicForState();
     }
 
     CloseGameScreen();
