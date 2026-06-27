@@ -19,10 +19,10 @@
  *   Z/X/C/S / V   - move player 2 robot / fire bolts
  *   Joysticks     - disabled until that joystick fire is pressed (J1/J2 shown)
  *                 Title menu also enables J1/J2 from fire so the carousel can be used
- *                 J1 uses JOY0DAT + CIAA PRA bit 6 fire
- *                 J2 uses JOY1DAT + CIAA PRA bit 7 fire
- *   P2 fire/V     - arm/lock two-player carousel selection from title screen
- *   Space/J1 second fire - start/advance; R resets the active level
+ *                 On-screen J1/P1 uses the physical joystick port: JOY1DAT + CIAA PRA bit 7
+ *                 On-screen J2/P2 uses the mouse port: JOY0DAT + CIAA PRA bit 6
+ *   P2 fire/V     - arm two-player carousel selection from title screen
+ *   Space/Return/RMB/blue/hold fire - select/start; R resets the active level
  *   Q          - open in-game restart/quit menu
  *   0/1/2/3    - choose AI rivals from two-player AI prompt
  *   1/2/3      - choose one-player AI rivals from title screen
@@ -139,6 +139,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAX_ROBOTS  10
 #define MAX_DIRTY_RECTS 96
 #define MAX_HUMAN_PLAYERS 2
+#define JOY_CONFIRM_HOLD_FRAMES 100  /* 2 seconds at PAL 50Hz */
 #define ROBOT_VARIANTS 7
 #define AI_RECENT_TILE_COUNT 4
 
@@ -613,6 +614,9 @@ static BOOL joyUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyFirePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
+static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -905,6 +909,7 @@ static void FreeBonusBossCache(void);
 static void StartBonusBossExplosion(void);
 static void ClearMovementKeys(void);
 static BOOL LoadMenuMusicSample(void);
+static void ResetAllJoystickConfirmHolds(void);
 static void FreeMenuMusicSample(void);
 static void StartMenuMusic(void);
 static void StopMenuMusic(void);
@@ -5406,6 +5411,7 @@ static void EnterTitleScreen(void)
     titlePlayer2Locked = FALSE;
     CloseAiSelectMenu();
     CloseAiDifficultyMenu();
+    ResetAllJoystickConfirmHolds();
     joyEnabled[0] = FALSE;
     joyEnabled[1] = FALSE;
     ClearMovementKeys();
@@ -5895,11 +5901,11 @@ static BOOL BuildTitleStaticCache(void)
     snprintf(b, sizeof(b), "P%d %s", titleSelectPlayer + 1, robotVariantNames[selectedPlayerVariant[titleSelectPlayer]]);
     MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 50, b, 7, 2);
     if (!titleTwoPlayerArmed) {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1/J1 SELECT  J1B2 START", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "HOLD FIRE START  BLUE SELECT", 13, 2);
     } else if (!titlePlayer2Locked) {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2/J2 SELECT  P2 FIRE LOCK", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P2 FIRE JOINS  HOLD LOCK", 13, 2);
     } else {
-        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "P1/J1 SELECT  J1B2 START", 13, 2);
+        MiniTextCentered(&renderRP, TITLE_CAROUSEL_Y + 70, "HOLD FIRE START  BLUE SELECT", 13, 2);
     }
 
     renderRP.BitMap = oldBM;
@@ -6196,7 +6202,7 @@ static void DrawHud(void)
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
         MiniTextCentered(&renderRP, 20, "ARROWS/J1 P1  P2 FIRE JOINS", 13, 2);
         MiniTextCentered(&renderRP, 32, "P2 Z/C/J2 SELECT  V LOCK", 13, 2);
-        MiniTextCentered(&renderRP, 44, "1/2/3/O AI  SPACE/J1B2 START", 14, 2);
+        MiniTextCentered(&renderRP, 44, "SPACE/RMB/BLUE/HOLD START", 14, 2);
         return;
     }
 
@@ -7007,6 +7013,7 @@ static void StartMatch(WORD players, WORD rivals)
     titlePlayer2Locked = FALSE;
     titleSelectPlayer = 0;
     aiDifficultyMenuOpen = FALSE;
+    ResetAllJoystickConfirmHolds();
     ResetLevel();
 }
 
@@ -7431,13 +7438,65 @@ static BOOL ReadJoystickFire(WORD id)
 {
     UBYTE pra = ciaa.ciapra;
 
-    /* Player 1 deliberately uses the physical Amiga joystick port (port 2 / J2):
-     * JOY1DAT plus CIAA PRA bit 7.  The mouse port (JOY0DAT / bit 6) is only
-     * accepted for player 2 after directional joystick activity, so a normal
-     * mouse click in the mouse port cannot start or control the game.
+    /* On-screen J1/P1 deliberately uses the physical Amiga joystick port
+     * (custom.joy1dat plus CIAA PRA bit 7).  On-screen J2/P2 uses the mouse
+     * port (custom.joy0dat plus CIAA PRA bit 6), with fire-only protection
+     * applied in PollJoysticks outside the title join/confirm flow.
      */
     if (id == 0) return (pra & 0x80) ? FALSE : TRUE;
     return (pra & 0x40) ? FALSE : TRUE;
+}
+
+static void ResetJoystickConfirmHold(WORD id)
+{
+    if (id < 0 || id >= MAX_HUMAN_PLAYERS) return;
+    joyFireHoldTicks[id] = 0;
+    joyFireHoldTriggered[id] = FALSE;
+    joyBluePrev[id] = FALSE;
+}
+
+static void ResetAllJoystickConfirmHolds(void)
+{
+    WORD i;
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        ResetJoystickConfirmHold(i);
+    }
+}
+
+static BOOL ReadJoystickBlueButton(WORD id)
+{
+    (void)id;
+    /* This build has no existing CD32/second-button hardware reader.  Keep
+     * RMB/MENUDOWN on the Intuition path and rely on hold-to-confirm for
+     * single-button sticks rather than faking blue from the mouse button.
+     */
+    return FALSE;
+}
+
+static BOOL UpdateJoystickConfirmHold(WORD id, BOOL fire)
+{
+    if (id < 0 || id >= MAX_HUMAN_PLAYERS) return FALSE;
+
+    if (!fire) {
+        joyFireHoldTicks[id] = 0;
+        joyFireHoldTriggered[id] = FALSE;
+        return FALSE;
+    }
+
+    if (joyFireHoldTriggered[id]) return FALSE;
+    if (joyFireHoldTicks[id] < JOY_CONFIRM_HOLD_FRAMES) joyFireHoldTicks[id]++;
+    if (joyFireHoldTicks[id] >= JOY_CONFIRM_HOLD_FRAMES) {
+        joyFireHoldTriggered[id] = TRUE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL ActivateTitleJoystickConfirmAction(void)
+{
+    if (aiDifficultyMenuOpen) { ActivateAiDifficultyMenu(); return TRUE; }
+    if (aiSelectMenuOpen) { ActivateAiSelectMenu(); return TRUE; }
+    return ActivateSpaceOrFireAction();
 }
 
 static void HandleAiDifficultyJoystick(BOOL up, BOOL down, BOOL firePressed)
@@ -7490,7 +7549,7 @@ static void HandleAiSelectJoystick(BOOL up, BOOL down, BOOL firePressed)
     prevDown = down;
 }
 
-static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL down, BOOL firePressed)
+static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL down, BOOL firePressed, BOOL confirmPressed)
 {
     static BOOL prevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
     static BOOL prevRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -7517,7 +7576,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiDifficultyMenuOpen) {
         if (id == 0) {
-            HandleAiDifficultyJoystick(up, down, firePressed);
+            HandleAiDifficultyJoystick(up, down, confirmPressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7526,11 +7585,15 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiSelectMenuOpen) {
         if (id == 0) {
-            /* J1 fire can now accept the pop-up prompt as well as
-             * keyboard Return, number keys, Space, or J1 second fire/RMB.
-             */
-            HandleAiSelectJoystick(up, down, firePressed);
+            HandleAiSelectJoystick(up, down, confirmPressed);
         }
+        prevLeft[id] = left;
+        prevRight[id] = right;
+        return;
+    }
+
+    if (confirmPressed) {
+        ActivateTitleJoystickConfirmAction();
         prevLeft[id] = left;
         prevRight[id] = right;
         return;
@@ -7546,7 +7609,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
             titleSelectPlayer = 0;
             MarkTitlePanelDirty();
         } else if (id == 1) {
-            TitlePlayer2Fire();
+            TitleArmTwoPlayer();
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7576,8 +7639,8 @@ static void PollJoysticks(void)
     UWORD dat[MAX_HUMAN_PLAYERS];
     WORD i;
 
-    dat[0] = custom.joy1dat; /* P1 = physical joystick port / J2 */
-    dat[1] = custom.joy0dat; /* P2 optional = mouse port / J1 */
+    dat[0] = custom.joy1dat; /* on-screen J1/P1 = physical joystick port */
+    dat[1] = custom.joy0dat; /* on-screen J2/P2 = mouse port */
 
     for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
         WORD stateBefore = gameState;
@@ -7586,20 +7649,31 @@ static void PollJoysticks(void)
         BOOL up = JOY_UP(dat[i]);
         BOOL down = JOY_DOWN(dat[i]);
         BOOL fire = ReadJoystickFire(i);
+        BOOL blue = ReadJoystickBlueButton(i);
+        BOOL bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
         BOOL directionActive = left || right || up || down;
         BOOL firePressed;
+        BOOL holdConfirmed;
+        BOOL confirmPressed;
 
-        /* Ignore fire-only input from the mouse port.  A mouse left click is
-         * electrically the same as J1 fire, so do not let it enable the second
-         * joystick, start the title screen, or steal menu control.  Once a real
-         * joystick direction has been seen on that port, fire works normally
-         * for player 2.
+        /* Outside the title screen, keep mouse-port protection: a mouse left
+         * click is electrically the same as J2/P2 fire.  During the title
+         * screen, allow fire-only input so player 2 can join/arm before moving
+         * the stick and so hold-to-confirm can be detected.
          */
-        if (i == 1 && !joyEnabled[i] && !directionActive) {
+        if (gameState != GAME_TITLE && i == 1 && !joyEnabled[i] && !directionActive) {
             fire = FALSE;
         }
 
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
+        if (gameState == GAME_TITLE) {
+            holdConfirmed = UpdateJoystickConfirmHold(i, fire);
+            confirmPressed = bluePressed || holdConfirmed;
+        } else {
+            ResetJoystickConfirmHold(i);
+            holdConfirmed = FALSE;
+            confirmPressed = FALSE;
+        }
 
         if (firePressed || (gameState == GAME_TITLE && fire)) {
             if (!joyEnabled[i] && gameState == GAME_TITLE) MarkTitleAllDirty();
@@ -7607,7 +7681,7 @@ static void PollJoysticks(void)
         }
 
         if (gameState == GAME_TITLE) {
-            HandleTitleJoystick(i, left, right, up, down, firePressed);
+            HandleTitleJoystick(i, left, right, up, down, firePressed, confirmPressed);
         }
 
         joyLeft[i] = joyEnabled[i] ? left : FALSE;
@@ -7621,6 +7695,7 @@ static void PollJoysticks(void)
             ActivateSpaceOrFireAction();
         }
         joyFirePrev[i] = fire;
+        joyBluePrev[i] = blue;
     }
 }
 
