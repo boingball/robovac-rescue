@@ -567,6 +567,7 @@ static WORD bonusBossY = 0;
 static WORD bonusBossDx = 1;
 static WORD bonusBossDy = 1;
 static WORD bonusBossPhase = 0;
+static WORD bonusBossFacingState = 2; /* SPR_DOWN is declared later in the sprite enum. */
 static WORD bonusBossFireTicks = 0;
 static WORD bonusAiFireTicks = 0;
 static WORD bonusBossExplosionTicks = 0;
@@ -3028,8 +3029,9 @@ static void FreeTitleCopperGradient(void)
 
     viewPort = win ? ViewPortAddress(win) : &scr->ViewPort;
     Forbid();
-    viewPort->UCopIns = titleUCopList;
+    if (viewPort->UCopIns == titleUCopList) viewPort->UCopIns = NULL;
     Permit();
+    RethinkDisplay();
 
     FreeVPortCopLists(viewPort);
     titleUCopList = NULL;
@@ -3071,6 +3073,29 @@ static void UpdateEmpPaletteCycle(void)
     WORD i;
 
     if (!scr) return;
+
+    if (gameState == GAME_BONUS_PLAYING && bonusBossExplosionTicks > 0) {
+        static const UWORD epicCycle[6][4] = {
+            { 0x000, 0xF22, 0xFA0, 0xFFF },
+            { 0x112, 0xF6F, 0xFF4, 0x6FF },
+            { 0x201, 0xF80, 0xFD0, 0xF4F },
+            { 0x003, 0x44F, 0x8FF, 0xFFF },
+            { 0x210, 0xF44, 0xFF8, 0x4F8 },
+            { 0x000, 0xF0F, 0xF84, 0x8FF }
+        };
+        phase = (WORD)(((BONUS_BOSS_EXPLOSION_TICKS - bonusBossExplosionTicks) / 3) % 6);
+        if (!empPaletteCycleActive || empPaletteCyclePhase != phase) {
+            for (i = 0; i < 32; i++) cycled[i] = palette[i];
+            cycled[0] = epicCycle[phase][0];
+            cycled[7] = epicCycle[phase][1];
+            cycled[12] = epicCycle[phase][2];
+            cycled[13] = epicCycle[phase][3];
+            LoadRGB4(&scr->ViewPort, cycled, 32);
+            empPaletteCycleActive = TRUE;
+            empPaletteCyclePhase = phase;
+        }
+        return;
+    }
 
     if ((gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) || empCountdownTicks <= 0) {
         StopEmpPaletteCycle();
@@ -4306,8 +4331,10 @@ static void TriggerRobotPower(WORD id)
                     robots[i].targetPy = robots[i].py;
                     robots[i].moving = FALSE;
                 }
+                CleanTileForRobot(i, robots[i].tileX, robots[i].tileY);
             }
         }
+        CountDirt();
         UpdateEmpPaletteCycle();
         ForceGameplayFullPresent();
         robots[id].powerMovesLeft = 0;
@@ -5129,6 +5156,7 @@ static void ResetBonusBoss(void)
     bonusBossDx = 1;
     bonusBossDy = 1;
     bonusBossPhase = 0;
+    bonusBossFacingState = SPR_DOWN;
     bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
     bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
     bonusBossExplosionTicks = 0;
@@ -5183,6 +5211,7 @@ static void FireBossBolt(void)
             bossBolts[i].px = TO_FP(bonusBossX + (bossW / 2) - (ROBOT_W / 2) - MAP_X);
             bossBolts[i].py = TO_FP(bonusBossY + (bossH / 2) - (ROBOT_H / 2) - MAP_Y);
             bossBolts[i].ttl = 70;
+            PlayBoltFireSample();
             return;
         }
     }
@@ -5198,7 +5227,14 @@ static void StepBonusBoss(void)
 
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
-    bonusBossPhase = (bonusBossPhase + 1) & 31;
+    if (AbsW(bonusBossDx) >= AbsW(bonusBossDy)) {
+        bonusBossFacingState = (bonusBossDx < 0) ? SPR_LEFT : SPR_RIGHT;
+    } else {
+        bonusBossFacingState = (bonusBossDy < 0) ? SPR_UP : SPR_DOWN;
+    }
+    bonusBossPhase = (bonusBossFacingState == SPR_RIGHT) ? 8 :
+                     (bonusBossFacingState == SPR_UP) ? 16 :
+                     (bonusBossFacingState == SPR_LEFT) ? 24 : 0;
     bonusBossX += bonusBossDx;
     bonusBossY += bonusBossDy;
 
@@ -6112,15 +6148,9 @@ static void DrawBonusBoss(void)
 
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
-    if (bonusBossCacheBM && bonusBossCacheMaskBM && bonusBossCacheMaskBM->Planes[0]) {
-        BltMaskBitMapRastPort(bonusBossCacheBM, 0, 0,
-                              &renderRP, bonusBossX, bonusBossY,
-                              bossW, bossH,
-                              (ABC | ABNC | ANBC),
-                              bonusBossCacheMaskBM->Planes[0]);
-    } else {
-        DrawRobotLarge(finalWinner >= 0 ? finalWinner : 0, bonusBossX, bonusBossY, BONUS_BOSS_SCALE, bonusBossPhase);
-    }
+    (void)bossW;
+    (void)bossH;
+    DrawRobotLarge(finalWinner >= 0 ? finalWinner : 0, bonusBossX, bonusBossY, BONUS_BOSS_SCALE, bonusBossPhase);
 
     if (dirtyBossHpText) {
         snprintf(cachedBossHpText, sizeof(cachedBossHpText), "BOSS HP:%d", bonusBossHealth);
@@ -7133,9 +7163,9 @@ static void FireAiBoltAtBoss(WORD id)
     dy = bossCenterY - robotY;
 
     if (AbsW(dx) >= AbsW(dy)) {
-        FireRobotBolt(id, (dx < 0) ? -1 : 1, 0, FALSE, FALSE);
+        FireRobotBolt(id, (dx < 0) ? -1 : 1, 0, FALSE, TRUE);
     } else {
-        FireRobotBolt(id, 0, (dy < 0) ? -1 : 1, FALSE, FALSE);
+        FireRobotBolt(id, 0, (dy < 0) ? -1 : 1, FALSE, TRUE);
     }
 }
 
@@ -7230,7 +7260,7 @@ static void StepMainGameAiFire(void)
             else if (robots[target].tileX > robots[id].tileX) dirX = 1;
             else if (robots[target].tileY < robots[id].tileY) dirY = -1;
             else dirY = 1;
-            FireRobotBolt(id, dirX, dirY, TRUE, FALSE);
+            FireRobotBolt(id, dirX, dirY, TRUE, TRUE);
             return;
         }
     }
@@ -7457,8 +7487,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiDifficultyMenuOpen) {
         if (id == 0) {
-            HandleAiDifficultyJoystick(up, down, FALSE);
-            if (firePressed) { titleSelectPlayer = 0; MarkTitlePanelDirty(); }
+            HandleAiDifficultyJoystick(up, down, firePressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7467,12 +7496,10 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiSelectMenuOpen) {
         if (id == 0) {
-            /* J1 fire remains Player 1 select/focus on menus; use Space,
-             * keyboard Return, number keys, or J1 second fire/RMB to accept
-             * the AI-rival prompt.
+            /* J1 fire can now accept the pop-up prompt as well as
+             * keyboard Return, number keys, Space, or J1 second fire/RMB.
              */
-            HandleAiSelectJoystick(up, down, FALSE);
-            if (firePressed) { titleSelectPlayer = 0; MarkTitlePanelDirty(); }
+            HandleAiSelectJoystick(up, down, firePressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
