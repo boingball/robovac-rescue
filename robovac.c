@@ -5227,14 +5227,7 @@ static void StepBonusBoss(void)
 
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
-    if (AbsW(bonusBossDx) >= AbsW(bonusBossDy)) {
-        bonusBossFacingState = (bonusBossDx < 0) ? SPR_LEFT : SPR_RIGHT;
-    } else {
-        bonusBossFacingState = (bonusBossDy < 0) ? SPR_UP : SPR_DOWN;
-    }
-    bonusBossPhase = (bonusBossFacingState == SPR_RIGHT) ? 8 :
-                     (bonusBossFacingState == SPR_UP) ? 16 :
-                     (bonusBossFacingState == SPR_LEFT) ? 24 : 0;
+    bonusBossPhase = (bonusBossPhase + 1) & 31;
     bonusBossX += bonusBossDx;
     bonusBossY += bonusBossDy;
 
@@ -6148,9 +6141,15 @@ static void DrawBonusBoss(void)
 
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
-    (void)bossW;
-    (void)bossH;
-    DrawRobotLarge(finalWinner >= 0 ? finalWinner : 0, bonusBossX, bonusBossY, BONUS_BOSS_SCALE, bonusBossPhase);
+    if (bonusBossCacheBM && bonusBossCacheMaskBM && bonusBossCacheMaskBM->Planes[0]) {
+        BltMaskBitMapRastPort(bonusBossCacheBM, 0, 0,
+                              &renderRP, bonusBossX, bonusBossY,
+                              bossW, bossH,
+                              (ABC | ABNC | ANBC),
+                              bonusBossCacheMaskBM->Planes[0]);
+    } else {
+        DrawRobotLarge(finalWinner >= 0 ? finalWinner : 0, bonusBossX, bonusBossY, BONUS_BOSS_SCALE, bonusBossPhase);
+    }
 
     if (dirtyBossHpText) {
         snprintf(cachedBossHpText, sizeof(cachedBossHpText), "BOSS HP:%d", bonusBossHealth);
