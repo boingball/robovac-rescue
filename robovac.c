@@ -140,6 +140,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAX_DIRTY_RECTS 96
 #define MAX_HUMAN_PLAYERS 2
 #define JOY_CONFIRM_HOLD_FRAMES 100  /* 2 seconds at PAL 50Hz */
+#ifndef JOY_DEBUG
+#define JOY_DEBUG 0
+#endif
 #define ROBOT_VARIANTS 7
 #define AI_RECENT_TILE_COUNT 4
 
@@ -2492,7 +2495,7 @@ static void ServiceMenuMusicForState(void)
 {
     BOOL wasPlaying;
 
-    if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
+    if (gameState == GAME_TITLE) {
         wasPlaying = menuMusicSample.playing;
         StartMenuMusic();
         if (wasPlaying) ServiceMenuMusicStream();
@@ -2589,7 +2592,11 @@ static UWORD AudioDmaBit(WORD channel)
 
 static void ServiceTitleMusicForState(void)
 {
-    if (gameState == GAME_TITLE && !titleFirstFullPresentDone) return;
+    if (gameState != GAME_TITLE) {
+        ServiceMenuMusicForState();
+        return;
+    }
+    if (!titleFirstFullPresentDone) return;
     ServiceMenuMusicForState();
 }
 
@@ -5417,10 +5424,9 @@ static void StartBonusRound(void)
 
 static void EnterTitleScreen(void)
 {
-    if (gameState != GAME_INTRO) {
-        StopGameplaySamples();
-        StopRoundStartSamples();
-    }
+    StopGameplaySamples();
+    FreeGameplaySamples();
+    StopRoundStartSamples();
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
@@ -5442,7 +5448,9 @@ static void EnterTitleScreen(void)
     titlePanelDirty = TRUE;
     RequestTitleFullPresents();
     LoadGamePalette();
-    LoadMenuMusicSample();
+    if (!LoadMenuMusicSample()) {
+        printf("Menu music unavailable on title screen; chip RAM may be too tight\n");
+    }
     PrepareTitlePresentation();
 }
 
@@ -7016,7 +7024,11 @@ static BOOL HandlePauseMenuRawKey(UWORD code, BOOL keyUpEvent)
 static void StartMatch(WORD players, WORD rivals)
 {
     WORD i;
+    StopMenuMusic();
     UnloadMenuMusicSample();
+    if (!mainMusicSample.loaded || !boltFireSample.loaded || !hooverMoveSample.loaded) {
+        LoadGameplaySamples();
+    }
     humanPlayers = players;
     if (humanPlayers < 1) humanPlayers = 1;
     if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
@@ -7501,21 +7513,37 @@ static BOOL ReadJoystickBlueButton(WORD id)
 
 static BOOL UpdateJoystickConfirmHold(WORD id, BOOL fire)
 {
+    BOOL confirmed = FALSE;
+
     if (id < 0 || id >= MAX_HUMAN_PLAYERS) return FALSE;
 
     if (!fire) {
+#if JOY_DEBUG
+        if (joyFireHoldTicks[id] > 0) {
+            printf("J%ld fire held ticks: %ld holdConfirmed: 0\n", (LONG)id + 1, (LONG)joyFireHoldTicks[id]);
+        }
+#endif
         joyFireHoldTicks[id] = 0;
         joyFireHoldTriggered[id] = FALSE;
         return FALSE;
     }
 
-    if (joyFireHoldTriggered[id]) return FALSE;
-    if (joyFireHoldTicks[id] < JOY_CONFIRM_HOLD_FRAMES) joyFireHoldTicks[id]++;
-    if (joyFireHoldTicks[id] >= JOY_CONFIRM_HOLD_FRAMES) {
-        joyFireHoldTriggered[id] = TRUE;
-        return TRUE;
+    if (!joyFireHoldTriggered[id]) {
+        if (joyFireHoldTicks[id] < JOY_CONFIRM_HOLD_FRAMES) joyFireHoldTicks[id]++;
+        if (joyFireHoldTicks[id] >= JOY_CONFIRM_HOLD_FRAMES) {
+            joyFireHoldTriggered[id] = TRUE;
+            confirmed = TRUE;
+        }
     }
-    return FALSE;
+
+#if JOY_DEBUG
+    if (confirmed || joyFireHoldTicks[id] == 1 || (joyFireHoldTicks[id] % 10) == 0) {
+        printf("J%ld fire held ticks: %ld holdConfirmed: %ld\n",
+               (LONG)id + 1, (LONG)joyFireHoldTicks[id], (LONG)confirmed);
+    }
+#endif
+
+    return confirmed;
 }
 
 static BOOL ActivateTitleJoystickConfirmAction(void)
@@ -7526,54 +7554,58 @@ static BOOL ActivateTitleJoystickConfirmAction(void)
     return ActivateSpaceOrFireAction();
 }
 
-static void HandleAiDifficultyJoystick(BOOL up, BOOL down, BOOL firePressed)
+static void HandleAiDifficultyJoystick(WORD id, BOOL up, BOOL down, BOOL firePressed)
 {
-    static BOOL prevUp = FALSE;
-    static BOOL prevDown = FALSE;
+    static BOOL prevUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+    static BOOL prevDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+
+    if (id < 0 || id >= MAX_HUMAN_PLAYERS) return;
 
     if (!aiDifficultyMenuOpen) {
-        prevUp = up;
-        prevDown = down;
+        prevUp[id] = up;
+        prevDown[id] = down;
         return;
     }
 
-    if (up && !prevUp) {
+    if (up && !prevUp[id]) {
         aiDifficultyMenuSelection = (aiDifficultyMenuSelection + 2) % 3;
     }
-    if (down && !prevDown) {
+    if (down && !prevDown[id]) {
         aiDifficultyMenuSelection = (aiDifficultyMenuSelection + 1) % 3;
     }
     if (firePressed) {
         ActivateAiDifficultyMenu();
     }
 
-    prevUp = up;
-    prevDown = down;
+    prevUp[id] = up;
+    prevDown[id] = down;
 }
 
-static void HandleAiSelectJoystick(BOOL up, BOOL down, BOOL firePressed)
+static void HandleAiSelectJoystick(WORD id, BOOL up, BOOL down, BOOL firePressed)
 {
-    static BOOL prevUp = FALSE;
-    static BOOL prevDown = FALSE;
+    static BOOL prevUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+    static BOOL prevDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+
+    if (id < 0 || id >= MAX_HUMAN_PLAYERS) return;
 
     if (!aiSelectMenuOpen) {
-        prevUp = up;
-        prevDown = down;
+        prevUp[id] = up;
+        prevDown[id] = down;
         return;
     }
 
-    if (up && !prevUp) {
+    if (up && !prevUp[id]) {
         aiSelectMenuSelection = (aiSelectMenuSelection + 3) & 3;
     }
-    if (down && !prevDown) {
+    if (down && !prevDown[id]) {
         aiSelectMenuSelection = (aiSelectMenuSelection + 1) & 3;
     }
     if (firePressed) {
         ActivateAiSelectMenu();
     }
 
-    prevUp = up;
-    prevDown = down;
+    prevUp[id] = up;
+    prevDown[id] = down;
 }
 
 static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL down, BOOL firePressed, BOOL confirmPressed)
@@ -7584,26 +7616,14 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     if (gameState != GAME_TITLE) {
         prevLeft[id] = left;
         prevRight[id] = right;
-        if (id == 0) {
-            HandleAiSelectJoystick(FALSE, FALSE, FALSE);
-            HandleAiDifficultyJoystick(FALSE, FALSE, FALSE);
-        }
-        return;
-    }
-
-    if (!joyEnabled[id] && !firePressed && !confirmPressed) {
-        prevLeft[id] = left;
-        prevRight[id] = right;
-        if (id == 0) {
-            HandleAiSelectJoystick(FALSE, FALSE, FALSE);
-            HandleAiDifficultyJoystick(FALSE, FALSE, FALSE);
-        }
+        HandleAiSelectJoystick(id, FALSE, FALSE, FALSE);
+        HandleAiDifficultyJoystick(id, FALSE, FALSE, FALSE);
         return;
     }
 
     if (aiDifficultyMenuOpen) {
-        if (id == 0) {
-            HandleAiDifficultyJoystick(up, down, confirmPressed);
+        if (joyEnabled[id]) {
+            HandleAiDifficultyJoystick(id, up, down, firePressed || confirmPressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7611,11 +7631,19 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     }
 
     if (aiSelectMenuOpen) {
-        if (id == 0) {
-            HandleAiSelectJoystick(up, down, confirmPressed);
+        if (joyEnabled[id]) {
+            HandleAiSelectJoystick(id, up, down, firePressed || confirmPressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
+        return;
+    }
+
+    if (!joyEnabled[id] && !firePressed && !confirmPressed) {
+        prevLeft[id] = left;
+        prevRight[id] = right;
+        HandleAiSelectJoystick(id, FALSE, FALSE, FALSE);
+        HandleAiDifficultyJoystick(id, FALSE, FALSE, FALSE);
         return;
     }
 
@@ -7868,7 +7896,6 @@ static BOOL OpenGameScreen(void)
         FreeGameplaySamples();
         LoadGameplaySamples();
     }
-    LoadMenuMusicSample();
 
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
@@ -7964,6 +7991,10 @@ int main(void)
 
     gameState = introTitleBM ? GAME_INTRO : GAME_TITLE;
     if (gameState == GAME_TITLE) {
+        FreeGameplaySamples();
+        if (!LoadMenuMusicSample()) {
+            printf("Menu music unavailable on title screen; chip RAM may be too tight\n");
+        }
         PrepareTitlePresentation();
     }
 
