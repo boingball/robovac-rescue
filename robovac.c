@@ -622,6 +622,11 @@ static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyPlayPausePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+#if JOY_DEBUG
+static BOOL joyDebugFire[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyDebugBlue[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyDebugHoldConfirmed[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+#endif
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -5913,6 +5918,30 @@ static void DrawJoystickIcons(void)
 }
 
 
+
+#if JOY_DEBUG
+static void DrawJoystickDebugOverlay(void)
+{
+    WORD i;
+    char b[48];
+
+    if (gameState != GAME_TITLE) return;
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 52, 158, 68);
+
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        snprintf(b, sizeof(b), "J%d F:%d T:%d C:%d B:%d",
+                 (int)i + 1,
+                 joyDebugFire[i] ? 1 : 0,
+                 (int)joyFireHoldTicks[i],
+                 joyDebugHoldConfirmed[i] ? 1 : 0,
+                 joyDebugBlue[i] ? 1 : 0);
+        MiniText(&renderRP, 2, 54 + (i * 7), b, 14);
+    }
+}
+#endif
+
 static void DrawRobotLarge(WORD robotId, WORD x, WORD y, WORD scale, WORD phase)
 {
     WORD px;
@@ -6520,6 +6549,9 @@ static void DrawFrame(void)
         if (aiDifficultyMenuOpen) {
             DrawAiDifficultyMenu();
         }
+#if JOY_DEBUG
+        DrawJoystickDebugOverlay();
+#endif
         return;
     }
 
@@ -7381,11 +7413,12 @@ static BOOL ReadJoystickBlueButton(WORD id)
      * primary fire line; they require a lowlevel.library ReadJoyPort() path
      * or a carefully-timed POTGO shift-register reader.  Do not fake blue
      * from another input here: hold-fire remains the guaranteed single-button
-     * confirmation path, and ports that wire a real blue reader can enable it
-     * by defining READ_CD32_BLUE_BUTTON(id) in the build.
+     * confirmation path.  The macro receives the physical Amiga port index:
+     * on-screen J1 maps to joystick port 1, and on-screen J2 maps to port 0.
      */
 #ifdef READ_CD32_BLUE_BUTTON
-    return READ_CD32_BLUE_BUTTON(id) ? TRUE : FALSE;
+    WORD port = (id == 0) ? 1 : 0;
+    return READ_CD32_BLUE_BUTTON(port) ? TRUE : FALSE;
 #else
     (void)id;
     return FALSE;
@@ -7395,7 +7428,8 @@ static BOOL ReadJoystickBlueButton(WORD id)
 static BOOL ReadJoystickPlayPauseButton(WORD id)
 {
 #ifdef READ_CD32_PLAY_PAUSE_BUTTON
-    return READ_CD32_PLAY_PAUSE_BUTTON(id) ? TRUE : FALSE;
+    WORD port = (id == 0) ? 1 : 0;
+    return READ_CD32_PLAY_PAUSE_BUTTON(port) ? TRUE : FALSE;
 #else
     (void)id;
     return FALSE;
@@ -7607,6 +7641,11 @@ static void PollJoysticks(void)
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
         holdConfirmed = (gameState == GAME_TITLE) ? UpdateJoystickConfirmHold(i, fire) : FALSE;
         if (gameState != GAME_TITLE) ResetJoystickConfirmHold(i);
+#if JOY_DEBUG
+        joyDebugFire[i] = fire;
+        joyDebugBlue[i] = bluePressed ? TRUE : blue;
+        joyDebugHoldConfirmed[i] = holdConfirmed;
+#endif
 
         if ((stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING) && playPausePressed) {
             if (pauseMenuOpen) ClosePauseMenu();
@@ -7614,17 +7653,59 @@ static void PollJoysticks(void)
         }
 
         if (gameState == GAME_TITLE) {
-            if (i == 0 && (firePressed || bluePressed)) { joyEnabled[0] = TRUE; titleSelectPlayer = 0; MarkTitlePanelDirty(); }
-            if (i == 1 && (firePressed || bluePressed)) { joyEnabled[1] = TRUE; TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitleAllDirty(); MarkTitlePanelDirty(); }
-            if (aiDifficultyMenuOpen) {
-                if (joyEnabled[i]) HandleAiDifficultyJoystick(i, up, down, firePressed || bluePressed || holdConfirmed);
+            BOOL confirmPressed = bluePressed || holdConfirmed;
+
+            if (aiDifficultyMenuOpen || aiSelectMenuOpen) {
+                confirmPressed = confirmPressed || firePressed;
+            }
+
+            if (firePressed) {
+                joyEnabled[i] = TRUE;
+
+                if (i == 0) {
+                    titleSelectPlayer = 0;
+                    MarkTitleAllDirty();
+                    MarkTitlePanelDirty();
+                } else {
+                    TitleArmTwoPlayer();
+                    titleSelectPlayer = 1;
+                    MarkTitleAllDirty();
+                    MarkTitlePanelDirty();
+                }
+            }
+
+            if (bluePressed && !joyEnabled[i]) {
+                joyEnabled[i] = TRUE;
+                if (i == 0) {
+                    titleSelectPlayer = 0;
+                    MarkTitleAllDirty();
+                    MarkTitlePanelDirty();
+                } else {
+                    TitleArmTwoPlayer();
+                    titleSelectPlayer = 1;
+                    MarkTitleAllDirty();
+                    MarkTitlePanelDirty();
+                }
+            }
+
+            if (joyEnabled[i] && aiDifficultyMenuOpen) {
+                HandleAiDifficultyJoystick(i, up, down, FALSE);
+            } else if (joyEnabled[i] && aiSelectMenuOpen) {
+                HandleAiSelectJoystick(i, up, down, FALSE);
+            }
+
+            if (joyEnabled[i] && confirmPressed) {
+                if (aiDifficultyMenuOpen) {
+                    ActivateAiDifficultyMenu();
+                } else if (aiSelectMenuOpen) {
+                    ActivateAiSelectMenu();
+                } else {
+                    ActivateTitleJoystickConfirmAction();
+                }
+
                 goto finish_joystick;
             }
-            if (aiSelectMenuOpen) {
-                if (joyEnabled[i]) HandleAiSelectJoystick(i, up, down, firePressed || bluePressed || holdConfirmed);
-                goto finish_joystick;
-            }
-            if (joyEnabled[i] && (holdConfirmed || bluePressed)) { ActivateTitleJoystickConfirmAction(); goto finish_joystick; }
+
             HandleTitleJoystick(i, left, right, up, down, firePressed, FALSE);
         }
 
