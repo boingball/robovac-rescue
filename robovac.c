@@ -22,7 +22,7 @@
  *                 On-screen J1/P1 uses the physical joystick port: JOY1DAT + CIAA PRA bit 7
  *                 On-screen J2/P2 uses the mouse port: JOY0DAT + CIAA PRA bit 6
  *   P2 fire/V     - arm two-player carousel selection from title screen
- *   Space/Return/RMB/blue/hold fire - select/start; R resets the active level
+ *   Space/Return/RMB/hold fire - select/start; R resets the active level
  *   Q          - open in-game restart/quit menu
  *   0/1/2/3    - choose AI rivals from two-player AI prompt
  *   1/2/3      - choose one-player AI rivals from title screen
@@ -140,6 +140,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAX_DIRTY_RECTS 96
 #define MAX_HUMAN_PLAYERS 2
 #define JOY_CONFIRM_HOLD_FRAMES 100  /* 2 seconds at PAL 50Hz */
+#define JOY_DEBUG 0
 #define ROBOT_VARIANTS 7
 #define AI_RECENT_TILE_COUNT 4
 
@@ -2151,8 +2152,13 @@ static void StartMainGameMusic(void)
 {
     if (mainMusicSample.playing) return;
     StopMenuMusic();
+    UnloadMenuMusicSample();
     StopGetReadySample();
     StopCountdownSample();
+    if (!mainMusicSample.loaded || !mainMusicSample.data) {
+        printf("Main game music not loaded; cannot start\n");
+        return;
+    }
     PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_LEFT_AUDIO_CHANNEL);
     PlayLoopedSample(&mainMusicSample, MAIN_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
@@ -7484,12 +7490,10 @@ static void ResetAllJoystickConfirmHolds(void)
 
 static BOOL ReadJoystickBlueButton(WORD id)
 {
-    /* CD32 pad extended buttons are not exposed by JOYxDAT/CIAA like the
-     * primary fire line; they require a lowlevel.library ReadJoyPort() path
-     * or a carefully-timed POTGO shift-register reader.  Do not fake blue
-     * from another input here: hold-fire remains the guaranteed single-button
-     * confirmation path, and ports that wire a real blue reader can enable it
-     * by defining READ_CD32_BLUE_BUTTON(id) in the build.
+    /* CD32 blue is optional here.  This build no longer advertises it as the
+     * reliable title confirm path unless a real reader is supplied by the
+     * platform/build.  Do not fake blue from another input: single-button
+     * hold-fire below remains the guaranteed hardware confirm path.
      */
 #ifdef READ_CD32_BLUE_BUTTON
     return READ_CD32_BLUE_BUTTON(id) ? TRUE : FALSE;
@@ -7503,17 +7507,15 @@ static BOOL UpdateJoystickConfirmHold(WORD id, BOOL fire)
 {
     if (id < 0 || id >= MAX_HUMAN_PLAYERS) return FALSE;
 
-    if (!fire) {
+    if (gameState == GAME_TITLE && fire) {
+        joyFireHoldTicks[id]++;
+        if (joyFireHoldTicks[id] >= JOY_CONFIRM_HOLD_FRAMES && !joyFireHoldTriggered[id]) {
+            joyFireHoldTriggered[id] = TRUE;
+            return TRUE;
+        }
+    } else {
         joyFireHoldTicks[id] = 0;
         joyFireHoldTriggered[id] = FALSE;
-        return FALSE;
-    }
-
-    if (joyFireHoldTriggered[id]) return FALSE;
-    if (joyFireHoldTicks[id] < JOY_CONFIRM_HOLD_FRAMES) joyFireHoldTicks[id]++;
-    if (joyFireHoldTicks[id] >= JOY_CONFIRM_HOLD_FRAMES) {
-        joyFireHoldTriggered[id] = TRUE;
-        return TRUE;
     }
     return FALSE;
 }
@@ -7661,6 +7663,38 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
     prevRight[id] = right;
 }
 
+static void HandleTitleFireDirect(WORD id, BOOL fire, BOOL firePressed, BOOL holdConfirmed, BOOL bluePressed)
+{
+    BOOL confirmPressed = (holdConfirmed || bluePressed) ? TRUE : FALSE;
+
+    (void)fire;
+
+    if (gameState != GAME_TITLE || id < 0 || id >= MAX_HUMAN_PLAYERS) return;
+
+    if (firePressed) {
+        if (!joyEnabled[id]) MarkTitleAllDirty();
+        joyEnabled[id] = TRUE;
+        if (id == 0) {
+            titleSelectPlayer = 0;
+            MarkTitlePanelDirty();
+        } else {
+            TitleArmTwoPlayer();
+            titleSelectPlayer = 1;
+            MarkTitleAllDirty();
+            MarkTitlePanelDirty();
+        }
+    }
+
+    if (confirmPressed) {
+#if JOY_DEBUG
+        printf("JOY confirm J%ld fire=%ld ticks=%ld hold=%ld blue=%ld\n",
+               (long)(id + 1), (long)fire, (long)joyFireHoldTicks[id],
+               (long)holdConfirmed, (long)bluePressed);
+#endif
+        ActivateTitleJoystickConfirmAction();
+    }
+}
+
 static void PollJoysticks(void)
 {
     UWORD dat[MAX_HUMAN_PLAYERS];
@@ -7693,17 +7727,10 @@ static void PollJoysticks(void)
         }
 
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
-        if (gameState == GAME_TITLE && i == 1 && firePressed) {
-            if (!joyEnabled[i]) MarkTitleAllDirty();
-            joyEnabled[i] = TRUE;
-            TitleArmTwoPlayer();
-            titleSelectPlayer = 1;
-            MarkTitleAllDirty();
-            MarkTitlePanelDirty();
-        }
         if (gameState == GAME_TITLE) {
             holdConfirmed = UpdateJoystickConfirmHold(i, fire);
             confirmPressed = bluePressed || holdConfirmed;
+            HandleTitleFireDirect(i, fire, firePressed, holdConfirmed, bluePressed);
         } else {
             ResetJoystickConfirmHold(i);
             holdConfirmed = FALSE;
@@ -7716,7 +7743,12 @@ static void PollJoysticks(void)
         }
 
         if (gameState == GAME_TITLE) {
-            HandleTitleJoystick(i, left, right, up, down, firePressed, confirmPressed);
+#if JOY_DEBUG
+            printf("JOY J%ld fire=%ld pressed=%ld ticks=%ld confirm=%ld\n",
+                   (long)(i + 1), (long)fire, (long)firePressed,
+                   (long)joyFireHoldTicks[i], (long)confirmPressed);
+#endif
+            HandleTitleJoystick(i, left, right, up, down, FALSE, FALSE);
         }
 
         joyLeft[i] = joyEnabled[i] ? left : FALSE;
