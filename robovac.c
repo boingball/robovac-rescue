@@ -911,6 +911,7 @@ static void ClearMovementKeys(void);
 static BOOL LoadMenuMusicSample(void);
 static void ResetAllJoystickConfirmHolds(void);
 static void FreeMenuMusicSample(void);
+static void UnloadMenuMusicSample(void);
 static void StartMenuMusic(void);
 static void StopMenuMusic(void);
 static WORD QueueMenuMusicChunk(ULONG offsetBytes);
@@ -2332,6 +2333,7 @@ static void FreeRoundStartSamples(void)
 
 static BOOL LoadMenuMusicSample(void)
 {
+    if (menuMusicSample.loaded) return TRUE;
     return LoadOneShotSample(MENU_MUSIC_SAMPLE_PATH, &menuMusicSample, "menu music");
 }
 
@@ -2508,13 +2510,22 @@ static void FreeMenuMusicSample(void)
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
 }
 
+static void UnloadMenuMusicSample(void)
+{
+    FreeMenuMusicSample();
+}
+
 static BOOL LoadGameplaySamples(void)
 {
-    BOOL loaded = FALSE;
+    BOOL mainLoaded;
+    BOOL boltLoaded;
+    BOOL hooverLoaded;
 
-    loaded |= LoadOneShotSample(MAIN_MUSIC_SAMPLE_PATH, &mainMusicSample, "main game music");
-    loaded |= LoadOneShotSample(BOLT_FIRE_SAMPLE_PATH, &boltFireSample, "bolt fire effect");
-    loaded |= LoadOneShotSample(HOOVER_MOVE_SAMPLE_PATH, &hooverMoveSample, "hoover movement loop");
+    if (mainMusicSample.loaded && boltFireSample.loaded && hooverMoveSample.loaded) return TRUE;
+
+    mainLoaded = LoadOneShotSample(MAIN_MUSIC_SAMPLE_PATH, &mainMusicSample, "main game music");
+    boltLoaded = LoadOneShotSample(BOLT_FIRE_SAMPLE_PATH, &boltFireSample, "bolt fire effect");
+    hooverLoaded = LoadOneShotSample(HOOVER_MOVE_SAMPLE_PATH, &hooverMoveSample, "hoover movement loop");
     if (hooverMoveSample.loaded) {
         hooverMoveSample.lengthWords = (UWORD)((hooverMoveSample.dataSize & ~1L) / 2L);
         if (hooverMoveSample.loopLengthWords > 0 &&
@@ -2524,7 +2535,10 @@ static BOOL LoadGameplaySamples(void)
             hooverMoveSample.loopLengthWords = hooverMoveSample.lengthWords;
         }
     }
-    return loaded;
+    if (!mainLoaded) printf("Gameplay sample load failed: main game music unavailable\n");
+    if (!boltLoaded) printf("Gameplay sample load failed: bolt fire effect unavailable\n");
+    if (!hooverLoaded) printf("Gameplay sample load failed: hoover movement loop unavailable\n");
+    return mainLoaded && boltLoaded && hooverLoaded;
 }
 
 static void FreeGameplaySamples(void)
@@ -4431,9 +4445,13 @@ static void ResetLevel(void)
     WORD x, y;
     const char **layout;
 
-    StopMenuMusic();
+    UnloadMenuMusicSample();
     StopGameplaySamples();
     StopRoundStartSamples();
+    if (!mainMusicSample.loaded || !boltFireSample.loaded || !hooverMoveSample.loaded) {
+        FreeGameplaySamples();
+        LoadGameplaySamples();
+    }
 
     roomType = RandRange(5);
     MarkHudStatusTextDirty();
@@ -5424,6 +5442,7 @@ static void EnterTitleScreen(void)
     titlePanelDirty = TRUE;
     RequestTitleFullPresents();
     LoadGamePalette();
+    LoadMenuMusicSample();
     PrepareTitlePresentation();
 }
 
@@ -6997,7 +7016,7 @@ static BOOL HandlePauseMenuRawKey(UWORD code, BOOL keyUpEvent)
 static void StartMatch(WORD players, WORD rivals)
 {
     WORD i;
-    StopMenuMusic();
+    UnloadMenuMusicSample();
     humanPlayers = players;
     if (humanPlayers < 1) humanPlayers = 1;
     if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
@@ -7465,12 +7484,19 @@ static void ResetAllJoystickConfirmHolds(void)
 
 static BOOL ReadJoystickBlueButton(WORD id)
 {
-    (void)id;
-    /* This build has no existing CD32/second-button hardware reader.  Keep
-     * RMB/MENUDOWN on the Intuition path and rely on hold-to-confirm for
-     * single-button sticks rather than faking blue from the mouse button.
+    /* CD32 pad extended buttons are not exposed by JOYxDAT/CIAA like the
+     * primary fire line; they require a lowlevel.library ReadJoyPort() path
+     * or a carefully-timed POTGO shift-register reader.  Do not fake blue
+     * from another input here: hold-fire remains the guaranteed single-button
+     * confirmation path, and ports that wire a real blue reader can enable it
+     * by defining READ_CD32_BLUE_BUTTON(id) in the build.
      */
+#ifdef READ_CD32_BLUE_BUTTON
+    return READ_CD32_BLUE_BUTTON(id) ? TRUE : FALSE;
+#else
+    (void)id;
     return FALSE;
+#endif
 }
 
 static BOOL UpdateJoystickConfirmHold(WORD id, BOOL fire)
@@ -7496,6 +7522,7 @@ static BOOL ActivateTitleJoystickConfirmAction(void)
 {
     if (aiDifficultyMenuOpen) { ActivateAiDifficultyMenu(); return TRUE; }
     if (aiSelectMenuOpen) { ActivateAiSelectMenu(); return TRUE; }
+    if (titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
     return ActivateSpaceOrFireAction();
 }
 
@@ -7564,7 +7591,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
         return;
     }
 
-    if (!joyEnabled[id]) {
+    if (!joyEnabled[id] && !firePressed && !confirmPressed) {
         prevLeft[id] = left;
         prevRight[id] = right;
         if (id == 0) {
@@ -7666,6 +7693,14 @@ static void PollJoysticks(void)
         }
 
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
+        if (gameState == GAME_TITLE && i == 1 && firePressed) {
+            if (!joyEnabled[i]) MarkTitleAllDirty();
+            joyEnabled[i] = TRUE;
+            TitleArmTwoPlayer();
+            titleSelectPlayer = 1;
+            MarkTitleAllDirty();
+            MarkTitlePanelDirty();
+        }
         if (gameState == GAME_TITLE) {
             holdConfirmed = UpdateJoystickConfirmHold(i, fire);
             confirmPressed = bluePressed || holdConfirmed;
@@ -7826,9 +7861,14 @@ static BOOL OpenGameScreen(void)
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
     }
 
-    LoadMenuMusicSample();
     LoadRoundStartSamples();
-    LoadGameplaySamples();
+    if (!LoadGameplaySamples() && menuMusicSample.loaded) {
+        printf("Gameplay audio did not fully load; freeing menu music and retrying gameplay audio\n");
+        UnloadMenuMusicSample();
+        FreeGameplaySamples();
+        LoadGameplaySamples();
+    }
+    LoadMenuMusicSample();
 
     win = OpenWindowTags(NULL,
         WA_CustomScreen, (ULONG)scr,
