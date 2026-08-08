@@ -5553,18 +5553,17 @@ static void StepGame(void)
                 robots[i].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
             }
         }
-        /* A run-down hoover that can no longer make a move stays parked on
-           its tile for the rest of the round. If it came to rest on a dirt
-           tile, that tile would otherwise be stuck forever: the dead hoover
-           can't clean it and no rival can enter an occupied tile to reach
-           it, so the round drags on until every battery is flat. Let the
-           dead hoover take the tile it is sitting on so the dirt still
-           counts and clears. Mirrors the movement gating in StartRobotMove:
-           a robot can move only with enough battery, or with an emergency
-           move while flat, so anything else means it is stalled. */
+        /* A hoover normally cleans a tile only when it finishes moving onto
+           it, so any hoover left parked on a dirt tile leaves that dirt
+           stuck: it can't clean the tile it is sitting on, and no rival can
+           enter an occupied tile to reach the dirt underneath. This happens
+           when a hoover runs flat, is frozen by an EMP, is bolt-stunned, or
+           spawns on dirt. The invariant we want is simply that a hoover
+           occupying a dirt tile cleans it, so take the tile here whenever a
+           parked hoover is sitting on dirt. Fresh arrivals are already
+           cleaned by FinishRobotTileMove in the same frame, so this only
+           catches the stuck cases. */
         if (!robots[i].moving &&
-            robots[i].battery < batteryCostPerMove &&
-            !(robots[i].battery == 0 && robots[i].emergencyMovesLeft > 0) &&
             map[robots[i].tileY][robots[i].tileX] == TILE_DIRT) {
             CleanTileForRobot(i, robots[i].tileX, robots[i].tileY);
         }
