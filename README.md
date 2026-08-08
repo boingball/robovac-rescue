@@ -158,6 +158,49 @@ When present, its `CMAP` colours replace robot palette entries `16-31`, so a one
 
 ## Build
 
+RoboVac Rescue uses Bebbo's `m68k-amigaos-gcc` cross-compiler.
+
+To compile the game binary:
+
+```bash
+make clean
+make
+```
+
+The Makefile currently builds the equivalent of:
+
 ```bash
 m68k-amigaos-gcc -s -Os -o robovac robovac.c
 ```
+
+### Build a clean Amiga release drawer
+
+For copying to a real Amiga or WinUAE, use the release target instead of copying the whole Git repository:
+
+```bash
+make release-clean
+make clean
+make release
+```
+
+This creates:
+
+```text
+release/RoboVac-Rescue/
+```
+
+containing the compiled `robovac` executable, root-level Workbench `*.info` files, `README.md`, and the runtime `tiles/` and `samples/` drawers. Source files, `.git`, GitHub Actions files and other development clutter are not copied into the release drawer.
+
+You can override the drawer name when needed:
+
+```bash
+make release RELEASE_NAME=RoboVac-Rescue-v1.0
+```
+
+which creates:
+
+```text
+release/RoboVac-Rescue-v1.0/
+```
+
+After that, copy the generated release drawer to the Amiga rather than the repository itself.
