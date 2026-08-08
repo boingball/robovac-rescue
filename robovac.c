@@ -7485,12 +7485,20 @@ static void ResetAllJoystickConfirmHolds(void)
 
 static BOOL ReadJoystickBlueButton(WORD id)
 {
-    (void)id;
-    /* This build has no existing CD32/second-button hardware reader.  Keep
-     * RMB/MENUDOWN on the Intuition path and rely on hold-to-confirm for
-     * single-button sticks rather than faking blue from the mouse button.
+    /* The second fire button (a CD32 pad's blue button, or a two-button
+     * stick's second button) is wired to the port's POTY pin, not the CIA
+     * fire line.  PollJoysticks drives the pot data lines high via POTGO each
+     * frame; a pressed second button then grounds its POTY line, so the
+     * matching POTINP data bit reads back low:
+     *   Player 1 (joystick port, id 0): POTY = POTINP bit 14 (DATRY)
+     *   Player 2 (mouse port,   id 1): POTY = POTINP bit 10 (DATLY)
+     * This reads the CD32 blue button in the pad's default (un-shifted) mode
+     * without the full CD32 shift-register protocol the other pad buttons
+     * would need.  Hold-to-confirm stays as a fallback for one-button sticks.
      */
-    return FALSE;
+    UWORD pin = custom.potinp;
+    if (id == 0) return (pin & 0x4000) ? FALSE : TRUE;
+    return (pin & 0x0400) ? FALSE : TRUE;
 }
 
 static BOOL UpdateJoystickConfirmHold(WORD id, BOOL fire)
@@ -7658,6 +7666,11 @@ static void PollJoysticks(void)
 {
     UWORD dat[MAX_HUMAN_PLAYERS];
     WORD i;
+
+    /* Drive the four pot data lines high as outputs so the second-button
+     * (CD32 blue / two-button stick button 2) reads in ReadJoystickBlueButton
+     * are valid this frame; a pressed button then pulls its POTY line low. */
+    custom.potgo = 0xff00;
 
     dat[0] = custom.joy1dat; /* on-screen J1/P1 = physical joystick port */
     dat[1] = custom.joy0dat; /* on-screen J2/P2 = mouse port */
