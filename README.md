@@ -4,17 +4,29 @@ RoboVac Rescue is an AmigaOS C top-down robot hoover game using a custom 320x256
 
 ## Controls
 
-- Player 1: arrow keys move; `B` shoots a bolt. Joystick 1 stays disabled until joystick 1 fire is pressed, then `J1` appears and joystick 1 can move/fire on menus and during gameplay. On the title carousel, joystick 1 fire selects/focuses Player 1 instead of starting the match; joystick 1 button 2/RMB starts or advances menus.
-- Player 2: `Z` left, `X` down, `C` right, `S` up; `V` shoots a bolt. Joystick 2 stays disabled until joystick 2 fire is pressed, then `J2` appears and joystick 2 can move/fire.
+Several control schemes work at once; use whichever suits your setup.
+
+- **Keyboard** - Player 1 moves with the arrow keys and shoots with `B`; Player 2 moves with `Z` (left), `X` (down), `C` (right), `S` (up) and shoots with `V`.
+- **One-button joystick** - move and press fire. Because menus need a second action, one-button sticks confirm/start by *holding* fire for about two seconds.
+- **Two-button joystick** - the second button acts as the menu confirm/start button.
+- **CD32 controller** (Player 1, joystick port) - read through `lowlevel.library` when it is present: the red button fires, the blue button confirms/starts menus, and the grey **Play/Pause** button pauses and resumes a match. Other pad buttons are unused, and Player 2 stays on the direct joystick/keyboard reads.
+
+Each joystick stays disabled until its fire button is pressed; then `J1`/`J2` appears and that stick can move and fire on menus and during gameplay.
+
+Detailed actions:
+
+- Player 1: arrow keys move; `B` shoots a bolt. On the title carousel, joystick 1 fire selects/focuses Player 1 instead of starting the match.
+- Player 2: `Z` left, `X` down, `C` right, `S` up; `V` shoots a bolt.
 - Title carousel:
   - By default this is a one-player game and Left/Right arrows choose Player 1's hoover.
   - Player 2 joins by pressing joystick 2 fire or `V`; the carousel switches to Player 2 selection.
   - Player 2 chooses with joystick 2 left/right or `Z`/`C`, then presses joystick 2 fire or `V` again to lock Player 2 and open the two-player AI rival prompt.
-  - In the two-player AI prompt, choose `0`, `1`, `2`, or `3` AI rivals directly, or use Up/Down plus `Space` / Enter / joystick 1 button 2 / RMB. If you choose at least one AI rival, the next prompt asks for Easy / Normal / Hard AI difficulty.
-- `Space` / joystick 1 button 2 / RMB:
-  - On title: start match (or lock Player 2 if Player 2 is currently selecting; locked two-player mode opens the AI rival prompt)
-  - End of round: continue to next round
-  - End of match: start new best-of-5 match
+  - In the two-player AI prompt, choose `0`, `1`, `2`, or `3` AI rivals directly, or use Up/Down plus `Space` / Enter / the joystick blue (second) button / RMB. If you choose at least one AI rival, the next prompt asks for Easy / Normal / Hard AI difficulty.
+- Start / advance menus:
+  - On the title screen, start the match (or lock Player 2 if Player 2 is selecting; locked two-player mode opens the AI rival prompt) with `Space`, the joystick **blue (second) button**, RMB, or by holding fire for about two seconds.
+  - At the end of a round, continue to the next round with `Space`, joystick fire, or RMB.
+  - At the end of a match, start a new best-of-5 with `Space`, joystick fire, or RMB.
+- Pause: `Q` or the CD32 **Play/Pause** button pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys and `Enter`; `Q`, `Esc`, or the Play/Pause button resumes.
 - `R`:
   - During match: reset current round
 - `1` / `2` / `3`: choose AI rival count from the one-player title screen; choosing at least one AI opens the Easy / Normal / Hard difficulty prompt.

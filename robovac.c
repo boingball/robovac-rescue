@@ -46,8 +46,10 @@
 #include <proto/graphics.h>
 #include <proto/dos.h>
 #include <proto/datatypes.h>
+#include <proto/lowlevel.h>
 
 #include <dos/dos.h>
+#include <libraries/lowlevel.h>
 #include <datatypes/pictureclass.h>
 #include <datatypes/datatypes.h>
 #include <hardware/custom.h>
@@ -617,6 +619,11 @@ static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL joyPlayPrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+/* Not static: proto/lowlevel.h declares this library base as an extern that
+ * the inline ReadJoyPort stub resolves against. Opened in main, closed in
+ * CloseGameScreen; when NULL the joystick code falls back to direct reads. */
+struct Library *LowLevelBase = NULL;
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -7485,12 +7492,20 @@ static void ResetAllJoystickConfirmHolds(void)
 
 static BOOL ReadJoystickBlueButton(WORD id)
 {
-    (void)id;
-    /* This build has no existing CD32/second-button hardware reader.  Keep
-     * RMB/MENUDOWN on the Intuition path and rely on hold-to-confirm for
-     * single-button sticks rather than faking blue from the mouse button.
+    /* The second fire button (a CD32 pad's blue button, or a two-button
+     * stick's second button) is wired to the port's POTY pin, not the CIA
+     * fire line.  PollJoysticks drives the pot data lines high via POTGO each
+     * frame; a pressed second button then grounds its POTY line, so the
+     * matching POTINP data bit reads back low:
+     *   Player 1 (joystick port, id 0): POTY = POTINP bit 14 (DATRY)
+     *   Player 2 (mouse port,   id 1): POTY = POTINP bit 10 (DATLY)
+     * This reads the CD32 blue button in the pad's default (un-shifted) mode
+     * without the full CD32 shift-register protocol the other pad buttons
+     * would need.  Hold-to-confirm stays as a fallback for one-button sticks.
      */
-    return FALSE;
+    UWORD pin = custom.potinp;
+    if (id == 0) return (pin & 0x4000) ? FALSE : TRUE;
+    return (pin & 0x0400) ? FALSE : TRUE;
 }
 
 static BOOL UpdateJoystickConfirmHold(WORD id, BOOL fire)
@@ -7657,31 +7672,86 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 static void PollJoysticks(void)
 {
     UWORD dat[MAX_HUMAN_PLAYERS];
+    BOOL cd32Pad[MAX_HUMAN_PLAYERS];
+    ULONG padState[MAX_HUMAN_PLAYERS];
     WORD i;
+
+    /* Read a CD32 game controller through lowlevel.library first: it drives the
+     * pad's shift register itself to expose all seven buttons.  Only Player 1's
+     * joystick port (lowlevel port 1) is read this way; Player 2 sits on the
+     * mouse port (port 0), and polling that through ReadJoyPort every frame
+     * could disturb Intuition's mouse/RMB handling the menus depend on, so P2
+     * stays on the direct register path below.  Only a detected game controller
+     * takes the lowlevel path; plain sticks fall through unchanged.  Either
+     * pad's Play button pauses, so P1's Play covers the common CD32 setup. */
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        cd32Pad[i] = FALSE;
+        padState[i] = 0;
+    }
+    if (LowLevelBase) {
+        ULONG s = ReadJoyPort(1); /* lowlevel port 1 = joystick port = P1 */
+        if ((s & JP_TYPE_MASK) == JP_TYPE_GAMECTLR) {
+            cd32Pad[0] = TRUE;
+            padState[0] = s;
+        }
+    }
+
+    /* Drive the four pot data lines high as outputs so the second-button
+     * (two-button stick button 2) read in ReadJoystickBlueButton is valid this
+     * frame; a pressed button then pulls its POTY line low. */
+    custom.potgo = 0xff00;
 
     dat[0] = custom.joy1dat; /* on-screen J1/P1 = physical joystick port */
     dat[1] = custom.joy0dat; /* on-screen J2/P2 = mouse port */
 
     for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
         WORD stateBefore = gameState;
-        BOOL left = JOY_LEFT(dat[i]);
-        BOOL right = JOY_RIGHT(dat[i]);
-        BOOL up = JOY_UP(dat[i]);
-        BOOL down = JOY_DOWN(dat[i]);
-        BOOL fire = ReadJoystickFire(i);
-        BOOL blue = ReadJoystickBlueButton(i);
-        BOOL bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
-        BOOL directionActive = left || right || up || down;
+        BOOL left, right, up, down, fire, blue, play;
+        BOOL bluePressed;
+        BOOL playPressed;
+        BOOL directionActive;
         BOOL firePressed;
         BOOL holdConfirmed;
         BOOL confirmPressed;
 
-        /* Outside the title screen, keep mouse-port protection: a mouse left
-         * click is electrically the same as J2/P2 fire.  During the title
-         * screen, allow fire-only input so player 2 can join/arm before moving
-         * the stick and so hold-to-confirm can be detected.
+        if (cd32Pad[i]) {
+            ULONG s = padState[i];
+            left  = (s & JPF_JOY_LEFT)    ? TRUE : FALSE;
+            right = (s & JPF_JOY_RIGHT)   ? TRUE : FALSE;
+            up    = (s & JPF_JOY_UP)      ? TRUE : FALSE;
+            down  = (s & JPF_JOY_DOWN)    ? TRUE : FALSE;
+            fire  = (s & JPF_BUTTON_RED)  ? TRUE : FALSE;
+            blue  = (s & JPF_BUTTON_BLUE) ? TRUE : FALSE;
+            play  = (s & JPF_BUTTON_PLAY) ? TRUE : FALSE;
+        } else {
+            left  = JOY_LEFT(dat[i]);
+            right = JOY_RIGHT(dat[i]);
+            up    = JOY_UP(dat[i]);
+            down  = JOY_DOWN(dat[i]);
+            fire  = ReadJoystickFire(i);
+            blue  = ReadJoystickBlueButton(i);
+            play  = FALSE;
+        }
+
+        bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
+        playPressed = (play && !joyPlayPrev[i]) ? TRUE : FALSE;
+        directionActive = left || right || up || down;
+
+        /* CD32 Play/Pause toggles the pause overlay during gameplay. Handle it
+         * before the fire logic so a pause press is never consumed as a shot,
+         * and so either pad can pause. */
+        if (playPressed && (stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING)) {
+            if (pauseMenuOpen) ClosePauseMenu();
+            else OpenPauseMenu();
+        }
+
+        /* Outside the title screen, keep mouse-port protection for the direct
+         * read: a mouse left click is electrically the same as J2/P2 fire.  A
+         * detected CD32 pad reports fire on its own RED line, so it is exempt.
+         * During the title screen, allow fire-only input so player 2 can
+         * join/arm before moving the stick and so hold-to-confirm works.
          */
-        if (gameState != GAME_TITLE && i == 1 && !joyEnabled[i] && !directionActive) {
+        if (!cd32Pad[i] && gameState != GAME_TITLE && i == 1 && !joyEnabled[i] && !directionActive) {
             fire = FALSE;
         }
 
@@ -7716,6 +7786,7 @@ static void PollJoysticks(void)
         }
         joyFirePrev[i] = fire;
         joyBluePrev[i] = blue;
+        joyPlayPrev[i] = play;
     }
 }
 
@@ -7932,6 +8003,11 @@ static void CloseGameScreen(void)
         FreeMem(audioSilenceWord, sizeof(UWORD));
         audioSilenceWord = NULL;
     }
+
+    if (LowLevelBase) {
+        CloseLibrary(LowLevelBase);
+        LowLevelBase = NULL;
+    }
 }
 
 int main(void)
@@ -7941,6 +8017,12 @@ int main(void)
     if (!OpenGameScreen()) {
         return 20;
     }
+
+    /* Optional: present on CD32 and AGA machines with it installed. When open,
+     * PollJoysticks reads CD32 game controllers (all seven buttons, including
+     * Play/Pause) through ReadJoyPort; otherwise it falls back to reading the
+     * ports directly. Missing library is not an error. */
+    LowLevelBase = OpenLibrary("lowlevel.library", 0);
 
     gameState = introTitleBM ? GAME_INTRO : GAME_TITLE;
     if (gameState == GAME_TITLE) {
