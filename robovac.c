@@ -5048,8 +5048,14 @@ static BOOL AnyRobotCanMove(void)
     WORD i;
 
     for (i = 0; i < robotCount; i++) {
-        if (robots[i].battery > 0) return TRUE;
         if (robots[i].moving) return TRUE;
+        /* Match StartRobotMove: a move needs a full battery step, or an
+           emergency move while completely flat. A robot holding less than a
+           step's worth of battery (possible on Normal/Hard where a move
+           costs more than 1) can never move again, so it must not keep the
+           round from ending. */
+        if (robots[i].battery >= batteryCostPerMove) return TRUE;
+        if (robots[i].battery == 0 && robots[i].emergencyMovesLeft > 0) return TRUE;
     }
 
     return FALSE;
@@ -5546,6 +5552,21 @@ static void StepGame(void)
                 robots[i].battery = maxBattery;
                 robots[i].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
             }
+        }
+        /* A run-down hoover that can no longer make a move stays parked on
+           its tile for the rest of the round. If it came to rest on a dirt
+           tile, that tile would otherwise be stuck forever: the dead hoover
+           can't clean it and no rival can enter an occupied tile to reach
+           it, so the round drags on until every battery is flat. Let the
+           dead hoover take the tile it is sitting on so the dirt still
+           counts and clears. Mirrors the movement gating in StartRobotMove:
+           a robot can move only with enough battery, or with an emergency
+           move while flat, so anything else means it is stalled. */
+        if (!robots[i].moving &&
+            robots[i].battery < batteryCostPerMove &&
+            !(robots[i].battery == 0 && robots[i].emergencyMovesLeft > 0) &&
+            map[robots[i].tileY][robots[i].tileX] == TILE_DIRT) {
+            CleanTileForRobot(i, robots[i].tileX, robots[i].tileY);
         }
     }
     StepBonusAiFire();
