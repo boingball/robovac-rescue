@@ -120,6 +120,25 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
 #define BONUS_BOSS_TOUCH_STUN_TICKS 100
+/* A glancing/angled touch only needs to cover most of the robot's box before
+ * it counts as a full run-over stun; anything less is just a shove. */
+#define BONUS_BOSS_STUN_OVERLAP_NUM 3
+#define BONUS_BOSS_STUN_OVERLAP_DEN 4
+#define BONUS_BOSS_GRAZE_COOLDOWN_TICKS 20
+
+/* Boss movement patterns: the old build only ever bounced diagonally.
+ * BOSS_PATTERN_SPIN opens outward from the arena centre; the others sweep a
+ * single axis. StepBonusBoss picks a random mode every BOSS_PATTERN_*_TICKS
+ * window so a run sees a mix instead of only diagonals. */
+#define BOSS_PATTERN_DIAGONAL   0
+#define BOSS_PATTERN_HORIZONTAL 1
+#define BOSS_PATTERN_VERTICAL   2
+#define BOSS_PATTERN_SPIN       3
+#define BOSS_PATTERN_MODE_COUNT 4
+#define BOSS_PATTERN_MIN_TICKS 200
+#define BOSS_PATTERN_MAX_TICKS 400
+#define BOSS_SPIN_RADIUS_STEPS 48
+#define BOSS_SPIN_RADIUS_GROW_TICKS 4
 #define BOLT_STUN_STEP_FRAMES    17
 #define BOLT_STUN_TICKS          (5 * BOLT_STUN_STEP_FRAMES)
 #define BOLT_STUN_DAMAGE         5
@@ -127,6 +146,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAIN_AI_FIRE_CHANCE      18
 #define MAIN_AI_FIRE_RANGE_NORMAL 3
 #define MAIN_AI_FIRE_RANGE_HARD   8
+/* Easy-difficulty tile-cleaning AI ignores its own best pathfound move and
+ * wanders a random passable direction instead on 4 out of 5 turns, so it
+ * stops beelining straight to every dirt tile like Normal/Hard do. */
+#define EASY_AI_CONFUSION_CHANCE 5
+#define EASY_AI_CONFUSION_ROLL   4
 #define BONUS_BOSS_TOUCH_COOLDOWN_TICKS 100
 #define BONUS_BOSS_FIRE_INTERVAL_TICKS 50
 #define MAX_BOSS_BOLTS 12
@@ -580,6 +604,12 @@ static WORD bonusBossX = 0;
 static WORD bonusBossY = 0;
 static WORD bonusBossDx = 1;
 static WORD bonusBossDy = 1;
+static WORD bonusBossPatternMode = BOSS_PATTERN_DIAGONAL;
+static WORD bonusBossPatternTicks = 0;
+static WORD bonusBossSpinAngle = 0;
+static WORD bonusBossSpinRadiusStep = 0;
+static WORD bonusBossSpinRadiusDir = 1;
+static WORD bonusBossSpinRadiusTickCounter = 0;
 static WORD bonusBossPhase = 0;
 static WORD bonusBossFacingState = 2; /* SPR_DOWN is declared later in the sprite enum. */
 static WORD bonusBossFireTicks = 0;
@@ -2358,7 +2388,6 @@ static WORD MenuMusicChunkTicks(ULONG chunkBytes)
 
     if (menuMusicSample.sampleRate == 0) return 1;
     ticks = ((chunkBytes * 50UL) + (ULONG)menuMusicSample.sampleRate - 1UL) / (ULONG)menuMusicSample.sampleRate;
-    ticks = (ticks + 1UL) / 2UL;
     if (ticks < 1UL) ticks = 1UL;
     if (ticks > 32767UL) ticks = 32767UL;
     return (WORD)ticks;
@@ -4954,6 +4983,28 @@ static void ChooseAiMove(WORD id)
         return;
     }
 
+    /* Easy AI still docks sensibly on low battery, but otherwise plays badly:
+     * most turns it shuffles off in a random passable direction instead of
+     * beelining for the nearest dirt, so it cleans far slower than Normal/
+     * Hard and a human can comfortably out-clean it. */
+    if (bestX < 0 && aiDifficulty <= 0 && RandRange(EASY_AI_CONFUSION_CHANCE) < EASY_AI_CONFUSION_ROLL) {
+        WORD wanderDirs[4];
+
+        aiTargetDirtX[id] = -1;
+        aiTargetDirtY[id] = -1;
+        ShuffleAiDirs(wanderDirs);
+        for (dir = 0; dir < 4; dir++) {
+            WORD r = wanderDirs[dir];
+            if (curX + dirX[r] == aiPrevTileX[id] && curY + dirY[r] == aiPrevTileY[id]) continue;
+            if (StartRobotMove(id, dirX[r], dirY[r])) return;
+        }
+        for (dir = 0; dir < 4; dir++) {
+            WORD r = wanderDirs[dir];
+            if (StartRobotMove(id, dirX[r], dirY[r])) return;
+        }
+        return;
+    }
+
     if (bestX < 0) {
         x = aiTargetDirtX[id];
         y = aiTargetDirtY[id];
@@ -5193,6 +5244,12 @@ static void ResetBonusBoss(void)
     bonusBossY = MAP_Y + ((MAP_H * TILE_SIZE) - (ROBOT_H * BONUS_BOSS_SCALE)) / 2;
     bonusBossDx = 1;
     bonusBossDy = 1;
+    bonusBossPatternMode = BOSS_PATTERN_DIAGONAL;
+    bonusBossPatternTicks = BOSS_PATTERN_MIN_TICKS;
+    bonusBossSpinAngle = 0;
+    bonusBossSpinRadiusStep = 0;
+    bonusBossSpinRadiusDir = 1;
+    bonusBossSpinRadiusTickCounter = 0;
     bonusBossPhase = 0;
     bonusBossFacingState = SPR_DOWN;
     bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
@@ -5228,6 +5285,72 @@ static BOOL RectsOverlap(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, W
     return TRUE;
 }
 
+/* How much of the robot's box the boss box currently covers, as a fraction
+ * along each axis. A near-full run-over covers most of both axes; a glancing
+ * touch on a corner/edge only covers a sliver of one or both. */
+static BOOL RectOverlapCoversMost(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh)
+{
+    WORD ix0 = (ax > bx) ? ax : bx;
+    WORD iy0 = (ay > by) ? ay : by;
+    WORD ix1 = (ax + aw < bx + bw) ? (ax + aw) : (bx + bw);
+    WORD iy1 = (ay + ah < by + bh) ? (ay + ah) : (by + bh);
+    WORD overlapW = ix1 - ix0;
+    WORD overlapH = iy1 - iy0;
+
+    if (overlapW <= 0 || overlapH <= 0) return FALSE;
+    return (overlapW * BONUS_BOSS_STUN_OVERLAP_DEN >= aw * BONUS_BOSS_STUN_OVERLAP_NUM) &&
+           (overlapH * BONUS_BOSS_STUN_OVERLAP_DEN >= ah * BONUS_BOSS_STUN_OVERLAP_NUM);
+}
+
+/* A glancing hit only stops the robot and shoves it back one tile away from
+ * the boss, unlike BossStunRobot's full multi-second stun. */
+static void BossPushBackRobot(WORD id, WORD bossCenterX, WORD bossCenterY)
+{
+    WORD robotCenterX;
+    WORD robotCenterY;
+    WORD pushDx = 0;
+    WORD pushDy = 0;
+    WORD newX;
+    WORD newY;
+
+    if (id < 0 || id >= robotCount) return;
+
+    if (robots[id].moving) {
+        robots[id].tileX = robots[id].targetX;
+        robots[id].tileY = robots[id].targetY;
+        robots[id].px = TO_FP(robots[id].tileX * TILE_SIZE);
+        robots[id].py = TO_FP(robots[id].tileY * TILE_SIZE);
+        robots[id].targetPx = robots[id].px;
+        robots[id].targetPy = robots[id].py;
+        robots[id].moving = FALSE;
+    }
+
+    robotCenterX = MAP_X + FP_TO_INT(robots[id].px) + (ROBOT_W / 2);
+    robotCenterY = MAP_Y + FP_TO_INT(robots[id].py) + (ROBOT_H / 2);
+
+    if (AbsW(robotCenterX - bossCenterX) >= AbsW(robotCenterY - bossCenterY)) {
+        pushDx = (robotCenterX >= bossCenterX) ? 1 : -1;
+    } else {
+        pushDy = (robotCenterY >= bossCenterY) ? 1 : -1;
+    }
+
+    newX = robots[id].tileX + pushDx;
+    newY = robots[id].tileY + pushDy;
+    if (RobotCanPassTile(id, newX, newY) && !RobotAtTile(newX, newY, id)) {
+        robots[id].tileX = newX;
+        robots[id].tileY = newY;
+        robots[id].px = TO_FP(newX * TILE_SIZE);
+        robots[id].py = TO_FP(newY * TILE_SIZE);
+        robots[id].targetPx = robots[id].px;
+        robots[id].targetPy = robots[id].py;
+    }
+
+    robots[id].stunTicks = 0;
+    robots[id].boltStunned = FALSE;
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s BOSS PUSHED BACK", RobotTag(id));
+    lastPowerTicks = 40;
+}
+
 static void FireBossBolt(void)
 {
     static const WORD dirs[8][2] = {
@@ -5255,10 +5378,50 @@ static void FireBossBolt(void)
     }
 }
 
+/* Rolls the boss's next movement pattern: a straight diagonal bounce (the
+ * original behaviour), a single-axis horizontal or vertical sweep, or an
+ * outward spiral from the arena centre. Always picking a different mode
+ * from the current one keeps a run from feeling repetitive. */
+static void ChooseBossPattern(void)
+{
+    WORD mode = (WORD)RandRange(BOSS_PATTERN_MODE_COUNT);
+
+    if (BOSS_PATTERN_MODE_COUNT > 1 && mode == bonusBossPatternMode) {
+        mode = (WORD)((mode + 1 + RandRange(BOSS_PATTERN_MODE_COUNT - 1)) % BOSS_PATTERN_MODE_COUNT);
+    }
+    bonusBossPatternMode = mode;
+    bonusBossPatternTicks = BOSS_PATTERN_MIN_TICKS +
+        (WORD)RandRange(BOSS_PATTERN_MAX_TICKS - BOSS_PATTERN_MIN_TICKS + 1);
+
+    switch (mode) {
+        case BOSS_PATTERN_HORIZONTAL:
+            bonusBossDx = (RandRange(2) == 0) ? -1 : 1;
+            bonusBossDy = 0;
+            break;
+        case BOSS_PATTERN_VERTICAL:
+            bonusBossDx = 0;
+            bonusBossDy = (RandRange(2) == 0) ? -1 : 1;
+            break;
+        case BOSS_PATTERN_SPIN:
+            bonusBossSpinAngle = (WORD)RandRange(32);
+            bonusBossSpinRadiusStep = 0;
+            bonusBossSpinRadiusDir = 1;
+            bonusBossSpinRadiusTickCounter = 0;
+            break;
+        case BOSS_PATTERN_DIAGONAL:
+        default:
+            bonusBossDx = (RandRange(2) == 0) ? -1 : 1;
+            bonusBossDy = (RandRange(2) == 0) ? -1 : 1;
+            break;
+    }
+}
+
 static void StepBonusBoss(void)
 {
     WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
     WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+    WORD minX = TILE_SIZE;
+    WORD maxX = SCREEN_W - TILE_SIZE - bossW;
     WORD minY = MAP_Y + TILE_SIZE;
     WORD maxY = SCREEN_H - TILE_SIZE - bossH;
     WORD i;
@@ -5266,16 +5429,53 @@ static void StepBonusBoss(void)
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
     bonusBossPhase = (bonusBossPhase + 1) & 31;
-    bonusBossX += bonusBossDx;
-    bonusBossY += bonusBossDy;
 
-    if (bonusBossX <= TILE_SIZE || bonusBossX >= SCREEN_W - TILE_SIZE - bossW) {
-        bonusBossDx = -bonusBossDx;
+    if (bonusBossPatternTicks > 0) bonusBossPatternTicks--;
+    if (bonusBossPatternTicks <= 0) ChooseBossPattern();
+
+    if (bonusBossPatternMode == BOSS_PATTERN_SPIN) {
+        WORD centerX = (minX + maxX) / 2;
+        WORD centerY = (minY + maxY) / 2;
+        WORD maxRadiusX = (maxX - minX) / 2;
+        WORD maxRadiusY = (maxY - minY) / 2;
+        WORD radiusX;
+        WORD radiusY;
+
+        bonusBossSpinRadiusTickCounter++;
+        if (bonusBossSpinRadiusTickCounter >= BOSS_SPIN_RADIUS_GROW_TICKS) {
+            bonusBossSpinRadiusTickCounter = 0;
+            bonusBossSpinRadiusStep += bonusBossSpinRadiusDir;
+            if (bonusBossSpinRadiusStep >= BOSS_SPIN_RADIUS_STEPS) {
+                bonusBossSpinRadiusStep = BOSS_SPIN_RADIUS_STEPS;
+                bonusBossSpinRadiusDir = -1;
+            } else if (bonusBossSpinRadiusStep <= 0) {
+                bonusBossSpinRadiusStep = 0;
+                bonusBossSpinRadiusDir = 1;
+            }
+        }
+        bonusBossSpinAngle = (bonusBossSpinAngle + 1) & 31;
+
+        radiusX = (maxRadiusX * bonusBossSpinRadiusStep) / BOSS_SPIN_RADIUS_STEPS;
+        radiusY = (maxRadiusY * bonusBossSpinRadiusStep) / BOSS_SPIN_RADIUS_STEPS;
+
+        bonusBossX = centerX + (radiusX * IntroEffectSin(bonusBossSpinAngle)) / 13;
+        bonusBossY = centerY + (radiusY * IntroEffectSin(bonusBossSpinAngle + 8)) / 13;
+        if (bonusBossX < minX) bonusBossX = minX;
+        if (bonusBossX > maxX) bonusBossX = maxX;
+        if (bonusBossY < minY) bonusBossY = minY;
+        if (bonusBossY > maxY) bonusBossY = maxY;
+    } else {
         bonusBossX += bonusBossDx;
-    }
-    if (bonusBossY <= minY || bonusBossY >= maxY) {
-        bonusBossDy = -bonusBossDy;
         bonusBossY += bonusBossDy;
+
+        if (bonusBossX <= minX || bonusBossX >= maxX) {
+            bonusBossDx = -bonusBossDx;
+            bonusBossX += bonusBossDx;
+        }
+        if (bonusBossY <= minY || bonusBossY >= maxY) {
+            bonusBossDy = -bonusBossDy;
+            bonusBossY += bonusBossDy;
+        }
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -5288,8 +5488,13 @@ static void StepBonusBoss(void)
         touching = RectsOverlap(rx, ry, ROBOT_W, ROBOT_H, bonusBossX, bonusBossY, bossW, bossH);
         if (touching) {
             if (!bonusBossTouching[i] && bonusBossTouchCooldown[i] <= 0) {
-                BossStunRobot(i, "BOSS");
-                bonusBossTouchCooldown[i] = BONUS_BOSS_TOUCH_COOLDOWN_TICKS;
+                if (RectOverlapCoversMost(rx, ry, ROBOT_W, ROBOT_H, bonusBossX, bonusBossY, bossW, bossH)) {
+                    BossStunRobot(i, "BOSS");
+                    bonusBossTouchCooldown[i] = BONUS_BOSS_TOUCH_COOLDOWN_TICKS;
+                } else {
+                    BossPushBackRobot(i, bonusBossX + (bossW / 2), bonusBossY + (bossH / 2));
+                    bonusBossTouchCooldown[i] = BONUS_BOSS_GRAZE_COOLDOWN_TICKS;
+                }
             }
             bonusBossTouching[i] = TRUE;
         } else {
@@ -7119,6 +7324,11 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
     if (playSound) PlayBoltFireSample();
 }
 
+/* Holding two perpendicular directions at once (e.g. up+right) fires a 45
+ * degree bolt instead of picking just one axis, the way the boss's own
+ * bolts already travel on all 8 headings (see FireBossBolt/StepPlayerBolt).
+ * Grid movement itself stays 4-directional (StartRobotMove/ChoosePlayerMove
+ * are unaffected); this only changes which way a stationary shot flies. */
 static void FirePlayerBolt(WORD id)
 {
     WORD dirX = 0, dirY = 0;
@@ -7130,15 +7340,15 @@ static void FirePlayerBolt(WORD id)
     if (robots[id].moving) {
         dirX = robots[id].targetX - robots[id].tileX;
         dirY = robots[id].targetY - robots[id].tileY;
-    } else if (keyLeft[id]) dirX = -1;
-    else if (keyRight[id]) dirX = 1;
-    else if (keyUp[id]) dirY = -1;
-    else if (keyDown[id]) dirY = 1;
-    else if (joyLeft[id]) dirX = -1;
-    else if (joyRight[id]) dirX = 1;
-    else if (joyUp[id]) dirY = -1;
-    else if (joyDown[id]) dirY = 1;
-    else { dirX = playerFacingX[id]; dirY = playerFacingY[id]; }
+    } else {
+        if (keyLeft[id] || joyLeft[id]) dirX = -1;
+        else if (keyRight[id] || joyRight[id]) dirX = 1;
+
+        if (keyUp[id] || joyUp[id]) dirY = -1;
+        else if (keyDown[id] || joyDown[id]) dirY = 1;
+
+        if (dirX == 0 && dirY == 0) { dirX = playerFacingX[id]; dirY = playerFacingY[id]; }
+    }
     if (dirX == 0 && dirY == 0) dirY = -1;
 
     playerFacingX[id] = dirX;
@@ -7611,7 +7821,10 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiDifficultyMenuOpen) {
         if (id == 0) {
-            HandleAiDifficultyJoystick(up, down, confirmPressed);
+            /* A plain fire tap selects the highlighted entry here too, not
+             * just blue/hold-to-confirm, so a single-fire-button stick or an
+             * undetected CD32 pad can still drive this menu. */
+            HandleAiDifficultyJoystick(up, down, confirmPressed || firePressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7620,7 +7833,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiSelectMenuOpen) {
         if (id == 0) {
-            HandleAiSelectJoystick(up, down, confirmPressed);
+            HandleAiSelectJoystick(up, down, confirmPressed || firePressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7749,9 +7962,12 @@ static void PollJoysticks(void)
          * read: a mouse left click is electrically the same as J2/P2 fire.  A
          * detected CD32 pad reports fire on its own RED line, so it is exempt.
          * During the title screen, allow fire-only input so player 2 can
-         * join/arm before moving the stick and so hold-to-confirm works.
+         * join/arm before moving the stick and so hold-to-confirm works. The
+         * intro screen gets the same exemption so a P2 joystick's fire button
+         * can skip it (a stray mouse click there already skips the intro too,
+         * via the SELECTDOWN handler in PollWindowMessages).
          */
-        if (!cd32Pad[i] && gameState != GAME_TITLE && i == 1 && !joyEnabled[i] && !directionActive) {
+        if (!cd32Pad[i] && gameState != GAME_TITLE && gameState != GAME_INTRO && i == 1 && !joyEnabled[i] && !directionActive) {
             fire = FALSE;
         }
 
