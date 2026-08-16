@@ -214,6 +214,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_X       0x32
 #define RAW_C       0x33
 #define RAW_V       0x34
+#define RAW_D       0x22
+
+/* Attract/demo mode: idles on the title screen this long with no input
+ * before it kicks in on its own (D also starts it immediately). */
+#define TITLE_IDLE_DEMO_TICKS (30 * 50)
 
 #define TITLE_CAROUSEL_Y 172
 #define TITLE_ROBOT_SCALE 2
@@ -425,6 +430,15 @@ static BOOL menuMusicStreaming = FALSE;
 static ULONG menuMusicNextOffsetBytes = 0;
 static WORD menuMusicCurrentChunkTicks = 0;
 static WORD menuMusicQueuedChunkTicks = 0;
+/* Menu music is streamed straight off disk in small chunks rather than
+ * loaded whole into chip RAM: a several-minute 8SVX track is far bigger
+ * than the chip RAM budget the rest of the game's assets leave free, so
+ * fully preloading it either fails outright or starves other chip-RAM
+ * allocations. Only two chunk-sized buffers stay resident at once. */
+static BPTR menuMusicFile = 0;
+static LONG menuMusicBodyStart = 0;
+static UBYTE *menuMusicChunkBuf[2] = {NULL, NULL};
+static WORD menuMusicChunkBufNext = 0;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
@@ -450,6 +464,8 @@ static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 static UWORD *audioSilenceWord = NULL;
+static BOOL demoModeActive = FALSE;
+static WORD titleIdleTicks = 0;
 
 
 #ifndef AFF_68020
@@ -946,13 +962,14 @@ static void OpenAiSelectMenu(WORD initialSelection);
 static void CloseAiDifficultyMenu(void);
 static void OpenAiDifficultyMenu(WORD players, WORD rivals);
 static void StartMatch(WORD players, WORD rivals);
+static void StartDemoMode(void);
 static void StartBonusRound(void);
 static void FinishBonusRound(void);
 static BOOL BuildBonusBossCache(void);
 static void FreeBonusBossCache(void);
 static void StartBonusBossExplosion(void);
 static void ClearMovementKeys(void);
-static BOOL LoadMenuMusicSample(void);
+static BOOL LoadMenuMusicStream(void);
 static void ResetAllJoystickConfirmHolds(void);
 static void FreeMenuMusicSample(void);
 static void StartMenuMusic(void);
@@ -966,7 +983,6 @@ static void FreeRoundStartSamples(void);
 static void PlayGetReadySample(void);
 static void PlayCountdownSample(void);
 static void PlayGoSample(void);
-static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
 static void AudioPrepareChannel(WORD channel, UBYTE owner);
 static void AudioReleaseChannel(WORD channel, UBYTE owner);
 static void AudioSafeWait(void);
@@ -1869,6 +1885,71 @@ static BOOL RobotAtTile(WORD tx, WORD ty, WORD ignoreId)
     return FALSE;
 }
 
+static WORD RobotIdAtTile(WORD tx, WORD ty, WORD ignoreId)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        if (i == ignoreId) continue;
+
+        if (robots[i].tileX == tx && robots[i].tileY == ty) return i;
+        if (robots[i].targetX == tx && robots[i].targetY == ty) return i;
+    }
+
+    return -1;
+}
+
+/* A robot with no battery for a full move and no emergency moves left
+ * cannot get itself out of the way. */
+static BOOL RobotIsStranded(WORD id)
+{
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (robots[id].moving) return FALSE;
+    if (robots[id].battery >= batteryCostPerMove) return FALSE;
+    if (robots[id].battery <= 0 && robots[id].emergencyMovesLeft > 0) return FALSE;
+    return TRUE;
+}
+
+/* Bonus-fight helper: a stranded (out-of-charge) robot can't clear its own
+ * path to a dock, so let a teammate shove it one tile further along the
+ * direction it's already being bumped from, the same way the boss shoves a
+ * grazed robot. Only succeeds if the tile being pushed into is itself free,
+ * so this never displaces a robot into a wall or a third robot. */
+static BOOL TryPushStrandedRobot(WORD blockedId, WORD dx, WORD dy)
+{
+    WORD pushX;
+    WORD pushY;
+
+    if (!RobotIsStranded(blockedId)) return FALSE;
+
+    pushX = robots[blockedId].tileX + dx;
+    pushY = robots[blockedId].tileY + dy;
+    if (!RobotCanPassTile(blockedId, pushX, pushY)) return FALSE;
+    if (RobotAtTile(pushX, pushY, blockedId)) return FALSE;
+
+    robots[blockedId].tileX = pushX;
+    robots[blockedId].tileY = pushY;
+    robots[blockedId].px = TO_FP(pushX * TILE_SIZE);
+    robots[blockedId].py = TO_FP(pushY * TILE_SIZE);
+    robots[blockedId].targetPx = robots[blockedId].px;
+    robots[blockedId].targetPy = robots[blockedId].py;
+    robots[blockedId].moving = FALSE;
+
+    /* A push bypasses the normal tile-arrival path (FinishRobotTileMove),
+     * which is the only other place charging starts, so start it here too
+     * if the shove happens to land the stranded robot on a dock. */
+    if (map[pushY][pushX] == TILE_DOCK) {
+        if (robots[blockedId].battery <= 0) {
+            robots[blockedId].chargeTicks = DOCK_CHARGE_TICKS;
+        } else {
+            robots[blockedId].battery = maxBattery;
+            robots[blockedId].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
+            robots[blockedId].chargeTicks = 0;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL MoveRobotToNearestFreeTile(WORD id)
 {
     WORD radius;
@@ -2097,28 +2178,6 @@ static void PlayLoopedSample(struct OneShotSample *sample, WORD channel)
         custom.aud[channel].ac_ptr = (UWORD *)sample->data;
         custom.aud[channel].ac_len = sample->lengthWords;
     }
-
-    sample->ticksRemaining = 0;
-    sample->playing = TRUE;
-}
-
-static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel)
-{
-    UWORD dmaBit;
-
-    if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
-
-    AudioPrepareChannel(channel, SampleAudioOwner(sample));
-    dmaBit = AudioDmaBit(channel);
-    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
-    custom.aud[channel].ac_len = sample->lengthWords;
-    custom.aud[channel].ac_per = sample->period;
-    custom.aud[channel].ac_vol = sample->volume;
-    custom.dmacon = DMAF_SETCLR | dmaBit;
-    AudioDmaLatchWait();
-
-    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
-    custom.aud[channel].ac_len = sample->lengthWords;
 
     sample->ticksRemaining = 0;
     sample->playing = TRUE;
@@ -2376,9 +2435,105 @@ static void FreeRoundStartSamples(void)
     FreeOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
-static BOOL LoadMenuMusicSample(void)
+/* Parses just the 8SVX header (VHDR + the BODY chunk's file offset/size),
+ * leaves the file open for later chunked reads, and allocates the two
+ * chip-RAM chunk buffers streaming will read into. Never reads the sample
+ * body itself into memory. */
+static BOOL LoadMenuMusicStream(void)
 {
-    return LoadOneShotSample(MENU_MUSIC_SAMPLE_PATH, &menuMusicSample, "menu music");
+    UBYTE header[12];
+    UBYTE chunkHeader[8];
+    LONG fileSize;
+    LONG pos;
+    UWORD sampleRate = 0;
+    UBYTE compression = 0;
+    ULONG volume = 0x10000UL;
+    BOOL haveVHDR = FALSE;
+    BOOL haveBODY = FALSE;
+
+    memset(&menuMusicSample, 0, sizeof(menuMusicSample));
+    menuMusicBodyStart = 0;
+
+    menuMusicFile = Open((STRPTR)MENU_MUSIC_SAMPLE_PATH, MODE_OLDFILE);
+    if (!menuMusicFile) {
+        printf("Optional %s not loaded; menu music disabled\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    fileSize = GetFileSize(menuMusicFile);
+    if (fileSize < 20 || Read(menuMusicFile, header, 12) != 12 ||
+        memcmp(header, "FORM", 4) != 0 || memcmp(header + 8, "8SVX", 4) != 0) {
+        Close(menuMusicFile);
+        menuMusicFile = 0;
+        printf("%s is not an IFF 8SVX sample\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    pos = 12;
+    while (pos + 8 <= fileSize) {
+        ULONG chunkSize;
+        LONG dataPos;
+
+        if (Seek(menuMusicFile, pos, OFFSET_BEGINNING) == -1) break;
+        if (Read(menuMusicFile, chunkHeader, 8) != 8) break;
+        chunkSize = ReadBE32(chunkHeader + 4);
+        dataPos = pos + 8;
+        if (dataPos + (LONG)chunkSize > fileSize) break;
+
+        if (memcmp(chunkHeader, "VHDR", 4) == 0 && chunkSize >= 20) {
+            UBYTE vhdr[20];
+            if (Read(menuMusicFile, vhdr, 20) == 20) {
+                sampleRate = ReadBE16(vhdr + 12);
+                compression = vhdr[15];
+                volume = ReadBE32(vhdr + 16);
+                haveVHDR = TRUE;
+            }
+        } else if (memcmp(chunkHeader, "BODY", 4) == 0) {
+            menuMusicBodyStart = dataPos;
+            menuMusicSample.dataSize = (LONG)chunkSize;
+            haveBODY = TRUE;
+            break;
+        }
+
+        pos = dataPos + (LONG)chunkSize + ((LONG)chunkSize & 1);
+    }
+
+    if (!haveVHDR || !haveBODY || menuMusicSample.dataSize <= 1 || sampleRate == 0 || compression != 0) {
+        Close(menuMusicFile);
+        menuMusicFile = 0;
+        memset(&menuMusicSample, 0, sizeof(menuMusicSample));
+        printf("%s is not a playable uncompressed 8SVX sample\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    if (!menuMusicChunkBuf[0]) {
+        menuMusicChunkBuf[0] = (UBYTE *)AllocMem(MENU_MUSIC_STREAM_CHUNK_BYTES, MEMF_CHIP | MEMF_PUBLIC);
+    }
+    if (!menuMusicChunkBuf[1]) {
+        menuMusicChunkBuf[1] = (UBYTE *)AllocMem(MENU_MUSIC_STREAM_CHUNK_BYTES, MEMF_CHIP | MEMF_PUBLIC);
+    }
+    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) {
+        Close(menuMusicFile);
+        menuMusicFile = 0;
+        if (menuMusicChunkBuf[0]) { FreeMem(menuMusicChunkBuf[0], MENU_MUSIC_STREAM_CHUNK_BYTES); menuMusicChunkBuf[0] = NULL; }
+        if (menuMusicChunkBuf[1]) { FreeMem(menuMusicChunkBuf[1], MENU_MUSIC_STREAM_CHUNK_BYTES); menuMusicChunkBuf[1] = NULL; }
+        memset(&menuMusicSample, 0, sizeof(menuMusicSample));
+        printf("Could not allocate chip RAM streaming buffers for menu music\n");
+        return FALSE;
+    }
+
+    menuMusicSample.period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
+    if (menuMusicSample.period < 124) menuMusicSample.period = 124;
+    menuMusicSample.sampleRate = sampleRate;
+    menuMusicSample.volume = (volume >= 0x10000UL) ? 64 : (UBYTE)((volume * 64UL) / 0x10000UL);
+    if (menuMusicSample.volume == 0) menuMusicSample.volume = 64;
+    /* .data is never read directly for menu music (audio pointers are set
+     * per-chunk from menuMusicChunkBuf), but keep it non-NULL so the
+     * loaded/playable checks shared with other samples still pass. */
+    menuMusicSample.data = menuMusicChunkBuf[0];
+    menuMusicSample.loaded = TRUE;
+    menuMusicChunkBufNext = 0;
+    return TRUE;
 }
 
 static void StopMenuMusic(void)
@@ -2402,13 +2557,26 @@ static WORD MenuMusicChunkTicks(ULONG chunkBytes)
     return (WORD)ticks;
 }
 
+/* Seeks the open menu-music file to bodyOffset within the BODY chunk and
+ * reads byteCount bytes into menuMusicChunkBuf[bufIndex]. */
+static BOOL ReadMenuMusicBytes(WORD bufIndex, ULONG bodyOffset, ULONG byteCount)
+{
+    LONG readSize;
+
+    if (!menuMusicFile || !menuMusicChunkBuf[bufIndex]) return FALSE;
+    if (Seek(menuMusicFile, menuMusicBodyStart + (LONG)bodyOffset, OFFSET_BEGINNING) == -1) return FALSE;
+    readSize = Read(menuMusicFile, menuMusicChunkBuf[bufIndex], (LONG)byteCount);
+    return readSize == (LONG)byteCount;
+}
+
 static WORD QueueMenuMusicChunk(ULONG offsetBytes)
 {
     ULONG bytesRemaining;
     ULONG chunkBytes;
     UWORD chunkWords;
+    WORD bufIndex;
 
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return 1;
+    if (!menuMusicSample.loaded || menuMusicSample.dataSize <= 0) return 1;
     if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
 
     bytesRemaining = (ULONG)menuMusicSample.dataSize - offsetBytes;
@@ -2422,10 +2590,14 @@ static WORD QueueMenuMusicChunk(ULONG offsetBytes)
     }
     if (chunkBytes < 2UL) return 1;
 
+    bufIndex = menuMusicChunkBufNext;
+    if (!ReadMenuMusicBytes(bufIndex, offsetBytes, chunkBytes)) return 1;
+    menuMusicChunkBufNext = (WORD)(1 - bufIndex);
+
     chunkWords = (UWORD)(chunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[bufIndex];
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = chunkWords;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[bufIndex];
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = chunkWords;
 
     offsetBytes += chunkBytes;
@@ -2471,25 +2643,26 @@ static void StartMenuMusic(void)
 {
     ULONG firstChunkBytes;
     UWORD leftDmaBit, rightDmaBit;
+    WORD firstBuf;
 
     if (menuMusicSample.playing) return;
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
+    if (!menuMusicSample.loaded || !menuMusicFile || menuMusicSample.dataSize <= 0) return;
+    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) return;
 
     menuMusicStreaming = FALSE;
     menuMusicNextOffsetBytes = 0;
     menuMusicCurrentChunkTicks = 0;
     menuMusicQueuedChunkTicks = 0;
-
-    if ((ULONG)menuMusicSample.dataSize <= 131070UL) {
-        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-        menuMusicStreaming = FALSE;
-        return;
-    }
+    menuMusicChunkBufNext = 0;
 
     firstChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
     if (firstChunkBytes > (ULONG)menuMusicSample.dataSize) firstChunkBytes = (ULONG)menuMusicSample.dataSize;
     firstChunkBytes &= ~1UL;
+    if (firstChunkBytes < 2UL) return;
+
+    firstBuf = menuMusicChunkBufNext;
+    if (!ReadMenuMusicBytes(firstBuf, 0, firstChunkBytes)) return;
+    menuMusicChunkBufNext = (WORD)(1 - firstBuf);
 
     AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL,  AUDIO_OWNER_MENU_MUSIC);
     AudioPrepareChannel(MENU_MUSIC_RIGHT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
@@ -2497,11 +2670,11 @@ static void StartMenuMusic(void)
     rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
 
     /* Write chunk 1 as the current play buffer */
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)menuMusicSample.data;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)menuMusicChunkBuf[firstBuf];
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = (UWORD)(firstChunkBytes / 2UL);
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per  = menuMusicSample.period;
     custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol  = menuMusicSample.volume;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[firstBuf];
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
@@ -2547,8 +2720,17 @@ static void ServiceMenuMusicForState(void)
 static void FreeMenuMusicSample(void)
 {
     StopMenuMusic();
-    if (menuMusicSample.data) {
-        FreeMem(menuMusicSample.data, menuMusicSample.dataSize);
+    if (menuMusicFile) {
+        Close(menuMusicFile);
+        menuMusicFile = 0;
+    }
+    if (menuMusicChunkBuf[0]) {
+        FreeMem(menuMusicChunkBuf[0], MENU_MUSIC_STREAM_CHUNK_BYTES);
+        menuMusicChunkBuf[0] = NULL;
+    }
+    if (menuMusicChunkBuf[1]) {
+        FreeMem(menuMusicChunkBuf[1], MENU_MUSIC_STREAM_CHUNK_BYTES);
+        menuMusicChunkBuf[1] = NULL;
     }
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
 }
@@ -3215,12 +3397,21 @@ static void UpdateNightMode(void)
                                      ((g / NIGHT_MODE_DIM_DIVISOR) << 4) |
                                       (b / NIGHT_MODE_DIM_DIVISOR));
             }
-            /* Robot/boss light pens, plus the EMP-countdown and low-battery
-             * warning text pens, stay fully lit through the dim. */
+            /* Pens 7 and 10-15 are the vivid accent colours the robot sprite
+             * sheets actually paint their small highlight/sensor-light
+             * details with (confirmed by decoding the airobotN.iff art —
+             * most variants' bright pixels land on 7, 10, 12, or 14; a
+             * couple of variants barely have any bright pixels to begin
+             * with, which no palette trick can invent). Keep the whole
+             * cluster lit, plus the EMP system's own light pens for
+             * consistency, so as many variants as possible actually glow. */
+            for (i = 0; i < 32; i++) {
+                BOOL keepLit = (i == 7) || (i >= 10 && i <= 15) ||
+                                (i == EMP_ROBOT_LIGHT_PEN_A) || (i == EMP_ROBOT_LIGHT_PEN_B);
+                if (keepLit) dimmed[i] = palette[i];
+            }
             dimmed[EMP_ROBOT_LIGHT_PEN_A] = 0xFFF;
             dimmed[EMP_ROBOT_LIGHT_PEN_B] = 0xFFF;
-            dimmed[10] = palette[10];
-            dimmed[14] = palette[14];
             if (scr) LoadRGB4(&scr->ViewPort, dimmed, 32);
             nightModeActive = TRUE;
         }
@@ -4284,6 +4475,10 @@ static void DrawEmpRobotVisual(WORD id)
         snprintf(b, sizeof(b), "%d", state);
         pen = (robots[id].stunTicks & 4) ? 14 : 10;
     }
+    /* Pens 10/14 already stay lit in night mode's protected cluster, but
+     * pin the text to pure white there instead of their usual accent
+     * colours so it reads clearly as urgent against the dimmed room. */
+    if (nightModeActive) pen = 7;
 
     textX = rect.x + ((rect.w - MiniTextWidth(b, 1)) / 2);
     textY = rect.y + 1;
@@ -4328,7 +4523,10 @@ static void InitRobots(void)
     WORD i;
 
     robotCount = humanPlayers + aiRivals;
-    if (humanPlayers < 1) humanPlayers = 1;
+    /* Demo/attract mode deliberately runs with zero human players so every
+     * robot is AI-controlled; every other caller still needs at least 1. */
+    if (humanPlayers < 1 && !demoModeActive) humanPlayers = 1;
+    if (humanPlayers < 0) humanPlayers = 0;
     if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
     if (robotCount < humanPlayers) robotCount = humanPlayers;
     if (robotCount > MAX_ROBOTS) robotCount = MAX_ROBOTS;
@@ -4640,7 +4838,17 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     ny = robots[id].tileY + dy;
 
     if (!RobotCanPassTile(id, nx, ny)) return FALSE;
-    if (RobotAtTile(nx, ny, id)) return FALSE;
+    if (RobotAtTile(nx, ny, id)) {
+        /* During the bonus boss fight, walking into a teammate who is out of
+         * charge shoves them one tile further along instead of just
+         * blocking, the same way the boss shoves a grazed robot, so a
+         * stranded robot can be nudged back toward a dock instead of
+         * getting stuck. */
+        if (gameState != GAME_BONUS_PLAYING ||
+            !TryPushStrandedRobot(RobotIdAtTile(nx, ny, id), dx, dy)) {
+            return FALSE;
+        }
+    }
 
     if (robots[id].powerType == POWER_WALL_SMASH && robots[id].powerMovesLeft > 0 && map[ny][nx] == TILE_WALL) {
         map[ny][nx] = TILE_FLOOR;
@@ -5256,6 +5464,15 @@ static void CheckEndState(void)
     }
     roundWins[roundWinner]++;
 
+    /* Attract mode has no one to press "continue", so a finished demo round
+     * just rolls straight into a fresh one instead of showing the human
+     * round/match-end screens; any real input exits back to the title
+     * screen long before this would normally come up. */
+    if (demoModeActive) {
+        StartDemoMode();
+        return;
+    }
+
     if (roundIndex >= MatchRoundCount() - 1) {
         finalWinner = 0;
         for (i = 1; i < robotCount; i++) {
@@ -5742,6 +5959,8 @@ static void EnterTitleScreen(void)
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
+    demoModeActive = FALSE;
+    titleIdleTicks = 0;
     titleSelectPlayer = 0;
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
@@ -7369,6 +7588,34 @@ static void StartMatch(WORD players, WORD rivals)
     ResetLevel();
 }
 
+/* Attract mode: 4 AI-only robots clean a random room by themselves, Easy
+ * difficulty so they don't shoot at each other. Any real key, joystick, or
+ * mouse input immediately drops back to the title screen (see HandleRawKey/
+ * PollJoysticks/PollWindowMessages); a finished round just starts another
+ * one via the demoModeActive branch in CheckEndState rather than showing
+ * the normal round/match-end screens. */
+static void StartDemoMode(void)
+{
+    WORD i;
+
+    StopMenuMusic();
+    demoModeActive = TRUE;
+    humanPlayers = 0;
+    aiRivals = 4;
+    aiDifficulty = 0;
+    roundIndex = 0;
+    MarkHudStatusTextDirty();
+    bonusAvailable = FALSE;
+    bonusBossHealth = 0;
+    for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
+    titleTwoPlayerArmed = FALSE;
+    titlePlayer2Locked = FALSE;
+    titleSelectPlayer = 0;
+    aiDifficultyMenuOpen = FALSE;
+    ResetAllJoystickConfirmHolds();
+    ResetLevel();
+}
+
 static void StartWithRivals(WORD rivals)
 {
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) {
@@ -7718,6 +7965,16 @@ static void HandleRawKey(UWORD rawCode)
     BOOL keyUpEvent = (rawCode & 0x80) ? TRUE : FALSE;
     UWORD code = rawCode & 0x7F;
 
+    /* Attract mode: any keypress hands control straight back to a real
+     * player instead of being interpreted as a P1/P2 command. */
+    if (demoModeActive) {
+        if (!keyUpEvent) {
+            demoModeActive = FALSE;
+            EnterTitleScreen();
+        }
+        return;
+    }
+
     if (HandleAiDifficultyMenuRawKey(code, keyUpEvent)) {
         return;
     }
@@ -7751,6 +8008,7 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_Z) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, -1); return; }
         if (code == RAW_C) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, 1); return; }
         if (code == RAW_V) { TitlePlayer2Fire(); return; }
+        if (code == RAW_D) { StartDemoMode(); return; }
         if (code == RAW_0 && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(0); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
@@ -8055,6 +8313,16 @@ static void PollJoysticks(void)
         bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
         directionActive = left || right || up || down;
 
+        if (gameState == GAME_TITLE && (directionActive || fire || blue)) titleIdleTicks = 0;
+
+        if (demoModeActive && (directionActive || fire || blue)) {
+            demoModeActive = FALSE;
+            joyFirePrev[i] = fire;
+            joyBluePrev[i] = blue;
+            EnterTitleScreen();
+            return;
+        }
+
         /* Outside the title screen, keep mouse-port protection for the direct
          * read: a mouse left click is electrically the same as J2/P2 fire.
          * During the title screen, allow fire-only input so player 2 can
@@ -8113,9 +8381,16 @@ static void PollWindowMessages(void)
 
         ReplyMsg((struct Message *)msg);
 
+        if (gameState == GAME_TITLE) titleIdleTicks = 0;
+
         if (cls == IDCMP_RAWKEY) {
             HandleRawKey(code);
         } else if (cls == IDCMP_MOUSEBUTTONS) {
+            if (demoModeActive && code == SELECTDOWN) {
+                demoModeActive = FALSE;
+                EnterTitleScreen();
+                continue;
+            }
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
             if (code == MENUDOWN && gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
                 if (aiDifficultyMenuOpen) ActivateAiDifficultyMenu();
@@ -8228,7 +8503,7 @@ static BOOL OpenGameScreen(void)
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
     }
 
-    LoadMenuMusicSample();
+    LoadMenuMusicStream();
     LoadRoundStartSamples();
     LoadGameplaySamples();
 
@@ -8332,6 +8607,17 @@ int main(void)
     while (running) {
         PollWindowMessages();
         PollJoysticks();
+
+        if (gameState == GAME_TITLE) {
+            titleIdleTicks++;
+            if (titleIdleTicks >= TITLE_IDLE_DEMO_TICKS) {
+                titleIdleTicks = 0;
+                StartDemoMode();
+            }
+        } else {
+            titleIdleTicks = 0;
+        }
+
         StepGame();
         DrawFrame();
         WaitTOF();

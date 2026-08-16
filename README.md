@@ -35,6 +35,10 @@ Detailed actions:
 - AI difficulty: Easy AI does not fire back, Normal AI fires only at close range, and Hard AI fires from longer range.
 - `Esc`: quit
 
+## Demo / Attract Mode
+
+Press `D` on the title screen, or just leave the title screen idle for 30 seconds, to start a demo: 4 AI robots (Easy difficulty, so they don't shoot each other) clean a random room on their own, looping into a fresh room whenever one finishes instead of showing the normal round/match-end screens. Any keypress, joystick input, or mouse click immediately drops back to the title screen.
+
 ## Robot Super Powers
 
 Every robot tracks a clean streak toward the super power tied to that robot variant. Standard powers trigger every 5 dirt tiles. EMP blast and dirt bomb escalate after each use, requiring 5 dirt tiles for the first trigger, 15 for the second, and 30 for later triggers:
@@ -62,7 +66,7 @@ The HUD shows each robot's current clean-streak count, flashes `P` while a timed
 
 ## Bonus Round
 
-If any robot has more than 50 total points after the last regular round, the leaderboard offers an optional bonus battle. All robots enter a clean room with charging docks around the edges. A giant 3x rotating hover boss moves around the middle of the room, alternating between a diagonal bounce, a horizontal sweep, a vertical sweep, and an outward spiral from the arena centre every few seconds. Human players recharge on docks and shoot bolts at the boss; each boss hit adds 2 points to the shooter. The boss disappears after 80 hits, then the final scoreboard is shown and the winner is recalculated from the final totals. A near-full run-over gives a single 5-second stun/penalty per contact, with a cooldown so the slow-moving boss cannot stack repeated penalties while it overlaps a robot; a glancing/angled touch only stops the robot and shoves it back a tile.
+If any robot has more than 50 total points after the last regular round, the leaderboard offers an optional bonus battle. All robots enter a clean room with charging docks around the edges. A giant 3x rotating hover boss moves around the middle of the room, alternating between a diagonal bounce, a horizontal sweep, a vertical sweep, and an outward spiral from the arena centre every few seconds. Human players recharge on docks and shoot bolts at the boss; each boss hit adds 2 points to the shooter. The boss disappears after 80 hits, then the final scoreboard is shown and the winner is recalculated from the final totals. A near-full run-over gives a single 5-second stun/penalty per contact, with a cooldown so the slow-moving boss cannot stack repeated penalties while it overlaps a robot; a glancing/angled touch only stops the robot and shoves it back a tile. Walking into a teammate who is out of charge shoves them one tile further along instead of just blocking, so a stranded robot can be nudged back toward a dock. At random points the room also dips into a few seconds of near-darkness, leaving only the robots'/boss's light-coloured highlights and the on-screen status text visible.
 
 ## Room Types
 
@@ -106,7 +110,7 @@ The startup/title screens look for an optional uncompressed 8SVX menu-music samp
 
 - `PROGDIR:samples/RoboVacRescueMenu.8svx`
 
-When present, the sample is streamed from chip RAM across Paula channels 1 and 4 while the startup title image or main title menu is visible. Oversized samples are split into safe DMA chunks so the whole track plays before it loops, instead of looping only the first Paula-length block. Playback stops as soon as a match starts.
+The track can run several minutes, far more than fits in chip RAM alongside the game's other assets, so it is never loaded whole: only its 8SVX header is parsed up front, and playback streams it straight off disk into two small chip-RAM chunk buffers across Paula channels 1 and 4 while the startup title image or main title menu is visible, looping back to the start of the track when it ends. Playback stops as soon as a match starts.
 
 Round starts and gameplay also look for optional uncompressed 8SVX samples:
 
