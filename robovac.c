@@ -302,14 +302,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD2 0x0004
 #define DMAF_AUD3 0x0008
 #endif
-/* Smaller than Paula's 64K DMA-length limit on purpose: a single Read() of
- * a full 64K chunk is more likely to hit a filesystem/handler that quietly
- * returns fewer bytes than asked for on one call (legal AmigaDOS behaviour,
- * not an error), and each failed chunk previously left the stream stuck
- * replaying whatever was last successfully queued. Smaller reads plus the
- * retry loop in ReadMenuMusicBytes make that far less likely to bite. */
-#define MENU_MUSIC_STREAM_CHUNK_BYTES 16382UL
-#define MENU_MUSIC_STREAM_PREROLL_FRAMES 0
+/* Floor below which LoadMenuMusicStream gives up shrinking the track to
+ * fit chip RAM rather than loop something too short to be worth playing. */
+#define MENU_MUSIC_MIN_BYTES 65536UL
 
 struct Robot {
     WORD tileX;
@@ -432,19 +427,6 @@ static BOOL titleCopperActive = FALSE;
 static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 static struct OneShotSample menuMusicSample;
-static BOOL menuMusicStreaming = FALSE;
-static ULONG menuMusicNextOffsetBytes = 0;
-static WORD menuMusicCurrentChunkTicks = 0;
-static WORD menuMusicQueuedChunkTicks = 0;
-/* Menu music is streamed straight off disk in small chunks rather than
- * loaded whole into chip RAM: a several-minute 8SVX track is far bigger
- * than the chip RAM budget the rest of the game's assets leave free, so
- * fully preloading it either fails outright or starves other chip-RAM
- * allocations. Only two chunk-sized buffers stay resident at once. */
-static BPTR menuMusicFile = 0;
-static LONG menuMusicBodyStart = 0;
-static UBYTE *menuMusicChunkBuf[2] = {NULL, NULL};
-static WORD menuMusicChunkBufNext = 0;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
@@ -980,10 +962,8 @@ static void ResetAllJoystickConfirmHolds(void);
 static void FreeMenuMusicSample(void);
 static void StartMenuMusic(void);
 static void StopMenuMusic(void);
-static WORD QueueMenuMusicChunk(ULONG offsetBytes);
-static WORD MenuMusicChunkTicks(ULONG chunkBytes);
-static void ServiceMenuMusicStream(void);
 static void ServiceMenuMusicForState(void);
+static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
 static BOOL LoadRoundStartSamples(void);
 static void FreeRoundStartSamples(void);
 static void PlayGetReadySample(void);
@@ -2189,6 +2169,28 @@ static void PlayLoopedSample(struct OneShotSample *sample, WORD channel)
     sample->playing = TRUE;
 }
 
+static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel)
+{
+    UWORD dmaBit;
+
+    if (!sample->loaded || !sample->data || sample->lengthWords == 0) return;
+
+    AudioPrepareChannel(channel, SampleAudioOwner(sample));
+    dmaBit = AudioDmaBit(channel);
+    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+    custom.aud[channel].ac_len = sample->lengthWords;
+    custom.aud[channel].ac_per = sample->period;
+    custom.aud[channel].ac_vol = sample->volume;
+    custom.dmacon = DMAF_SETCLR | dmaBit;
+    AudioDmaLatchWait();
+
+    custom.aud[channel].ac_ptr = (UWORD *)sample->data;
+    custom.aud[channel].ac_len = sample->lengthWords;
+
+    sample->ticksRemaining = 0;
+    sample->playing = TRUE;
+}
+
 static void StopGetReadySample(void)
 {
     StopOneShotSample(&getReadySample, GET_READY_AUDIO_CHANNEL);
@@ -2441,36 +2443,47 @@ static void FreeRoundStartSamples(void)
     FreeOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
-/* Parses just the 8SVX header (VHDR + the BODY chunk's file offset/size),
- * leaves the file open for later chunked reads, and allocates the two
- * chip-RAM chunk buffers streaming will read into. Never reads the sample
- * body itself into memory. */
+/* Loads the whole track into one chip-RAM buffer and lets Paula loop it in
+ * hardware forever - no per-frame chunk bookkeeping. The earlier streamed
+ * version (reading fresh chunks off disk during playback) proved unreliable
+ * in practice (it kept stalling a few chunks in, independent of chunk size),
+ * so this goes back to the simple, proven mechanism the short menu track
+ * already used, but sized adaptively: it tries to fit the whole track in
+ * chip RAM first, and if that allocation fails, backs off to progressively
+ * smaller prefixes of the track until one fits (or gives up below a sane
+ * floor). A shorter hard loop point beats a track that never plays, or one
+ * that gets stuck endlessly repeating its first few seconds. */
 static BOOL LoadMenuMusicStream(void)
 {
+    BPTR fh;
     UBYTE header[12];
     UBYTE chunkHeader[8];
     LONG fileSize;
     LONG pos;
+    LONG bodyStart = 0;
+    ULONG bodySize = 0;
     UWORD sampleRate = 0;
     UBYTE compression = 0;
     ULONG volume = 0x10000UL;
     BOOL haveVHDR = FALSE;
     BOOL haveBODY = FALSE;
+    ULONG allocSize;
+    UBYTE *data;
+    ULONG got;
+    LONG readSize;
 
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
-    menuMusicBodyStart = 0;
 
-    menuMusicFile = Open((STRPTR)MENU_MUSIC_SAMPLE_PATH, MODE_OLDFILE);
-    if (!menuMusicFile) {
+    fh = Open((STRPTR)MENU_MUSIC_SAMPLE_PATH, MODE_OLDFILE);
+    if (!fh) {
         printf("Optional %s not loaded; menu music disabled\n", MENU_MUSIC_SAMPLE_PATH);
         return FALSE;
     }
 
-    fileSize = GetFileSize(menuMusicFile);
-    if (fileSize < 20 || Read(menuMusicFile, header, 12) != 12 ||
+    fileSize = GetFileSize(fh);
+    if (fileSize < 20 || Read(fh, header, 12) != 12 ||
         memcmp(header, "FORM", 4) != 0 || memcmp(header + 8, "8SVX", 4) != 0) {
-        Close(menuMusicFile);
-        menuMusicFile = 0;
+        Close(fh);
         printf("%s is not an IFF 8SVX sample\n", MENU_MUSIC_SAMPLE_PATH);
         return FALSE;
     }
@@ -2480,23 +2493,23 @@ static BOOL LoadMenuMusicStream(void)
         ULONG chunkSize;
         LONG dataPos;
 
-        if (Seek(menuMusicFile, pos, OFFSET_BEGINNING) == -1) break;
-        if (Read(menuMusicFile, chunkHeader, 8) != 8) break;
+        if (Seek(fh, pos, OFFSET_BEGINNING) == -1) break;
+        if (Read(fh, chunkHeader, 8) != 8) break;
         chunkSize = ReadBE32(chunkHeader + 4);
         dataPos = pos + 8;
         if (dataPos + (LONG)chunkSize > fileSize) break;
 
         if (memcmp(chunkHeader, "VHDR", 4) == 0 && chunkSize >= 20) {
             UBYTE vhdr[20];
-            if (Read(menuMusicFile, vhdr, 20) == 20) {
+            if (Read(fh, vhdr, 20) == 20) {
                 sampleRate = ReadBE16(vhdr + 12);
                 compression = vhdr[15];
                 volume = ReadBE32(vhdr + 16);
                 haveVHDR = TRUE;
             }
         } else if (memcmp(chunkHeader, "BODY", 4) == 0) {
-            menuMusicBodyStart = dataPos;
-            menuMusicSample.dataSize = (LONG)chunkSize;
+            bodyStart = dataPos;
+            bodySize = chunkSize;
             haveBODY = TRUE;
             break;
         }
@@ -2504,242 +2517,78 @@ static BOOL LoadMenuMusicStream(void)
         pos = dataPos + (LONG)chunkSize + ((LONG)chunkSize & 1);
     }
 
-    if (!haveVHDR || !haveBODY || menuMusicSample.dataSize <= 1 || sampleRate == 0 || compression != 0) {
-        Close(menuMusicFile);
-        menuMusicFile = 0;
-        memset(&menuMusicSample, 0, sizeof(menuMusicSample));
+    if (!haveVHDR || !haveBODY || bodySize <= 1 || sampleRate == 0 || compression != 0) {
+        Close(fh);
         printf("%s is not a playable uncompressed 8SVX sample\n", MENU_MUSIC_SAMPLE_PATH);
         return FALSE;
     }
 
-    if (!menuMusicChunkBuf[0]) {
-        menuMusicChunkBuf[0] = (UBYTE *)AllocMem(MENU_MUSIC_STREAM_CHUNK_BYTES, MEMF_CHIP | MEMF_PUBLIC);
+    allocSize = bodySize & ~1UL;
+    data = NULL;
+    while (allocSize >= MENU_MUSIC_MIN_BYTES) {
+        data = (UBYTE *)AllocMem(allocSize, MEMF_CHIP | MEMF_PUBLIC);
+        if (data) break;
+        allocSize = (allocSize / 2UL) & ~1UL;
     }
-    if (!menuMusicChunkBuf[1]) {
-        menuMusicChunkBuf[1] = (UBYTE *)AllocMem(MENU_MUSIC_STREAM_CHUNK_BYTES, MEMF_CHIP | MEMF_PUBLIC);
-    }
-    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) {
-        Close(menuMusicFile);
-        menuMusicFile = 0;
-        if (menuMusicChunkBuf[0]) { FreeMem(menuMusicChunkBuf[0], MENU_MUSIC_STREAM_CHUNK_BYTES); menuMusicChunkBuf[0] = NULL; }
-        if (menuMusicChunkBuf[1]) { FreeMem(menuMusicChunkBuf[1], MENU_MUSIC_STREAM_CHUNK_BYTES); menuMusicChunkBuf[1] = NULL; }
-        memset(&menuMusicSample, 0, sizeof(menuMusicSample));
-        printf("Could not allocate chip RAM streaming buffers for menu music\n");
+    if (!data) {
+        Close(fh);
+        printf("Could not allocate chip RAM for %s\n", MENU_MUSIC_SAMPLE_PATH);
         return FALSE;
     }
 
+    if (Seek(fh, bodyStart, OFFSET_BEGINNING) == -1) {
+        Close(fh);
+        FreeMem(data, allocSize);
+        printf("Could not read %s\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    got = 0;
+    while (got < allocSize) {
+        readSize = Read(fh, data + got, (LONG)(allocSize - got));
+        if (readSize <= 0) break;
+        got += (ULONG)readSize;
+    }
+    Close(fh);
+    got &= ~1UL;
+
+    if (got < 2UL) {
+        FreeMem(data, allocSize);
+        printf("Could not read %s\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    menuMusicSample.data = data;
+    menuMusicSample.dataSize = (LONG)allocSize;
+    menuMusicSample.lengthWords = (UWORD)(got / 2UL);
     menuMusicSample.period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
     if (menuMusicSample.period < 124) menuMusicSample.period = 124;
     menuMusicSample.sampleRate = sampleRate;
     menuMusicSample.volume = (volume >= 0x10000UL) ? 64 : (UBYTE)((volume * 64UL) / 0x10000UL);
     if (menuMusicSample.volume == 0) menuMusicSample.volume = 64;
-    /* .data is never read directly for menu music (audio pointers are set
-     * per-chunk from menuMusicChunkBuf), but keep it non-NULL so the
-     * loaded/playable checks shared with other samples still pass. */
-    menuMusicSample.data = menuMusicChunkBuf[0];
     menuMusicSample.loaded = TRUE;
-    menuMusicChunkBufNext = 0;
     return TRUE;
 }
 
 static void StopMenuMusic(void)
 {
-    menuMusicStreaming = FALSE;
-    menuMusicNextOffsetBytes = 0;
-    menuMusicCurrentChunkTicks = 0;
-    menuMusicQueuedChunkTicks = 0;
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
 
-static WORD MenuMusicChunkTicks(ULONG chunkBytes)
-{
-    ULONG ticks;
-
-    if (menuMusicSample.sampleRate == 0) return 1;
-    ticks = ((chunkBytes * 50UL) + (ULONG)menuMusicSample.sampleRate - 1UL) / (ULONG)menuMusicSample.sampleRate;
-    if (ticks < 1UL) ticks = 1UL;
-    if (ticks > 32767UL) ticks = 32767UL;
-    return (WORD)ticks;
-}
-
-/* Seeks the open menu-music file to bodyOffset within the BODY chunk and
- * reads byteCount bytes into menuMusicChunkBuf[bufIndex]. Loops on Read()
- * because AmigaDOS handlers are allowed to return fewer bytes than asked
- * for on a single call even without an error or EOF -- a lone Read() call
- * silently short-reading here was very likely why streaming stalled after
- * the first couple of chunks instead of an outright I/O failure. */
-static BOOL ReadMenuMusicBytes(WORD bufIndex, ULONG bodyOffset, ULONG byteCount)
-{
-    UBYTE *buf;
-    ULONG got = 0;
-    LONG readSize;
-
-    if (!menuMusicFile || !menuMusicChunkBuf[bufIndex]) return FALSE;
-    if (Seek(menuMusicFile, menuMusicBodyStart + (LONG)bodyOffset, OFFSET_BEGINNING) == -1) return FALSE;
-
-    buf = menuMusicChunkBuf[bufIndex];
-    while (got < byteCount) {
-        readSize = Read(menuMusicFile, buf + got, (LONG)(byteCount - got));
-        if (readSize <= 0) return FALSE;
-        got += (ULONG)readSize;
-    }
-    return TRUE;
-}
-
-static WORD QueueMenuMusicChunk(ULONG offsetBytes)
-{
-    ULONG bytesRemaining;
-    ULONG chunkBytes;
-    UWORD chunkWords;
-    WORD bufIndex;
-
-    if (!menuMusicSample.loaded || menuMusicSample.dataSize <= 0) return 1;
-    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
-
-    bytesRemaining = (ULONG)menuMusicSample.dataSize - offsetBytes;
-    chunkBytes = (bytesRemaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ? MENU_MUSIC_STREAM_CHUNK_BYTES : bytesRemaining;
-    chunkBytes &= ~1UL;
-    if (chunkBytes < 2UL) {
-        offsetBytes = 0;
-        chunkBytes = ((ULONG)menuMusicSample.dataSize > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
-                     MENU_MUSIC_STREAM_CHUNK_BYTES : (ULONG)menuMusicSample.dataSize;
-        chunkBytes &= ~1UL;
-    }
-    if (chunkBytes < 2UL) return 1;
-
-    bufIndex = menuMusicChunkBufNext;
-    if (!ReadMenuMusicBytes(bufIndex, offsetBytes, chunkBytes)) {
-        /* A read at this offset failed outright (not just a short read,
-         * which ReadMenuMusicBytes already retries internally). Rather than
-         * silently wedging on the same reload chunk forever, rewind to the
-         * start of the track once and try again from there. */
-        offsetBytes = 0;
-        chunkBytes = ((ULONG)menuMusicSample.dataSize > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
-                     MENU_MUSIC_STREAM_CHUNK_BYTES : (ULONG)menuMusicSample.dataSize;
-        chunkBytes &= ~1UL;
-        if (chunkBytes < 2UL || !ReadMenuMusicBytes(bufIndex, offsetBytes, chunkBytes)) return 1;
-    }
-    menuMusicChunkBufNext = (WORD)(1 - bufIndex);
-
-    chunkWords = (UWORD)(chunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[bufIndex];
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = chunkWords;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[bufIndex];
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = chunkWords;
-
-    offsetBytes += chunkBytes;
-    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
-    menuMusicNextOffsetBytes = offsetBytes;
-    return MenuMusicChunkTicks(chunkBytes);
-}
-
-static void ServiceMenuMusicStream(void)
-{
-    WORD nextChunkTicks;
-
-    if (!menuMusicStreaming || !menuMusicSample.playing) return;
-
-    if (menuMusicCurrentChunkTicks > 0) {
-        menuMusicCurrentChunkTicks--;
-        if (menuMusicCurrentChunkTicks > 0) return;
-    }
-
-    /*
-     * Paula has two relevant states here: the chunk currently being played
-     * internally, and the visible AUDx pointer/length registers used as the
-     * reload buffer.  StartMenuMusic() primes those visible registers with the
-     * second chunk after chunk 1 is latched.
-     *
-     * Do not overwrite the visible registers before the current chunk ends, or
-     * the already-queued chunk is skipped/repeated.  Once our current-chunk
-     * timer expires, the queued chunk has become the current audio, so promote
-     * its tick count and write exactly one following chunk as the next reload.
-     */
-    if (menuMusicQueuedChunkTicks > 0) {
-        menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
-    } else {
-        menuMusicCurrentChunkTicks = 1;
-    }
-
-    nextChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
-    if (nextChunkTicks < 1) nextChunkTicks = 1;
-    menuMusicQueuedChunkTicks = nextChunkTicks;
-}
-
 static void StartMenuMusic(void)
 {
-    ULONG firstChunkBytes;
-    UWORD leftDmaBit, rightDmaBit;
-    WORD firstBuf;
-
     if (menuMusicSample.playing) return;
-    if (!menuMusicSample.loaded || !menuMusicFile || menuMusicSample.dataSize <= 0) return;
-    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) return;
+    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.lengthWords == 0) return;
 
-    menuMusicStreaming = FALSE;
-    menuMusicNextOffsetBytes = 0;
-    menuMusicCurrentChunkTicks = 0;
-    menuMusicQueuedChunkTicks = 0;
-    menuMusicChunkBufNext = 0;
-
-    firstChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
-    if (firstChunkBytes > (ULONG)menuMusicSample.dataSize) firstChunkBytes = (ULONG)menuMusicSample.dataSize;
-    firstChunkBytes &= ~1UL;
-    if (firstChunkBytes < 2UL) return;
-
-    firstBuf = menuMusicChunkBufNext;
-    if (!ReadMenuMusicBytes(firstBuf, 0, firstChunkBytes)) return;
-    menuMusicChunkBufNext = (WORD)(1 - firstBuf);
-
-    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL,  AUDIO_OWNER_MENU_MUSIC);
-    AudioPrepareChannel(MENU_MUSIC_RIGHT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
-    leftDmaBit  = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-    rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-
-    /* Write chunk 1 as the current play buffer */
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)menuMusicChunkBuf[firstBuf];
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = (UWORD)(firstChunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per  = menuMusicSample.period;
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol  = menuMusicSample.volume;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[firstBuf];
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
-
-    /* Enable DMA and give Paula time to latch chunk 1 into its internal
-       playback registers before the visible registers become chunk 2. */
-    custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
-    AudioDmaLatchWait();
-
-    menuMusicSample.playing = TRUE;
-    menuMusicStreaming = TRUE;
-    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
-    menuMusicQueuedChunkTicks = 0;
-
-    /* The service routine queues chunk 2 shortly before chunk 1 ends.  Keeping
-       one simple "time until current chunk ends" counter avoids the previous
-       double-buffer bookkeeping path that could leave Paula replaying the same
-       64K reload buffer several times before the offset advanced. */
-    menuMusicNextOffsetBytes = firstChunkBytes;
-    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize) menuMusicNextOffsetBytes = 0;
-
-    /* Prime chunk 2 immediately after Paula has latched chunk 1.  Without this,
-       the first service tick may arrive too late and Paula can replay chunk 1.
-       The fixed MenuMusicChunkTicks() above now uses the actual 8SVX sample
-       rate, so later chunks are queued just before the audible chunk finishes
-       instead of after several repeats. */
-    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
+    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
 }
 
 static void ServiceMenuMusicForState(void)
 {
-    BOOL wasPlaying;
-
     if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
-        wasPlaying = menuMusicSample.playing;
         StartMenuMusic();
-        if (wasPlaying) ServiceMenuMusicStream();
     } else if (menuMusicSample.playing) {
         StopMenuMusic();
     }
@@ -2748,17 +2597,8 @@ static void ServiceMenuMusicForState(void)
 static void FreeMenuMusicSample(void)
 {
     StopMenuMusic();
-    if (menuMusicFile) {
-        Close(menuMusicFile);
-        menuMusicFile = 0;
-    }
-    if (menuMusicChunkBuf[0]) {
-        FreeMem(menuMusicChunkBuf[0], MENU_MUSIC_STREAM_CHUNK_BYTES);
-        menuMusicChunkBuf[0] = NULL;
-    }
-    if (menuMusicChunkBuf[1]) {
-        FreeMem(menuMusicChunkBuf[1], MENU_MUSIC_STREAM_CHUNK_BYTES);
-        menuMusicChunkBuf[1] = NULL;
+    if (menuMusicSample.data) {
+        FreeMem(menuMusicSample.data, menuMusicSample.dataSize);
     }
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
 }
@@ -7640,7 +7480,16 @@ static void StartDemoMode(void)
     titlePlayer2Locked = FALSE;
     titleSelectPlayer = 0;
     aiDifficultyMenuOpen = FALSE;
+    aiSelectMenuOpen = FALSE;
     ResetAllJoystickConfirmHolds();
+    /* The menu-driven match-start paths (ActivateAiDifficultyMenu/
+     * ActivateAiSelectMenu) always mark the title screen fully dirty before
+     * handing off to gameplay, via their CloseAiDifficultyMenu/
+     * CloseAiSelectMenu calls. D is a direct shortcut with no menu to close,
+     * so without this the title screen's cached bitmap could still be
+     * flagged clean and never get overdrawn, leaving it visible under/after
+     * the demo starts. */
+    MarkTitleAllDirty();
     ResetLevel();
 }
 

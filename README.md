@@ -110,7 +110,7 @@ The startup/title screens look for an optional uncompressed 8SVX menu-music samp
 
 - `PROGDIR:samples/RoboVacRescueMenu.8svx`
 
-The track can run several minutes, far more than fits in chip RAM alongside the game's other assets, so it is never loaded whole: only its 8SVX header is parsed up front, and playback streams it straight off disk into two small chip-RAM chunk buffers across Paula channels 1 and 4 while the startup title image or main title menu is visible, looping back to the start of the track when it ends. Playback stops as soon as a match starts.
+On startup the whole track is loaded into a single chip-RAM buffer and looped by Paula in hardware across channels 1 and 4 while the startup title image or main title menu is visible, playing until a match starts. The track can run several minutes, more than reliably fits in chip RAM alongside the game's other assets, so if allocating a buffer for the full track fails, loading backs off to progressively shorter prefixes of it (still starting from the beginning) until one fits, rather than not playing any music at all.
 
 Round starts and gameplay also look for optional uncompressed 8SVX samples:
 
