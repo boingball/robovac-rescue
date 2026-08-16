@@ -302,9 +302,21 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD2 0x0004
 #define DMAF_AUD3 0x0008
 #endif
-/* Floor below which LoadMenuMusicStream gives up shrinking the track to
- * fit chip RAM rather than loop something too short to be worth playing. */
-#define MENU_MUSIC_MIN_BYTES 65536UL
+#ifndef INTF_AUD0
+#define INTF_AUD0 0x0080
+#endif
+#ifndef INTF_AUD3
+#define INTF_AUD3 0x0400
+#endif
+#ifndef INTF_SETCLR
+#define INTF_SETCLR 0x8000
+#endif
+/* Paula's AUDxLEN is a 16-bit word count, so a single DMA block cannot
+ * describe the full menu track. Keep the source in normal/Fast RAM and copy
+ * it through two modest chip-RAM buffers, swapping only when Paula reports
+ * that the previous block actually finished. */
+#define MENU_MUSIC_STREAM_CHUNK_BYTES 32768UL
+#define MENU_MUSIC_INT_MASK (INTF_AUD0 | INTF_AUD3)
 
 struct Robot {
     WORD tileX;
@@ -427,6 +439,12 @@ static BOOL titleCopperActive = FALSE;
 static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 static struct OneShotSample menuMusicSample;
+static UBYTE *menuMusicChunkBuf[2] = {NULL, NULL};
+static ULONG menuMusicSourceBytes = 0;
+static ULONG menuMusicNextOffsetBytes = 0;
+static WORD menuMusicCurrentBuf = 0;
+static UWORD menuMusicSavedAudioIntena = 0;
+static BOOL menuMusicIntenaSaved = FALSE;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
@@ -453,6 +471,13 @@ static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 static UWORD *audioSilenceWord = NULL;
 static BOOL demoModeActive = FALSE;
+static BOOL demoJoyPrimed = FALSE;
+static BOOL demoPrevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevFire[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevBlue[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD titleIdleTicks = 0;
 
 
@@ -962,7 +987,10 @@ static void ResetAllJoystickConfirmHolds(void);
 static void FreeMenuMusicSample(void);
 static void StartMenuMusic(void);
 static void StopMenuMusic(void);
+static UWORD FillMenuMusicChunk(WORD bufferIndex);
+static void ServiceMenuMusicStream(void);
 static void ServiceMenuMusicForState(void);
+static UWORD AudioDmaBit(WORD channel);
 static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
 static BOOL LoadRoundStartSamples(void);
 static void FreeRoundStartSamples(void);
@@ -2443,16 +2471,10 @@ static void FreeRoundStartSamples(void)
     FreeOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
-/* Loads the whole track into one chip-RAM buffer and lets Paula loop it in
- * hardware forever - no per-frame chunk bookkeeping. The earlier streamed
- * version (reading fresh chunks off disk during playback) proved unreliable
- * in practice (it kept stalling a few chunks in, independent of chunk size),
- * so this goes back to the simple, proven mechanism the short menu track
- * already used, but sized adaptively: it tries to fit the whole track in
- * chip RAM first, and if that allocation fails, backs off to progressively
- * smaller prefixes of the track until one fits (or gives up below a sane
- * floor). A shorter hard loop point beats a track that never plays, or one
- * that gets stuck endlessly repeating its first few seconds. */
+/* Keep the complete 8SVX BODY in ordinary/Fast RAM, but feed Paula through
+ * two small chip-RAM buffers. Paula itself tells us when a block has finished
+ * through INTREQR, so no guessed 50 Hz chunk timer is involved and AUDxLEN
+ * never has to describe more than one legal DMA block. */
 static BOOL LoadMenuMusicStream(void)
 {
     BPTR fh;
@@ -2471,8 +2493,12 @@ static BOOL LoadMenuMusicStream(void)
     UBYTE *data;
     ULONG got;
     LONG readSize;
+    WORD i;
 
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
+    menuMusicSourceBytes = 0;
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentBuf = 0;
 
     fh = Open((STRPTR)MENU_MUSIC_SAMPLE_PATH, MODE_OLDFILE);
     if (!fh) {
@@ -2523,22 +2549,40 @@ static BOOL LoadMenuMusicStream(void)
         return FALSE;
     }
 
-    allocSize = bodySize & ~1UL;
-    data = NULL;
-    while (allocSize >= MENU_MUSIC_MIN_BYTES) {
-        data = (UBYTE *)AllocMem(allocSize, MEMF_CHIP | MEMF_PUBLIC);
-        if (data) break;
-        allocSize = (allocSize / 2UL) & ~1UL;
+    /* Reserve the DMA-visible buffers first so a no-Fast-RAM fallback cannot
+     * consume all chip RAM before Paula gets its two streaming buffers. */
+    for (i = 0; i < 2; i++) {
+        if (!menuMusicChunkBuf[i]) {
+            menuMusicChunkBuf[i] = (UBYTE *)AllocMem(MENU_MUSIC_STREAM_CHUNK_BYTES,
+                                                     MEMF_CHIP | MEMF_PUBLIC);
+        }
     }
-    if (!data) {
+    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) {
         Close(fh);
-        printf("Could not allocate chip RAM for %s\n", MENU_MUSIC_SAMPLE_PATH);
+        FreeMenuMusicSample();
+        printf("Could not allocate chip RAM buffers for %s\n", MENU_MUSIC_SAMPLE_PATH);
         return FALSE;
     }
 
+    allocSize = bodySize & ~1UL;
+    data = (UBYTE *)AllocMem(allocSize, MEMF_FAST | MEMF_PUBLIC);
+    if (!data) {
+        /* Machines with no Fast RAM can still try the old all-public-memory
+         * route; the two chip streaming buffers are already safely reserved. */
+        data = (UBYTE *)AllocMem(allocSize, MEMF_PUBLIC);
+    }
+    if (!data) {
+        Close(fh);
+        FreeMenuMusicSample();
+        printf("Could not allocate source RAM for %s\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+    menuMusicSample.data = data;
+    menuMusicSample.dataSize = (LONG)allocSize;
+
     if (Seek(fh, bodyStart, OFFSET_BEGINNING) == -1) {
         Close(fh);
-        FreeMem(data, allocSize);
+        FreeMenuMusicSample();
         printf("Could not read %s\n", MENU_MUSIC_SAMPLE_PATH);
         return FALSE;
     }
@@ -2553,14 +2597,15 @@ static BOOL LoadMenuMusicStream(void)
     got &= ~1UL;
 
     if (got < 2UL) {
-        FreeMem(data, allocSize);
+        FreeMenuMusicSample();
         printf("Could not read %s\n", MENU_MUSIC_SAMPLE_PATH);
         return FALSE;
     }
 
-    menuMusicSample.data = data;
-    menuMusicSample.dataSize = (LONG)allocSize;
-    menuMusicSample.lengthWords = (UWORD)(got / 2UL);
+    menuMusicSourceBytes = got;
+    /* lengthWords deliberately stays zero: the source is not itself a legal
+     * Paula DMA block and must never be handed to PlayLoopedSample(). */
+    menuMusicSample.lengthWords = 0;
     menuMusicSample.period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
     if (menuMusicSample.period < 124) menuMusicSample.period = 124;
     menuMusicSample.sampleRate = sampleRate;
@@ -2570,25 +2615,143 @@ static BOOL LoadMenuMusicStream(void)
     return TRUE;
 }
 
+static UWORD FillMenuMusicChunk(WORD bufferIndex)
+{
+    ULONG remaining;
+    ULONG chunkBytes;
+
+    if (bufferIndex < 0 || bufferIndex > 1) return 0;
+    if (!menuMusicSample.loaded || !menuMusicSample.data || !menuMusicChunkBuf[bufferIndex]) return 0;
+    if (menuMusicSourceBytes < 2UL) return 0;
+
+    if (menuMusicNextOffsetBytes >= menuMusicSourceBytes) menuMusicNextOffsetBytes = 0;
+    remaining = menuMusicSourceBytes - menuMusicNextOffsetBytes;
+    chunkBytes = (remaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
+                 MENU_MUSIC_STREAM_CHUNK_BYTES : remaining;
+    chunkBytes &= ~1UL;
+
+    if (chunkBytes < 2UL) {
+        menuMusicNextOffsetBytes = 0;
+        remaining = menuMusicSourceBytes;
+        chunkBytes = (remaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
+                     MENU_MUSIC_STREAM_CHUNK_BYTES : remaining;
+        chunkBytes &= ~1UL;
+    }
+    if (chunkBytes < 2UL) return 0;
+
+    CopyMem(menuMusicSample.data + menuMusicNextOffsetBytes,
+            menuMusicChunkBuf[bufferIndex], chunkBytes);
+    menuMusicNextOffsetBytes += chunkBytes;
+    if (menuMusicNextOffsetBytes >= menuMusicSourceBytes) menuMusicNextOffsetBytes = 0;
+
+    return (UWORD)(chunkBytes / 2UL);
+}
+
 static void StopMenuMusic(void)
 {
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+    custom.intreq = MENU_MUSIC_INT_MASK;
+
+    if (menuMusicIntenaSaved) {
+        if (menuMusicSavedAudioIntena != 0) {
+            custom.intena = INTF_SETCLR | menuMusicSavedAudioIntena;
+        }
+        menuMusicSavedAudioIntena = 0;
+        menuMusicIntenaSaved = FALSE;
+    }
+
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentBuf = 0;
 }
 
 static void StartMenuMusic(void)
 {
-    if (menuMusicSample.playing) return;
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.lengthWords == 0) return;
+    UWORD firstWords;
+    UWORD secondWords;
+    UWORD leftDmaBit;
+    UWORD rightDmaBit;
 
-    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-    PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+    if (menuMusicSample.playing) return;
+    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSourceBytes < 2UL) return;
+    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) return;
+
+    menuMusicNextOffsetBytes = 0;
+    firstWords = FillMenuMusicChunk(0);
+    secondWords = FillMenuMusicChunk(1);
+    if (firstWords == 0 || secondWords == 0) return;
+
+    menuMusicSavedAudioIntena = custom.intenar & MENU_MUSIC_INT_MASK;
+    menuMusicIntenaSaved = TRUE;
+    /* Poll INTREQR ourselves; do not let a level-4 audio ISR consume the
+     * block-finished flag before the title loop sees it. */
+    custom.intena = MENU_MUSIC_INT_MASK;
+    custom.intreq = MENU_MUSIC_INT_MASK;
+
+    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
+    AudioPrepareChannel(MENU_MUSIC_RIGHT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
+    leftDmaBit = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
+
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[0];
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = firstWords;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[0];
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = firstWords;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
+
+    custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
+    AudioDmaLatchWait();
+
+    /* Paula has latched buffer 0. These visible pointer/length registers are
+     * now the reload block that becomes active when buffer 0 finishes. */
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[1];
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = secondWords;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[1];
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = secondWords;
+
+    /* Discard any start-up request; the next pair of flags means block 0 has
+     * genuinely completed on both stereo channels. */
+    custom.intreq = MENU_MUSIC_INT_MASK;
+    menuMusicCurrentBuf = 0;
+    menuMusicSample.playing = TRUE;
+}
+
+static void ServiceMenuMusicStream(void)
+{
+    UWORD pending;
+    WORD refillBuf;
+    UWORD words;
+
+    if (!menuMusicSample.playing) return;
+
+    pending = custom.intreqr & MENU_MUSIC_INT_MASK;
+    /* Both channels play the same buffer. Wait until both have crossed the
+     * boundary before overwriting the buffer they just stopped using. */
+    if (pending != MENU_MUSIC_INT_MASK) return;
+    custom.intreq = MENU_MUSIC_INT_MASK;
+
+    menuMusicCurrentBuf ^= 1;
+    refillBuf = menuMusicCurrentBuf ^ 1;
+    words = FillMenuMusicChunk(refillBuf);
+    if (words == 0) {
+        StopMenuMusic();
+        return;
+    }
+
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[refillBuf];
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = words;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[refillBuf];
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = words;
 }
 
 static void ServiceMenuMusicForState(void)
 {
     if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
         StartMenuMusic();
+        ServiceMenuMusicStream();
     } else if (menuMusicSample.playing) {
         StopMenuMusic();
     }
@@ -2596,10 +2759,21 @@ static void ServiceMenuMusicForState(void)
 
 static void FreeMenuMusicSample(void)
 {
+    WORD i;
+
     StopMenuMusic();
     if (menuMusicSample.data) {
         FreeMem(menuMusicSample.data, menuMusicSample.dataSize);
     }
+    for (i = 0; i < 2; i++) {
+        if (menuMusicChunkBuf[i]) {
+            FreeMem(menuMusicChunkBuf[i], MENU_MUSIC_STREAM_CHUNK_BYTES);
+            menuMusicChunkBuf[i] = NULL;
+        }
+    }
+    menuMusicSourceBytes = 0;
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentBuf = 0;
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
 }
 
@@ -5828,6 +6002,7 @@ static void EnterTitleScreen(void)
     introTicks = 0;
     humanPlayers = 1;
     demoModeActive = FALSE;
+    demoJoyPrimed = FALSE;
     titleIdleTicks = 0;
     titleSelectPlayer = 0;
     titleTwoPlayerArmed = FALSE;
@@ -7468,6 +7643,9 @@ static void StartDemoMode(void)
 
     StopMenuMusic();
     demoModeActive = TRUE;
+    /* The first joystick poll after D/idle start establishes a baseline.
+     * Only a new edge after that baseline is allowed to cancel the demo. */
+    demoJoyPrimed = FALSE;
     humanPlayers = 0;
     aiRivals = 4;
     aiDifficulty = 0;
@@ -8191,18 +8369,7 @@ static void PollJoysticks(void)
         fire  = ReadJoystickFire(i);
         blue  = ReadJoystickBlueButton(i);
 
-        bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
         directionActive = left || right || up || down;
-
-        if (gameState == GAME_TITLE && (directionActive || fire || blue)) titleIdleTicks = 0;
-
-        if (demoModeActive && (directionActive || fire || blue)) {
-            demoModeActive = FALSE;
-            joyFirePrev[i] = fire;
-            joyBluePrev[i] = blue;
-            EnterTitleScreen();
-            return;
-        }
 
         /* Outside the title screen, keep mouse-port protection for the direct
          * read: a mouse left click is electrically the same as J2/P2 fire.
@@ -8214,6 +8381,49 @@ static void PollJoysticks(void)
          */
         if (gameState != GAME_TITLE && gameState != GAME_INTRO && i == 1 && !joyEnabled[i] && !directionActive) {
             fire = FALSE;
+        }
+
+        bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
+
+        if (gameState == GAME_TITLE && (directionActive || fire || blue)) titleIdleTicks = 0;
+
+        if (demoModeActive) {
+            BOOL newDemoInput;
+
+            if (!demoJoyPrimed) {
+                demoPrevLeft[i] = left;
+                demoPrevRight[i] = right;
+                demoPrevUp[i] = up;
+                demoPrevDown[i] = down;
+                demoPrevFire[i] = fire;
+                demoPrevBlue[i] = blue;
+                joyFirePrev[i] = fire;
+                joyBluePrev[i] = blue;
+                if (i == MAX_HUMAN_PLAYERS - 1) demoJoyPrimed = TRUE;
+                continue;
+            }
+
+            newDemoInput = (left && !demoPrevLeft[i]) ||
+                           (right && !demoPrevRight[i]) ||
+                           (up && !demoPrevUp[i]) ||
+                           (down && !demoPrevDown[i]) ||
+                           (fire && !demoPrevFire[i]) ||
+                           (blue && !demoPrevBlue[i]);
+
+            demoPrevLeft[i] = left;
+            demoPrevRight[i] = right;
+            demoPrevUp[i] = up;
+            demoPrevDown[i] = down;
+            demoPrevFire[i] = fire;
+            demoPrevBlue[i] = blue;
+
+            if (newDemoInput) {
+                demoModeActive = FALSE;
+                joyFirePrev[i] = fire;
+                joyBluePrev[i] = blue;
+                EnterTitleScreen();
+                return;
+            }
         }
 
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
