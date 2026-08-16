@@ -302,7 +302,13 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD2 0x0004
 #define DMAF_AUD3 0x0008
 #endif
-#define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
+/* Smaller than Paula's 64K DMA-length limit on purpose: a single Read() of
+ * a full 64K chunk is more likely to hit a filesystem/handler that quietly
+ * returns fewer bytes than asked for on one call (legal AmigaDOS behaviour,
+ * not an error), and each failed chunk previously left the stream stuck
+ * replaying whatever was last successfully queued. Smaller reads plus the
+ * retry loop in ReadMenuMusicBytes make that far less likely to bite. */
+#define MENU_MUSIC_STREAM_CHUNK_BYTES 16382UL
 #define MENU_MUSIC_STREAM_PREROLL_FRAMES 0
 
 struct Robot {
@@ -2558,15 +2564,27 @@ static WORD MenuMusicChunkTicks(ULONG chunkBytes)
 }
 
 /* Seeks the open menu-music file to bodyOffset within the BODY chunk and
- * reads byteCount bytes into menuMusicChunkBuf[bufIndex]. */
+ * reads byteCount bytes into menuMusicChunkBuf[bufIndex]. Loops on Read()
+ * because AmigaDOS handlers are allowed to return fewer bytes than asked
+ * for on a single call even without an error or EOF -- a lone Read() call
+ * silently short-reading here was very likely why streaming stalled after
+ * the first couple of chunks instead of an outright I/O failure. */
 static BOOL ReadMenuMusicBytes(WORD bufIndex, ULONG bodyOffset, ULONG byteCount)
 {
+    UBYTE *buf;
+    ULONG got = 0;
     LONG readSize;
 
     if (!menuMusicFile || !menuMusicChunkBuf[bufIndex]) return FALSE;
     if (Seek(menuMusicFile, menuMusicBodyStart + (LONG)bodyOffset, OFFSET_BEGINNING) == -1) return FALSE;
-    readSize = Read(menuMusicFile, menuMusicChunkBuf[bufIndex], (LONG)byteCount);
-    return readSize == (LONG)byteCount;
+
+    buf = menuMusicChunkBuf[bufIndex];
+    while (got < byteCount) {
+        readSize = Read(menuMusicFile, buf + got, (LONG)(byteCount - got));
+        if (readSize <= 0) return FALSE;
+        got += (ULONG)readSize;
+    }
+    return TRUE;
 }
 
 static WORD QueueMenuMusicChunk(ULONG offsetBytes)
@@ -2591,7 +2609,17 @@ static WORD QueueMenuMusicChunk(ULONG offsetBytes)
     if (chunkBytes < 2UL) return 1;
 
     bufIndex = menuMusicChunkBufNext;
-    if (!ReadMenuMusicBytes(bufIndex, offsetBytes, chunkBytes)) return 1;
+    if (!ReadMenuMusicBytes(bufIndex, offsetBytes, chunkBytes)) {
+        /* A read at this offset failed outright (not just a short read,
+         * which ReadMenuMusicBytes already retries internally). Rather than
+         * silently wedging on the same reload chunk forever, rewind to the
+         * start of the track once and try again from there. */
+        offsetBytes = 0;
+        chunkBytes = ((ULONG)menuMusicSample.dataSize > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
+                     MENU_MUSIC_STREAM_CHUNK_BYTES : (ULONG)menuMusicSample.dataSize;
+        chunkBytes &= ~1UL;
+        if (chunkBytes < 2UL || !ReadMenuMusicBytes(bufIndex, offsetBytes, chunkBytes)) return 1;
+    }
     menuMusicChunkBufNext = (WORD)(1 - bufIndex);
 
     chunkWords = (UWORD)(chunkBytes / 2UL);
@@ -8008,7 +8036,11 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_Z) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, -1); return; }
         if (code == RAW_C) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, 1); return; }
         if (code == RAW_V) { TitlePlayer2Fire(); return; }
-        if (code == RAW_D) { StartDemoMode(); return; }
+        /* Don't hijack the title screen into a demo while the AI
+         * difficulty/rival menus are up mid-selection - starting a match
+         * pulls the rug out from under whatever the player was choosing
+         * and can leave that menu's cached overlay stuck on screen. */
+        if (code == RAW_D && !aiDifficultyMenuOpen && !aiSelectMenuOpen) { StartDemoMode(); return; }
         if (code == RAW_0 && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(0); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
@@ -8608,7 +8640,7 @@ int main(void)
         PollWindowMessages();
         PollJoysticks();
 
-        if (gameState == GAME_TITLE) {
+        if (gameState == GAME_TITLE && !aiDifficultyMenuOpen && !aiSelectMenuOpen) {
             titleIdleTicks++;
             if (titleIdleTicks >= TITLE_IDLE_DEMO_TICKS) {
                 titleIdleTicks = 0;
