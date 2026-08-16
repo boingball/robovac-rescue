@@ -46,10 +46,8 @@
 #include <proto/graphics.h>
 #include <proto/dos.h>
 #include <proto/datatypes.h>
-#include <proto/lowlevel.h>
 
 #include <dos/dos.h>
-#include <libraries/lowlevel.h>
 #include <datatypes/pictureclass.h>
 #include <datatypes/datatypes.h>
 #include <hardware/custom.h>
@@ -235,7 +233,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_MENU_DIRTY_TOP 66
 #define TITLE_FORCED_FULL_PRESENT_FRAMES 3
 
-#define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenuShort.8svx"
+#define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenu.8svx"
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
 #define COUNTDOWN_SAMPLE_PATH "PROGDIR:samples/countdown.8svx"
 #define GO_SAMPLE_PATH "PROGDIR:samples/go.8svx"
@@ -280,6 +278,15 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define EMP_FLOOR_PEN 9
 #define EMP_ROBOT_LIGHT_PEN_A 29
 #define EMP_ROBOT_LIGHT_PEN_B 30
+
+/* Boss-fight "night mode": at random points the room dims to near-black,
+ * with only the robots' light pens (and the status-text pens that ride on
+ * top of them) left bright, then it fades back after a few seconds. */
+#define NIGHT_MODE_MIN_DURATION_TICKS 150
+#define NIGHT_MODE_MAX_DURATION_TICKS 300
+#define NIGHT_MODE_MIN_GAP_TICKS 400
+#define NIGHT_MODE_MAX_GAP_TICKS 900
+#define NIGHT_MODE_DIM_DIVISOR 5
 
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
@@ -649,11 +656,6 @@ static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
-static BOOL joyPlayPrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
-/* Not static: proto/lowlevel.h declares this library base as an extern that
- * the inline ReadJoyPort stub resolves against. Opened in main, closed in
- * CloseGameScreen; when NULL the joystick code falls back to direct reads. */
-struct Library *LowLevelBase = NULL;
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -666,6 +668,9 @@ static WORD empCountdownTicks = 0;
 static WORD empCountdownOwner = -1;
 static BOOL empPaletteCycleActive = FALSE;
 static WORD empPaletteCyclePhase = -1;
+static BOOL nightModeActive = FALSE;
+static WORD nightModeTicks = 0;
+static WORD nightModeCooldownTicks = 0;
 
 struct Bolt {
     BOOL active;
@@ -919,6 +924,8 @@ static BOOL EnableTitleCopperGradient(void);
 static void DrawTitleCarousel(void);
 static void DrawHud(void);
 static WORD EmpRobotCountdownNumber(WORD id);
+static BOOL RobotLowBatteryWarningActive(WORD id);
+static WORD EmpRobotVisualState(WORD id);
 static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect);
 static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect);
 static void DrawEmpRobotVisual(WORD id);
@@ -1019,6 +1026,8 @@ static BOOL RoundStartLocked(void);
 static void CloseGameScreen(void);
 static void UpdateEmpPaletteCycle(void);
 static void StopEmpPaletteCycle(void);
+static void UpdateNightMode(void);
+static void StopNightMode(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -1550,22 +1559,22 @@ static void MarkDirtyEmpRobotVisuals(void)
     WORD i;
 
     for (i = 0; i < robotCount; i++) {
-        WORD countdown = EmpRobotCountdownNumber(i);
+        WORD state = EmpRobotVisualState(i);
         WORD sx = MAP_X + FP_TO_INT(robots[i].px);
         WORD sy = MAP_Y + FP_TO_INT(robots[i].py);
 
         if (dirtyPrevEmpVisible[i]) {
             AddDirtyEmpRobotVisualAt(dirtyPrevEmpScreenX[i], dirtyPrevEmpScreenY[i]);
         }
-        if (countdown > 0) {
-            if (dirtyPrevEmpCountdown[i] != countdown) {
+        if (state != 0) {
+            if (dirtyPrevEmpCountdown[i] != state) {
                 AddDirtyEmpRobotVisualAt(sx, sy);
             }
             AddDirtyEmpRobotVisual(i);
         }
 
-        dirtyPrevEmpVisible[i] = countdown > 0;
-        dirtyPrevEmpCountdown[i] = countdown;
+        dirtyPrevEmpVisible[i] = state != 0;
+        dirtyPrevEmpCountdown[i] = state;
         dirtyPrevEmpScreenX[i] = sx;
         dirtyPrevEmpScreenY[i] = sy;
     }
@@ -3171,10 +3180,73 @@ static void UpdateEmpPaletteCycle(void)
     empPaletteCyclePhase = phase;
 }
 
+static void StopNightMode(void)
+{
+    if (!nightModeActive) return;
+    nightModeActive = FALSE;
+    if (scr) LoadRGB4(&scr->ViewPort, palette, 32);
+}
+
+/* Randomly dims the bonus-boss arena to near black for a few seconds at a
+ * time, leaving only the robots' light pens (and the status-text pens drawn
+ * over them) bright, then restores the normal palette. Uses a countdown
+ * timer the same way StepBonusBoss's pattern picker does, rather than a
+ * per-tick chance, so the on/off durations stay predictable and bounded. */
+static void UpdateNightMode(void)
+{
+    if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0 ||
+        bonusBossExplosionTicks > 0 || empCountdownTicks > 0) {
+        StopNightMode();
+        nightModeTicks = 0;
+        return;
+    }
+
+    if (nightModeTicks > 0) {
+        if (!nightModeActive) {
+            UWORD dimmed[32];
+            WORD i;
+
+            for (i = 0; i < 32; i++) {
+                UWORD c = palette[i];
+                UWORD r = (c >> 8) & 0xF;
+                UWORD g = (c >> 4) & 0xF;
+                UWORD b = c & 0xF;
+                dimmed[i] = (UWORD)(((r / NIGHT_MODE_DIM_DIVISOR) << 8) |
+                                     ((g / NIGHT_MODE_DIM_DIVISOR) << 4) |
+                                      (b / NIGHT_MODE_DIM_DIVISOR));
+            }
+            /* Robot/boss light pens, plus the EMP-countdown and low-battery
+             * warning text pens, stay fully lit through the dim. */
+            dimmed[EMP_ROBOT_LIGHT_PEN_A] = 0xFFF;
+            dimmed[EMP_ROBOT_LIGHT_PEN_B] = 0xFFF;
+            dimmed[10] = palette[10];
+            dimmed[14] = palette[14];
+            if (scr) LoadRGB4(&scr->ViewPort, dimmed, 32);
+            nightModeActive = TRUE;
+        }
+        nightModeTicks--;
+        if (nightModeTicks <= 0) {
+            StopNightMode();
+            nightModeCooldownTicks = NIGHT_MODE_MIN_GAP_TICKS +
+                (WORD)RandRange(NIGHT_MODE_MAX_GAP_TICKS - NIGHT_MODE_MIN_GAP_TICKS + 1);
+        }
+        return;
+    }
+
+    if (nightModeCooldownTicks > 0) {
+        nightModeCooldownTicks--;
+        return;
+    }
+
+    nightModeTicks = NIGHT_MODE_MIN_DURATION_TICKS +
+        (WORD)RandRange(NIGHT_MODE_MAX_DURATION_TICKS - NIGHT_MODE_MIN_DURATION_TICKS + 1);
+}
+
 static void LoadGamePalette(void)
 {
     DisableTitleCopperGradient(FALSE);
     empPaletteCycleActive = FALSE;
+    nightModeActive = FALSE;
     empPaletteCyclePhase = -1;
     LoadRGB4(&scr->ViewPort, palette, 32);
     introPaletteActive = FALSE;
@@ -4117,6 +4189,29 @@ static WORD EmpRobotCountdownNumber(WORD id)
     return secondsLeft;
 }
 
+static BOOL RobotLowBatteryWarningActive(WORD id)
+{
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (robots[id].battery > 25) return FALSE;
+    /* Sitting on the dock already means it's recharging, so the reminder to
+     * go dock would be pointless there. */
+    if (map[robots[id].tileY][robots[id].tileX] == TILE_DOCK) return FALSE;
+    return TRUE;
+}
+
+/* Shares the EMP stun countdown's above-head box and dirty-rect tracking:
+ * 1..5 = seconds left stunned (drawn as a number), -1 = battery low (drawn
+ * as a warning icon), 0 = nothing to show. Stun takes priority since it is
+ * the more urgent state and the two never need to show at once. */
+static WORD EmpRobotVisualState(WORD id)
+{
+    WORD countdown = EmpRobotCountdownNumber(id);
+
+    if (countdown > 0) return countdown;
+    if (RobotLowBatteryWarningActive(id)) return -1;
+    return 0;
+}
+
 static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect)
 {
     WORD left;
@@ -4158,7 +4253,7 @@ static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect)
     WORD sy;
 
     if (!rect || id < 0 || id >= robotCount) return FALSE;
-    if (EmpRobotCountdownNumber(id) <= 0) return FALSE;
+    if (EmpRobotVisualState(id) == 0) return FALSE;
 
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py);
@@ -4169,18 +4264,26 @@ static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect)
 static void DrawEmpRobotVisual(WORD id)
 {
     struct DirtyRect rect;
-    WORD secondsLeft;
+    WORD state;
     WORD pen;
     WORD textX;
     WORD textY;
     char b[4];
 
-    secondsLeft = EmpRobotCountdownNumber(id);
-    if (secondsLeft <= 0) return;
+    state = EmpRobotVisualState(id);
+    if (state == 0) return;
     if (!GetEmpRobotVisualRect(id, &rect)) return;
 
-    snprintf(b, sizeof(b), "%d", secondsLeft);
-    pen = (robots[id].stunTicks & 4) ? 14 : 10;
+    if (state < 0) {
+        /* Low battery: a plain "!" above the head, since there is no stun
+         * countdown to show and the reminder just needs to catch the eye. */
+        b[0] = '!';
+        b[1] = '\0';
+        pen = 14;
+    } else {
+        snprintf(b, sizeof(b), "%d", state);
+        pen = (robots[id].stunTicks & 4) ? 14 : 10;
+    }
 
     textX = rect.x + ((rect.w - MiniTextWidth(b, 1)) / 2);
     textY = rect.y + 1;
@@ -5119,6 +5222,16 @@ static BOOL AnyRobotCanMove(void)
     return FALSE;
 }
 
+/* Longer matches for more robots on the field: a 1-player match keeps the
+ * original 5 rounds, and every player/AI rival added beyond a 2-competitor
+ * match adds 2 more rounds (2p=6, 3p=8, 4p=10, ...). */
+static WORD MatchRoundCount(void)
+{
+    WORD rounds = (robotCount * 2) + 2;
+    if (rounds < 5) rounds = 5;
+    return rounds;
+}
+
 static void CheckEndState(void)
 {
     WORD i;
@@ -5143,7 +5256,7 @@ static void CheckEndState(void)
     }
     roundWins[roundWinner]++;
 
-    if (roundIndex >= 4) {
+    if (roundIndex >= MatchRoundCount() - 1) {
         finalWinner = 0;
         for (i = 1; i < robotCount; i++) {
             if (totalScores[i] > totalScores[finalWinner]) {
@@ -5255,6 +5368,10 @@ static void ResetBonusBoss(void)
     bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
     bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
     bonusBossExplosionTicks = 0;
+    nightModeActive = FALSE;
+    nightModeTicks = 0;
+    nightModeCooldownTicks = NIGHT_MODE_MIN_GAP_TICKS +
+        (WORD)RandRange(NIGHT_MODE_MAX_GAP_TICKS - NIGHT_MODE_MIN_GAP_TICKS + 1);
     { WORD i; for (i = 0; i < MAX_ROBOTS; i++) { bonusBossTouchCooldown[i] = 0; bonusBossTouching[i] = FALSE; } }
 }
 
@@ -5541,6 +5658,7 @@ static void FinishBonusRound(void)
     MarkBossHpTextDirty();
     MarkHudStatusTextDirty();
     bonusBossExplosionTicks = 0;
+    StopNightMode();
     FreeBonusBossCache();
     gameState = GAME_BONUS_END;
     StopGameplaySamples();
@@ -5683,10 +5801,12 @@ static void StepGame(void)
 
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
         StopEmpPaletteCycle();
+        StopNightMode();
         return;
     }
 
     UpdateEmpPaletteCycle();
+    UpdateNightMode();
 
     BeginGameplayDirtyRects();
 
@@ -7337,17 +7457,26 @@ static void FirePlayerBolt(WORD id)
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
 
-    if (robots[id].moving) {
-        dirX = robots[id].targetX - robots[id].tileX;
-        dirY = robots[id].targetY - robots[id].tileY;
-    } else {
-        if (keyLeft[id] || joyLeft[id]) dirX = -1;
-        else if (keyRight[id] || joyRight[id]) dirX = 1;
+    /* Check currently-held input first, on both axes independently, so
+     * holding two perpendicular directions at once (e.g. continuing left
+     * while also holding up) fires diagonally even though grid movement
+     * itself only ever travels one axis at a time. Only fall back to the
+     * in-progress move's axis or last facing when nothing is held right
+     * now (e.g. fire pressed the instant direction keys are released). */
+    if (keyLeft[id] || joyLeft[id]) dirX = -1;
+    else if (keyRight[id] || joyRight[id]) dirX = 1;
 
-        if (keyUp[id] || joyUp[id]) dirY = -1;
-        else if (keyDown[id] || joyDown[id]) dirY = 1;
+    if (keyUp[id] || joyUp[id]) dirY = -1;
+    else if (keyDown[id] || joyDown[id]) dirY = 1;
 
-        if (dirX == 0 && dirY == 0) { dirX = playerFacingX[id]; dirY = playerFacingY[id]; }
+    if (dirX == 0 && dirY == 0) {
+        if (robots[id].moving) {
+            dirX = robots[id].targetX - robots[id].tileX;
+            dirY = robots[id].targetY - robots[id].tileY;
+        } else {
+            dirX = playerFacingX[id];
+            dirY = playerFacingY[id];
+        }
     }
     if (dirX == 0 && dirY == 0) dirY = -1;
 
@@ -7885,29 +8014,19 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 static void PollJoysticks(void)
 {
     UWORD dat[MAX_HUMAN_PLAYERS];
-    BOOL cd32Pad[MAX_HUMAN_PLAYERS];
-    ULONG padState[MAX_HUMAN_PLAYERS];
     WORD i;
 
-    /* Read a CD32 game controller through lowlevel.library first: it drives the
-     * pad's shift register itself to expose all seven buttons.  Only Player 1's
-     * joystick port (lowlevel port 1) is read this way; Player 2 sits on the
-     * mouse port (port 0), and polling that through ReadJoyPort every frame
-     * could disturb Intuition's mouse/RMB handling the menus depend on, so P2
-     * stays on the direct register path below.  Only a detected game controller
-     * takes the lowlevel path; plain sticks fall through unchanged.  Either
-     * pad's Play button pauses, so P1's Play covers the common CD32 setup. */
-    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
-        cd32Pad[i] = FALSE;
-        padState[i] = 0;
-    }
-    if (LowLevelBase) {
-        ULONG s = ReadJoyPort(1); /* lowlevel port 1 = joystick port = P1 */
-        if ((s & JP_TYPE_MASK) == JP_TYPE_GAMECTLR) {
-            cd32Pad[0] = TRUE;
-            padState[0] = s;
-        }
-    }
+    /* CD32 pads were previously read through lowlevel.library's ReadJoyPort()
+     * to expose all seven buttons via its shift-register protocol. That call
+     * ran every single frame right before the direct joy1dat/CIA reads below,
+     * and on real hardware left P1's port completely unresponsive (movement
+     * and fire both dead) -- almost certainly the two fighting over the same
+     * POTGO/shift-register lines. A CD32 pad's d-pad and red fire button are
+     * already wired to the standard joystick lines for compatibility, and its
+     * blue button already reads through the POTY pin trick in
+     * ReadJoystickBlueButton below, so dropping the lowlevel path only costs
+     * the pad's Play button (Q still pauses from the keyboard) in exchange
+     * for the port actually working. */
 
     /* Drive the four pot data lines high as outputs so the second-button
      * (two-button stick button 2) read in ReadJoystickBlueButton is valid this
@@ -7919,55 +8038,32 @@ static void PollJoysticks(void)
 
     for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
         WORD stateBefore = gameState;
-        BOOL left, right, up, down, fire, blue, play;
+        BOOL left, right, up, down, fire, blue;
         BOOL bluePressed;
-        BOOL playPressed;
         BOOL directionActive;
         BOOL firePressed;
         BOOL holdConfirmed;
         BOOL confirmPressed;
 
-        if (cd32Pad[i]) {
-            ULONG s = padState[i];
-            left  = (s & JPF_JOY_LEFT)    ? TRUE : FALSE;
-            right = (s & JPF_JOY_RIGHT)   ? TRUE : FALSE;
-            up    = (s & JPF_JOY_UP)      ? TRUE : FALSE;
-            down  = (s & JPF_JOY_DOWN)    ? TRUE : FALSE;
-            fire  = (s & JPF_BUTTON_RED)  ? TRUE : FALSE;
-            blue  = (s & JPF_BUTTON_BLUE) ? TRUE : FALSE;
-            play  = (s & JPF_BUTTON_PLAY) ? TRUE : FALSE;
-        } else {
-            left  = JOY_LEFT(dat[i]);
-            right = JOY_RIGHT(dat[i]);
-            up    = JOY_UP(dat[i]);
-            down  = JOY_DOWN(dat[i]);
-            fire  = ReadJoystickFire(i);
-            blue  = ReadJoystickBlueButton(i);
-            play  = FALSE;
-        }
+        left  = JOY_LEFT(dat[i]);
+        right = JOY_RIGHT(dat[i]);
+        up    = JOY_UP(dat[i]);
+        down  = JOY_DOWN(dat[i]);
+        fire  = ReadJoystickFire(i);
+        blue  = ReadJoystickBlueButton(i);
 
         bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
-        playPressed = (play && !joyPlayPrev[i]) ? TRUE : FALSE;
         directionActive = left || right || up || down;
 
-        /* CD32 Play/Pause toggles the pause overlay during gameplay. Handle it
-         * before the fire logic so a pause press is never consumed as a shot,
-         * and so either pad can pause. */
-        if (playPressed && (stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING)) {
-            if (pauseMenuOpen) ClosePauseMenu();
-            else OpenPauseMenu();
-        }
-
         /* Outside the title screen, keep mouse-port protection for the direct
-         * read: a mouse left click is electrically the same as J2/P2 fire.  A
-         * detected CD32 pad reports fire on its own RED line, so it is exempt.
+         * read: a mouse left click is electrically the same as J2/P2 fire.
          * During the title screen, allow fire-only input so player 2 can
          * join/arm before moving the stick and so hold-to-confirm works. The
          * intro screen gets the same exemption so a P2 joystick's fire button
          * can skip it (a stray mouse click there already skips the intro too,
          * via the SELECTDOWN handler in PollWindowMessages).
          */
-        if (!cd32Pad[i] && gameState != GAME_TITLE && gameState != GAME_INTRO && i == 1 && !joyEnabled[i] && !directionActive) {
+        if (gameState != GAME_TITLE && gameState != GAME_INTRO && i == 1 && !joyEnabled[i] && !directionActive) {
             fire = FALSE;
         }
 
@@ -8002,7 +8098,6 @@ static void PollJoysticks(void)
         }
         joyFirePrev[i] = fire;
         joyBluePrev[i] = blue;
-        joyPlayPrev[i] = play;
     }
 }
 
@@ -8219,11 +8314,6 @@ static void CloseGameScreen(void)
         FreeMem(audioSilenceWord, sizeof(UWORD));
         audioSilenceWord = NULL;
     }
-
-    if (LowLevelBase) {
-        CloseLibrary(LowLevelBase);
-        LowLevelBase = NULL;
-    }
 }
 
 int main(void)
@@ -8233,12 +8323,6 @@ int main(void)
     if (!OpenGameScreen()) {
         return 20;
     }
-
-    /* Optional: present on CD32 and AGA machines with it installed. When open,
-     * PollJoysticks reads CD32 game controllers (all seven buttons, including
-     * Play/Pause) through ReadJoyPort; otherwise it falls back to reading the
-     * ports directly. Missing library is not an error. */
-    LowLevelBase = OpenLibrary("lowlevel.library", 0);
 
     gameState = introTitleBM ? GAME_INTRO : GAME_TITLE;
     if (gameState == GAME_TITLE) {

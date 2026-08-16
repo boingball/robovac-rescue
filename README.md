@@ -9,7 +9,8 @@ Several control schemes work at once; use whichever suits your setup.
 - **Keyboard** - Player 1 moves with the arrow keys and shoots with `B`; Player 2 moves with `Z` (left), `X` (down), `C` (right), `S` (up) and shoots with `V`.
 - **One-button joystick** - move and press fire. Because menus need a second action, one-button sticks confirm/start by *holding* fire for about two seconds.
 - **Two-button joystick** - the second button acts as the menu confirm/start button.
-- **CD32 controller** (Player 1, joystick port) - read through `lowlevel.library` when it is present: the red button fires, the blue button confirms/starts menus, and the grey **Play/Pause** button pauses and resumes a match. Other pad buttons are unused, and Player 2 stays on the direct joystick/keyboard reads.
+- **CD32 controller** (either port, in its 2-button joystick-compatible mode) - the red button fires and, in the AI difficulty/rival menus, also selects the highlighted entry; the blue button confirms/starts menus. The pad's extra shoulder buttons and Play/Pause are not read; use `Q` to pause.
+- Holding two perpendicular directions together (e.g. up + right) fires a diagonal bolt instead of a straight one.
 
 Each joystick stays disabled until its fire button is pressed; then `J1`/`J2` appears and that stick can move and fire on menus and during gameplay.
 
@@ -26,7 +27,7 @@ Detailed actions:
   - On the title screen, start the match (or lock Player 2 if Player 2 is selecting; locked two-player mode opens the AI rival prompt) with `Space`, the joystick **blue (second) button**, RMB, or by holding fire for about two seconds.
   - At the end of a round, continue to the next round with `Space`, joystick fire, or RMB.
   - At the end of a match, start a new best-of-5 with `Space`, joystick fire, or RMB.
-- Pause: `Q` or the CD32 **Play/Pause** button pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys and `Enter`; `Q`, `Esc`, or the Play/Pause button resumes.
+- Pause: `Q` pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys and `Enter`; `Q` or `Esc` resumes.
 - `R`:
   - During match: reset current round
 - `1` / `2` / `3`: choose AI rival count from the one-player title screen; choosing at least one AI opens the Easy / Normal / Hard difficulty prompt.
@@ -48,20 +49,20 @@ Every robot tracks a clean streak toward the super power tied to that robot vari
 
 The HUD shows each robot's current clean-streak count, flashes `P` while a timed power is active, and announces each triggered power.
 
-## Match Structure (Best of 5)
+## Match Structure
 
-- A match is 5 rounds.
+- A solo match (no AI rivals) is 5 rounds. Every robot on the field beyond a 2-robot match adds 2 more rounds: 2 robots (e.g. 2 players, or 1 player + 1 AI rival) play 6 rounds, 3 play 8, 4 play 10, and so on.
 - Each round picks a random room type.
 - Dirt cleaned is scored as points.
 - Hitting another robot with an energy bolt is worth 2 points. A bolted robot cannot be bolted again while stunned, and gets 2 seconds of bolt immunity after the stun ends so it can escape.
 - Dirt targets scale up by active robot count: 1-2 robots get 20% more dirt than the base round target, 3 robots get 30% more, and 4+ robots get 40% more.
 - Round winner = robot with the most points that round.
-- After round 5, the final winner is the robot with the highest total points.
+- After the last round, the final winner is the robot with the highest total points.
 - The match-end screen celebrates the winner with a large rotating robot image, then shows 2nd place, 3rd place, and the full leaderboard.
 
 ## Bonus Round
 
-If any robot has more than 50 total points after round 5, the leaderboard offers an optional round 6 bonus battle. All robots enter a clean room with charging docks around the edges. A giant 3x rotating hover boss moves around the middle of the room. Human players recharge on docks and shoot bolts at the boss; each boss hit adds 2 points to the shooter. The boss disappears after 80 hits, then the final scoreboard is shown and the winner is recalculated from the final totals. Touching the boss gives a single 5-second stun/penalty per contact, with a cooldown so the slow-moving boss cannot stack repeated penalties while it overlaps a robot.
+If any robot has more than 50 total points after the last regular round, the leaderboard offers an optional bonus battle. All robots enter a clean room with charging docks around the edges. A giant 3x rotating hover boss moves around the middle of the room, alternating between a diagonal bounce, a horizontal sweep, a vertical sweep, and an outward spiral from the arena centre every few seconds. Human players recharge on docks and shoot bolts at the boss; each boss hit adds 2 points to the shooter. The boss disappears after 80 hits, then the final scoreboard is shown and the winner is recalculated from the final totals. A near-full run-over gives a single 5-second stun/penalty per contact, with a cooldown so the slow-moving boss cannot stack repeated penalties while it overlaps a robot; a glancing/angled touch only stops the robot and shoves it back a tile.
 
 ## Room Types
 
@@ -103,7 +104,7 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
 
 The startup/title screens look for an optional uncompressed 8SVX menu-music sample at:
 
-- `PROGDIR:samples/RoboVacRescueMenuShort.8svx`
+- `PROGDIR:samples/RoboVacRescueMenu.8svx`
 
 When present, the sample is streamed from chip RAM across Paula channels 1 and 4 while the startup title image or main title menu is visible. Oversized samples are split into safe DMA chunks so the whole track plays before it loops, instead of looping only the first Paula-length block. Playback stops as soon as a match starts.
 
