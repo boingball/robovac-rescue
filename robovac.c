@@ -46,10 +46,8 @@
 #include <proto/graphics.h>
 #include <proto/dos.h>
 #include <proto/datatypes.h>
-#include <proto/lowlevel.h>
 
 #include <dos/dos.h>
-#include <libraries/lowlevel.h>
 #include <datatypes/pictureclass.h>
 #include <datatypes/datatypes.h>
 #include <hardware/custom.h>
@@ -120,6 +118,25 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
 #define BONUS_BOSS_TOUCH_STUN_TICKS 100
+/* A glancing/angled touch only needs to cover most of the robot's box before
+ * it counts as a full run-over stun; anything less is just a shove. */
+#define BONUS_BOSS_STUN_OVERLAP_NUM 3
+#define BONUS_BOSS_STUN_OVERLAP_DEN 4
+#define BONUS_BOSS_GRAZE_COOLDOWN_TICKS 20
+
+/* Boss movement patterns: the old build only ever bounced diagonally.
+ * BOSS_PATTERN_SPIN opens outward from the arena centre; the others sweep a
+ * single axis. StepBonusBoss picks a random mode every BOSS_PATTERN_*_TICKS
+ * window so a run sees a mix instead of only diagonals. */
+#define BOSS_PATTERN_DIAGONAL   0
+#define BOSS_PATTERN_HORIZONTAL 1
+#define BOSS_PATTERN_VERTICAL   2
+#define BOSS_PATTERN_SPIN       3
+#define BOSS_PATTERN_MODE_COUNT 4
+#define BOSS_PATTERN_MIN_TICKS 200
+#define BOSS_PATTERN_MAX_TICKS 400
+#define BOSS_SPIN_RADIUS_STEPS 48
+#define BOSS_SPIN_RADIUS_GROW_TICKS 4
 #define BOLT_STUN_STEP_FRAMES    17
 #define BOLT_STUN_TICKS          (5 * BOLT_STUN_STEP_FRAMES)
 #define BOLT_STUN_DAMAGE         5
@@ -127,6 +144,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MAIN_AI_FIRE_CHANCE      18
 #define MAIN_AI_FIRE_RANGE_NORMAL 3
 #define MAIN_AI_FIRE_RANGE_HARD   8
+/* Easy-difficulty tile-cleaning AI ignores its own best pathfound move and
+ * wanders a random passable direction instead on 4 out of 5 turns, so it
+ * stops beelining straight to every dirt tile like Normal/Hard do. */
+#define EASY_AI_CONFUSION_CHANCE 5
+#define EASY_AI_CONFUSION_ROLL   4
 #define BONUS_BOSS_TOUCH_COOLDOWN_TICKS 100
 #define BONUS_BOSS_FIRE_INTERVAL_TICKS 50
 #define MAX_BOSS_BOLTS 12
@@ -192,6 +214,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_X       0x32
 #define RAW_C       0x33
 #define RAW_V       0x34
+#define RAW_D       0x22
+
+/* Attract/demo mode: idles on the title screen this long with no input
+ * before it kicks in on its own (D also starts it immediately). */
+#define TITLE_IDLE_DEMO_TICKS (30 * 50)
 
 #define TITLE_CAROUSEL_Y 172
 #define TITLE_ROBOT_SCALE 2
@@ -211,7 +238,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TITLE_MENU_DIRTY_TOP 66
 #define TITLE_FORCED_FULL_PRESENT_FRAMES 3
 
-#define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenuShort.8svx"
+#define MENU_MUSIC_SAMPLE_PATH "PROGDIR:samples/RoboVacRescueMenu.8svx"
 #define GET_READY_SAMPLE_PATH "PROGDIR:samples/getready.8svx"
 #define COUNTDOWN_SAMPLE_PATH "PROGDIR:samples/countdown.8svx"
 #define GO_SAMPLE_PATH "PROGDIR:samples/go.8svx"
@@ -257,6 +284,15 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define EMP_ROBOT_LIGHT_PEN_A 29
 #define EMP_ROBOT_LIGHT_PEN_B 30
 
+/* Boss-fight "night mode": at random points the room dims to near-black,
+ * with only the robots' light pens (and the status-text pens that ride on
+ * top of them) left bright, then it fades back after a few seconds. */
+#define NIGHT_MODE_MIN_DURATION_TICKS 150
+#define NIGHT_MODE_MAX_DURATION_TICKS 300
+#define NIGHT_MODE_MIN_GAP_TICKS 400
+#define NIGHT_MODE_MAX_GAP_TICKS 900
+#define NIGHT_MODE_DIM_DIVISOR 5
+
 #ifndef DMAF_SETCLR
 #define DMAF_SETCLR 0x8000
 #endif
@@ -266,8 +302,21 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define DMAF_AUD2 0x0004
 #define DMAF_AUD3 0x0008
 #endif
-#define MENU_MUSIC_STREAM_CHUNK_BYTES 65534UL
-#define MENU_MUSIC_STREAM_PREROLL_FRAMES 0
+#ifndef INTF_AUD0
+#define INTF_AUD0 0x0080
+#endif
+#ifndef INTF_AUD3
+#define INTF_AUD3 0x0400
+#endif
+#ifndef INTF_SETCLR
+#define INTF_SETCLR 0x8000
+#endif
+/* Paula's AUDxLEN is a 16-bit word count, so a single DMA block cannot
+ * describe the full menu track. Keep the source in normal/Fast RAM and copy
+ * it through two modest chip-RAM buffers, swapping only when Paula reports
+ * that the previous block actually finished. */
+#define MENU_MUSIC_STREAM_CHUNK_BYTES 32768UL
+#define MENU_MUSIC_INT_MASK (INTF_AUD0 | INTF_AUD3)
 
 struct Robot {
     WORD tileX;
@@ -390,10 +439,12 @@ static BOOL titleCopperActive = FALSE;
 static struct UCopList *titleUCopList = NULL;
 static UWORD introPalette[32];
 static struct OneShotSample menuMusicSample;
-static BOOL menuMusicStreaming = FALSE;
+static UBYTE *menuMusicChunkBuf[2] = {NULL, NULL};
+static ULONG menuMusicSourceBytes = 0;
 static ULONG menuMusicNextOffsetBytes = 0;
-static WORD menuMusicCurrentChunkTicks = 0;
-static WORD menuMusicQueuedChunkTicks = 0;
+static WORD menuMusicCurrentBuf = 0;
+static UWORD menuMusicSavedAudioIntena = 0;
+static BOOL menuMusicIntenaSaved = FALSE;
 static struct OneShotSample getReadySample;
 static struct OneShotSample countdownSample;
 static struct OneShotSample goSample;
@@ -419,6 +470,15 @@ static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 static UWORD *audioSilenceWord = NULL;
+static BOOL demoModeActive = FALSE;
+static BOOL demoJoyPrimed = FALSE;
+static BOOL demoPrevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevFire[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL demoPrevBlue[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static WORD titleIdleTicks = 0;
 
 
 #ifndef AFF_68020
@@ -580,6 +640,12 @@ static WORD bonusBossX = 0;
 static WORD bonusBossY = 0;
 static WORD bonusBossDx = 1;
 static WORD bonusBossDy = 1;
+static WORD bonusBossPatternMode = BOSS_PATTERN_DIAGONAL;
+static WORD bonusBossPatternTicks = 0;
+static WORD bonusBossSpinAngle = 0;
+static WORD bonusBossSpinRadiusStep = 0;
+static WORD bonusBossSpinRadiusDir = 1;
+static WORD bonusBossSpinRadiusTickCounter = 0;
 static WORD bonusBossPhase = 0;
 static WORD bonusBossFacingState = 2; /* SPR_DOWN is declared later in the sprite enum. */
 static WORD bonusBossFireTicks = 0;
@@ -619,11 +685,6 @@ static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
-static BOOL joyPlayPrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
-/* Not static: proto/lowlevel.h declares this library base as an extern that
- * the inline ReadJoyPort stub resolves against. Opened in main, closed in
- * CloseGameScreen; when NULL the joystick code falls back to direct reads. */
-struct Library *LowLevelBase = NULL;
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -636,6 +697,9 @@ static WORD empCountdownTicks = 0;
 static WORD empCountdownOwner = -1;
 static BOOL empPaletteCycleActive = FALSE;
 static WORD empPaletteCyclePhase = -1;
+static BOOL nightModeActive = FALSE;
+static WORD nightModeTicks = 0;
+static WORD nightModeCooldownTicks = 0;
 
 struct Bolt {
     BOOL active;
@@ -889,6 +953,8 @@ static BOOL EnableTitleCopperGradient(void);
 static void DrawTitleCarousel(void);
 static void DrawHud(void);
 static WORD EmpRobotCountdownNumber(WORD id);
+static BOOL RobotLowBatteryWarningActive(WORD id);
+static WORD EmpRobotVisualState(WORD id);
 static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect);
 static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect);
 static void DrawEmpRobotVisual(WORD id);
@@ -909,27 +975,28 @@ static void OpenAiSelectMenu(WORD initialSelection);
 static void CloseAiDifficultyMenu(void);
 static void OpenAiDifficultyMenu(WORD players, WORD rivals);
 static void StartMatch(WORD players, WORD rivals);
+static void StartDemoMode(void);
 static void StartBonusRound(void);
 static void FinishBonusRound(void);
 static BOOL BuildBonusBossCache(void);
 static void FreeBonusBossCache(void);
 static void StartBonusBossExplosion(void);
 static void ClearMovementKeys(void);
-static BOOL LoadMenuMusicSample(void);
+static BOOL LoadMenuMusicStream(void);
 static void ResetAllJoystickConfirmHolds(void);
 static void FreeMenuMusicSample(void);
 static void StartMenuMusic(void);
 static void StopMenuMusic(void);
-static WORD QueueMenuMusicChunk(ULONG offsetBytes);
-static WORD MenuMusicChunkTicks(ULONG chunkBytes);
+static UWORD FillMenuMusicChunk(WORD bufferIndex);
 static void ServiceMenuMusicStream(void);
 static void ServiceMenuMusicForState(void);
+static UWORD AudioDmaBit(WORD channel);
+static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
 static BOOL LoadRoundStartSamples(void);
 static void FreeRoundStartSamples(void);
 static void PlayGetReadySample(void);
 static void PlayCountdownSample(void);
 static void PlayGoSample(void);
-static void PlayFullLoopedSample(struct OneShotSample *sample, WORD channel);
 static void AudioPrepareChannel(WORD channel, UBYTE owner);
 static void AudioReleaseChannel(WORD channel, UBYTE owner);
 static void AudioSafeWait(void);
@@ -989,6 +1056,8 @@ static BOOL RoundStartLocked(void);
 static void CloseGameScreen(void);
 static void UpdateEmpPaletteCycle(void);
 static void StopEmpPaletteCycle(void);
+static void UpdateNightMode(void);
+static void StopNightMode(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -1520,22 +1589,22 @@ static void MarkDirtyEmpRobotVisuals(void)
     WORD i;
 
     for (i = 0; i < robotCount; i++) {
-        WORD countdown = EmpRobotCountdownNumber(i);
+        WORD state = EmpRobotVisualState(i);
         WORD sx = MAP_X + FP_TO_INT(robots[i].px);
         WORD sy = MAP_Y + FP_TO_INT(robots[i].py);
 
         if (dirtyPrevEmpVisible[i]) {
             AddDirtyEmpRobotVisualAt(dirtyPrevEmpScreenX[i], dirtyPrevEmpScreenY[i]);
         }
-        if (countdown > 0) {
-            if (dirtyPrevEmpCountdown[i] != countdown) {
+        if (state != 0) {
+            if (dirtyPrevEmpCountdown[i] != state) {
                 AddDirtyEmpRobotVisualAt(sx, sy);
             }
             AddDirtyEmpRobotVisual(i);
         }
 
-        dirtyPrevEmpVisible[i] = countdown > 0;
-        dirtyPrevEmpCountdown[i] = countdown;
+        dirtyPrevEmpVisible[i] = state != 0;
+        dirtyPrevEmpCountdown[i] = state;
         dirtyPrevEmpScreenX[i] = sx;
         dirtyPrevEmpScreenY[i] = sy;
     }
@@ -1828,6 +1897,71 @@ static BOOL RobotAtTile(WORD tx, WORD ty, WORD ignoreId)
     }
 
     return FALSE;
+}
+
+static WORD RobotIdAtTile(WORD tx, WORD ty, WORD ignoreId)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        if (i == ignoreId) continue;
+
+        if (robots[i].tileX == tx && robots[i].tileY == ty) return i;
+        if (robots[i].targetX == tx && robots[i].targetY == ty) return i;
+    }
+
+    return -1;
+}
+
+/* A robot with no battery for a full move and no emergency moves left
+ * cannot get itself out of the way. */
+static BOOL RobotIsStranded(WORD id)
+{
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (robots[id].moving) return FALSE;
+    if (robots[id].battery >= batteryCostPerMove) return FALSE;
+    if (robots[id].battery <= 0 && robots[id].emergencyMovesLeft > 0) return FALSE;
+    return TRUE;
+}
+
+/* Bonus-fight helper: a stranded (out-of-charge) robot can't clear its own
+ * path to a dock, so let a teammate shove it one tile further along the
+ * direction it's already being bumped from, the same way the boss shoves a
+ * grazed robot. Only succeeds if the tile being pushed into is itself free,
+ * so this never displaces a robot into a wall or a third robot. */
+static BOOL TryPushStrandedRobot(WORD blockedId, WORD dx, WORD dy)
+{
+    WORD pushX;
+    WORD pushY;
+
+    if (!RobotIsStranded(blockedId)) return FALSE;
+
+    pushX = robots[blockedId].tileX + dx;
+    pushY = robots[blockedId].tileY + dy;
+    if (!RobotCanPassTile(blockedId, pushX, pushY)) return FALSE;
+    if (RobotAtTile(pushX, pushY, blockedId)) return FALSE;
+
+    robots[blockedId].tileX = pushX;
+    robots[blockedId].tileY = pushY;
+    robots[blockedId].px = TO_FP(pushX * TILE_SIZE);
+    robots[blockedId].py = TO_FP(pushY * TILE_SIZE);
+    robots[blockedId].targetPx = robots[blockedId].px;
+    robots[blockedId].targetPy = robots[blockedId].py;
+    robots[blockedId].moving = FALSE;
+
+    /* A push bypasses the normal tile-arrival path (FinishRobotTileMove),
+     * which is the only other place charging starts, so start it here too
+     * if the shove happens to land the stranded robot on a dock. */
+    if (map[pushY][pushX] == TILE_DOCK) {
+        if (robots[blockedId].battery <= 0) {
+            robots[blockedId].chargeTicks = DOCK_CHARGE_TICKS;
+        } else {
+            robots[blockedId].battery = maxBattery;
+            robots[blockedId].emergencyMovesLeft = EMERGENCY_DOCK_MOVES;
+            robots[blockedId].chargeTicks = 0;
+        }
+    }
+    return TRUE;
 }
 
 static BOOL MoveRobotToNearestFreeTile(WORD id)
@@ -2337,170 +2471,287 @@ static void FreeRoundStartSamples(void)
     FreeOneShotSample(&goSample, GO_AUDIO_CHANNEL);
 }
 
-static BOOL LoadMenuMusicSample(void)
+/* Keep the complete 8SVX BODY in ordinary/Fast RAM, but feed Paula through
+ * two small chip-RAM buffers. Paula itself tells us when a block has finished
+ * through INTREQR, so no guessed 50 Hz chunk timer is involved and AUDxLEN
+ * never has to describe more than one legal DMA block. */
+static BOOL LoadMenuMusicStream(void)
 {
-    return LoadOneShotSample(MENU_MUSIC_SAMPLE_PATH, &menuMusicSample, "menu music");
+    BPTR fh;
+    UBYTE header[12];
+    UBYTE chunkHeader[8];
+    LONG fileSize;
+    LONG pos;
+    LONG bodyStart = 0;
+    ULONG bodySize = 0;
+    UWORD sampleRate = 0;
+    UBYTE compression = 0;
+    ULONG volume = 0x10000UL;
+    BOOL haveVHDR = FALSE;
+    BOOL haveBODY = FALSE;
+    ULONG allocSize;
+    UBYTE *data;
+    ULONG got;
+    LONG readSize;
+    WORD i;
+
+    memset(&menuMusicSample, 0, sizeof(menuMusicSample));
+    menuMusicSourceBytes = 0;
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentBuf = 0;
+
+    fh = Open((STRPTR)MENU_MUSIC_SAMPLE_PATH, MODE_OLDFILE);
+    if (!fh) {
+        printf("Optional %s not loaded; menu music disabled\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    fileSize = GetFileSize(fh);
+    if (fileSize < 20 || Read(fh, header, 12) != 12 ||
+        memcmp(header, "FORM", 4) != 0 || memcmp(header + 8, "8SVX", 4) != 0) {
+        Close(fh);
+        printf("%s is not an IFF 8SVX sample\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    pos = 12;
+    while (pos + 8 <= fileSize) {
+        ULONG chunkSize;
+        LONG dataPos;
+
+        if (Seek(fh, pos, OFFSET_BEGINNING) == -1) break;
+        if (Read(fh, chunkHeader, 8) != 8) break;
+        chunkSize = ReadBE32(chunkHeader + 4);
+        dataPos = pos + 8;
+        if (dataPos + (LONG)chunkSize > fileSize) break;
+
+        if (memcmp(chunkHeader, "VHDR", 4) == 0 && chunkSize >= 20) {
+            UBYTE vhdr[20];
+            if (Read(fh, vhdr, 20) == 20) {
+                sampleRate = ReadBE16(vhdr + 12);
+                compression = vhdr[15];
+                volume = ReadBE32(vhdr + 16);
+                haveVHDR = TRUE;
+            }
+        } else if (memcmp(chunkHeader, "BODY", 4) == 0) {
+            bodyStart = dataPos;
+            bodySize = chunkSize;
+            haveBODY = TRUE;
+            break;
+        }
+
+        pos = dataPos + (LONG)chunkSize + ((LONG)chunkSize & 1);
+    }
+
+    if (!haveVHDR || !haveBODY || bodySize <= 1 || sampleRate == 0 || compression != 0) {
+        Close(fh);
+        printf("%s is not a playable uncompressed 8SVX sample\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    /* Reserve the DMA-visible buffers first so a no-Fast-RAM fallback cannot
+     * consume all chip RAM before Paula gets its two streaming buffers. */
+    for (i = 0; i < 2; i++) {
+        if (!menuMusicChunkBuf[i]) {
+            menuMusicChunkBuf[i] = (UBYTE *)AllocMem(MENU_MUSIC_STREAM_CHUNK_BYTES,
+                                                     MEMF_CHIP | MEMF_PUBLIC);
+        }
+    }
+    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) {
+        Close(fh);
+        FreeMenuMusicSample();
+        printf("Could not allocate chip RAM buffers for %s\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    allocSize = bodySize & ~1UL;
+    data = (UBYTE *)AllocMem(allocSize, MEMF_FAST | MEMF_PUBLIC);
+    if (!data) {
+        /* Machines with no Fast RAM can still try the old all-public-memory
+         * route; the two chip streaming buffers are already safely reserved. */
+        data = (UBYTE *)AllocMem(allocSize, MEMF_PUBLIC);
+    }
+    if (!data) {
+        Close(fh);
+        FreeMenuMusicSample();
+        printf("Could not allocate source RAM for %s\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+    menuMusicSample.data = data;
+    menuMusicSample.dataSize = (LONG)allocSize;
+
+    if (Seek(fh, bodyStart, OFFSET_BEGINNING) == -1) {
+        Close(fh);
+        FreeMenuMusicSample();
+        printf("Could not read %s\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    got = 0;
+    while (got < allocSize) {
+        readSize = Read(fh, data + got, (LONG)(allocSize - got));
+        if (readSize <= 0) break;
+        got += (ULONG)readSize;
+    }
+    Close(fh);
+    got &= ~1UL;
+
+    if (got < 2UL) {
+        FreeMenuMusicSample();
+        printf("Could not read %s\n", MENU_MUSIC_SAMPLE_PATH);
+        return FALSE;
+    }
+
+    menuMusicSourceBytes = got;
+    /* lengthWords deliberately stays zero: the source is not itself a legal
+     * Paula DMA block and must never be handed to PlayLoopedSample(). */
+    menuMusicSample.lengthWords = 0;
+    menuMusicSample.period = (UWORD)(PAULA_CLOCK_HZ / sampleRate);
+    if (menuMusicSample.period < 124) menuMusicSample.period = 124;
+    menuMusicSample.sampleRate = sampleRate;
+    menuMusicSample.volume = (volume >= 0x10000UL) ? 64 : (UBYTE)((volume * 64UL) / 0x10000UL);
+    if (menuMusicSample.volume == 0) menuMusicSample.volume = 64;
+    menuMusicSample.loaded = TRUE;
+    return TRUE;
+}
+
+static UWORD FillMenuMusicChunk(WORD bufferIndex)
+{
+    ULONG remaining;
+    ULONG chunkBytes;
+
+    if (bufferIndex < 0 || bufferIndex > 1) return 0;
+    if (!menuMusicSample.loaded || !menuMusicSample.data || !menuMusicChunkBuf[bufferIndex]) return 0;
+    if (menuMusicSourceBytes < 2UL) return 0;
+
+    if (menuMusicNextOffsetBytes >= menuMusicSourceBytes) menuMusicNextOffsetBytes = 0;
+    remaining = menuMusicSourceBytes - menuMusicNextOffsetBytes;
+    chunkBytes = (remaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
+                 MENU_MUSIC_STREAM_CHUNK_BYTES : remaining;
+    chunkBytes &= ~1UL;
+
+    if (chunkBytes < 2UL) {
+        menuMusicNextOffsetBytes = 0;
+        remaining = menuMusicSourceBytes;
+        chunkBytes = (remaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
+                     MENU_MUSIC_STREAM_CHUNK_BYTES : remaining;
+        chunkBytes &= ~1UL;
+    }
+    if (chunkBytes < 2UL) return 0;
+
+    CopyMem(menuMusicSample.data + menuMusicNextOffsetBytes,
+            menuMusicChunkBuf[bufferIndex], chunkBytes);
+    menuMusicNextOffsetBytes += chunkBytes;
+    if (menuMusicNextOffsetBytes >= menuMusicSourceBytes) menuMusicNextOffsetBytes = 0;
+
+    return (UWORD)(chunkBytes / 2UL);
 }
 
 static void StopMenuMusic(void)
 {
-    menuMusicStreaming = FALSE;
-    menuMusicNextOffsetBytes = 0;
-    menuMusicCurrentChunkTicks = 0;
-    menuMusicQueuedChunkTicks = 0;
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     StopOneShotSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-}
+    custom.intreq = MENU_MUSIC_INT_MASK;
 
-static WORD MenuMusicChunkTicks(ULONG chunkBytes)
-{
-    ULONG ticks;
-
-    if (menuMusicSample.sampleRate == 0) return 1;
-    ticks = ((chunkBytes * 50UL) + (ULONG)menuMusicSample.sampleRate - 1UL) / (ULONG)menuMusicSample.sampleRate;
-    ticks = (ticks + 1UL) / 2UL;
-    if (ticks < 1UL) ticks = 1UL;
-    if (ticks > 32767UL) ticks = 32767UL;
-    return (WORD)ticks;
-}
-
-static WORD QueueMenuMusicChunk(ULONG offsetBytes)
-{
-    ULONG bytesRemaining;
-    ULONG chunkBytes;
-    UWORD chunkWords;
-
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return 1;
-    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
-
-    bytesRemaining = (ULONG)menuMusicSample.dataSize - offsetBytes;
-    chunkBytes = (bytesRemaining > MENU_MUSIC_STREAM_CHUNK_BYTES) ? MENU_MUSIC_STREAM_CHUNK_BYTES : bytesRemaining;
-    chunkBytes &= ~1UL;
-    if (chunkBytes < 2UL) {
-        offsetBytes = 0;
-        chunkBytes = ((ULONG)menuMusicSample.dataSize > MENU_MUSIC_STREAM_CHUNK_BYTES) ?
-                     MENU_MUSIC_STREAM_CHUNK_BYTES : (ULONG)menuMusicSample.dataSize;
-        chunkBytes &= ~1UL;
-    }
-    if (chunkBytes < 2UL) return 1;
-
-    chunkWords = (UWORD)(chunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = chunkWords;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)(menuMusicSample.data + offsetBytes);
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = chunkWords;
-
-    offsetBytes += chunkBytes;
-    if (offsetBytes >= (ULONG)menuMusicSample.dataSize) offsetBytes = 0;
-    menuMusicNextOffsetBytes = offsetBytes;
-    return MenuMusicChunkTicks(chunkBytes);
-}
-
-static void ServiceMenuMusicStream(void)
-{
-    WORD nextChunkTicks;
-
-    if (!menuMusicStreaming || !menuMusicSample.playing) return;
-
-    if (menuMusicCurrentChunkTicks > 0) {
-        menuMusicCurrentChunkTicks--;
-        if (menuMusicCurrentChunkTicks > 0) return;
+    if (menuMusicIntenaSaved) {
+        if (menuMusicSavedAudioIntena != 0) {
+            custom.intena = INTF_SETCLR | menuMusicSavedAudioIntena;
+        }
+        menuMusicSavedAudioIntena = 0;
+        menuMusicIntenaSaved = FALSE;
     }
 
-    /*
-     * Paula has two relevant states here: the chunk currently being played
-     * internally, and the visible AUDx pointer/length registers used as the
-     * reload buffer.  StartMenuMusic() primes those visible registers with the
-     * second chunk after chunk 1 is latched.
-     *
-     * Do not overwrite the visible registers before the current chunk ends, or
-     * the already-queued chunk is skipped/repeated.  Once our current-chunk
-     * timer expires, the queued chunk has become the current audio, so promote
-     * its tick count and write exactly one following chunk as the next reload.
-     */
-    if (menuMusicQueuedChunkTicks > 0) {
-        menuMusicCurrentChunkTicks = menuMusicQueuedChunkTicks;
-    } else {
-        menuMusicCurrentChunkTicks = 1;
-    }
-
-    nextChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
-    if (nextChunkTicks < 1) nextChunkTicks = 1;
-    menuMusicQueuedChunkTicks = nextChunkTicks;
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentBuf = 0;
 }
 
 static void StartMenuMusic(void)
 {
-    ULONG firstChunkBytes;
-    UWORD leftDmaBit, rightDmaBit;
+    UWORD firstWords;
+    UWORD secondWords;
+    UWORD leftDmaBit;
+    UWORD rightDmaBit;
 
     if (menuMusicSample.playing) return;
-    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSample.dataSize <= 0) return;
+    if (!menuMusicSample.loaded || !menuMusicSample.data || menuMusicSourceBytes < 2UL) return;
+    if (!menuMusicChunkBuf[0] || !menuMusicChunkBuf[1]) return;
 
-    menuMusicStreaming = FALSE;
     menuMusicNextOffsetBytes = 0;
-    menuMusicCurrentChunkTicks = 0;
-    menuMusicQueuedChunkTicks = 0;
+    firstWords = FillMenuMusicChunk(0);
+    secondWords = FillMenuMusicChunk(1);
+    if (firstWords == 0 || secondWords == 0) return;
 
-    if ((ULONG)menuMusicSample.dataSize <= 131070UL) {
-        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_LEFT_AUDIO_CHANNEL);
-        PlayFullLoopedSample(&menuMusicSample, MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
-        menuMusicStreaming = FALSE;
-        return;
-    }
+    menuMusicSavedAudioIntena = custom.intenar & MENU_MUSIC_INT_MASK;
+    menuMusicIntenaSaved = TRUE;
+    /* Poll INTREQR ourselves; do not let a level-4 audio ISR consume the
+     * block-finished flag before the title loop sees it. */
+    custom.intena = MENU_MUSIC_INT_MASK;
+    custom.intreq = MENU_MUSIC_INT_MASK;
 
-    firstChunkBytes = MENU_MUSIC_STREAM_CHUNK_BYTES;
-    if (firstChunkBytes > (ULONG)menuMusicSample.dataSize) firstChunkBytes = (ULONG)menuMusicSample.dataSize;
-    firstChunkBytes &= ~1UL;
-
-    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL,  AUDIO_OWNER_MENU_MUSIC);
+    AudioPrepareChannel(MENU_MUSIC_LEFT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
     AudioPrepareChannel(MENU_MUSIC_RIGHT_AUDIO_CHANNEL, AUDIO_OWNER_MENU_MUSIC);
-    leftDmaBit  = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
+    leftDmaBit = AudioDmaBit(MENU_MUSIC_LEFT_AUDIO_CHANNEL);
     rightDmaBit = AudioDmaBit(MENU_MUSIC_RIGHT_AUDIO_CHANNEL);
 
-    /* Write chunk 1 as the current play buffer */
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr  = (UWORD *)menuMusicSample.data;
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len  = (UWORD)(firstChunkBytes / 2UL);
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per  = menuMusicSample.period;
-    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol  = menuMusicSample.volume;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicSample.data;
-    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = (UWORD)(firstChunkBytes / 2UL);
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[0];
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = firstWords;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[0];
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = firstWords;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_per = menuMusicSample.period;
     custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_vol = menuMusicSample.volume;
 
-    /* Enable DMA and give Paula time to latch chunk 1 into its internal
-       playback registers before the visible registers become chunk 2. */
     custom.dmacon = DMAF_SETCLR | leftDmaBit | rightDmaBit;
     AudioDmaLatchWait();
 
+    /* Paula has latched buffer 0. These visible pointer/length registers are
+     * now the reload block that becomes active when buffer 0 finishes. */
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[1];
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = secondWords;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[1];
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = secondWords;
+
+    /* Discard any start-up request; the next pair of flags means block 0 has
+     * genuinely completed on both stereo channels. */
+    custom.intreq = MENU_MUSIC_INT_MASK;
+    menuMusicCurrentBuf = 0;
     menuMusicSample.playing = TRUE;
-    menuMusicStreaming = TRUE;
-    menuMusicCurrentChunkTicks = MenuMusicChunkTicks(firstChunkBytes);
-    menuMusicQueuedChunkTicks = 0;
+}
 
-    /* The service routine queues chunk 2 shortly before chunk 1 ends.  Keeping
-       one simple "time until current chunk ends" counter avoids the previous
-       double-buffer bookkeeping path that could leave Paula replaying the same
-       64K reload buffer several times before the offset advanced. */
-    menuMusicNextOffsetBytes = firstChunkBytes;
-    if (menuMusicNextOffsetBytes >= (ULONG)menuMusicSample.dataSize) menuMusicNextOffsetBytes = 0;
+static void ServiceMenuMusicStream(void)
+{
+    UWORD pending;
+    WORD refillBuf;
+    UWORD words;
 
-    /* Prime chunk 2 immediately after Paula has latched chunk 1.  Without this,
-       the first service tick may arrive too late and Paula can replay chunk 1.
-       The fixed MenuMusicChunkTicks() above now uses the actual 8SVX sample
-       rate, so later chunks are queued just before the audible chunk finishes
-       instead of after several repeats. */
-    menuMusicQueuedChunkTicks = QueueMenuMusicChunk(menuMusicNextOffsetBytes);
+    if (!menuMusicSample.playing) return;
+
+    pending = custom.intreqr & MENU_MUSIC_INT_MASK;
+    /* Both channels play the same buffer. Wait until both have crossed the
+     * boundary before overwriting the buffer they just stopped using. */
+    if (pending != MENU_MUSIC_INT_MASK) return;
+    custom.intreq = MENU_MUSIC_INT_MASK;
+
+    menuMusicCurrentBuf ^= 1;
+    refillBuf = menuMusicCurrentBuf ^ 1;
+    words = FillMenuMusicChunk(refillBuf);
+    if (words == 0) {
+        StopMenuMusic();
+        return;
+    }
+
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[refillBuf];
+    custom.aud[MENU_MUSIC_LEFT_AUDIO_CHANNEL].ac_len = words;
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_ptr = (UWORD *)menuMusicChunkBuf[refillBuf];
+    custom.aud[MENU_MUSIC_RIGHT_AUDIO_CHANNEL].ac_len = words;
 }
 
 static void ServiceMenuMusicForState(void)
 {
-    BOOL wasPlaying;
-
     if (gameState == GAME_INTRO || gameState == GAME_TITLE) {
-        wasPlaying = menuMusicSample.playing;
         StartMenuMusic();
-        if (wasPlaying) ServiceMenuMusicStream();
+        ServiceMenuMusicStream();
     } else if (menuMusicSample.playing) {
         StopMenuMusic();
     }
@@ -2508,10 +2759,21 @@ static void ServiceMenuMusicForState(void)
 
 static void FreeMenuMusicSample(void)
 {
+    WORD i;
+
     StopMenuMusic();
     if (menuMusicSample.data) {
         FreeMem(menuMusicSample.data, menuMusicSample.dataSize);
     }
+    for (i = 0; i < 2; i++) {
+        if (menuMusicChunkBuf[i]) {
+            FreeMem(menuMusicChunkBuf[i], MENU_MUSIC_STREAM_CHUNK_BYTES);
+            menuMusicChunkBuf[i] = NULL;
+        }
+    }
+    menuMusicSourceBytes = 0;
+    menuMusicNextOffsetBytes = 0;
+    menuMusicCurrentBuf = 0;
     memset(&menuMusicSample, 0, sizeof(menuMusicSample));
 }
 
@@ -3142,10 +3404,82 @@ static void UpdateEmpPaletteCycle(void)
     empPaletteCyclePhase = phase;
 }
 
+static void StopNightMode(void)
+{
+    if (!nightModeActive) return;
+    nightModeActive = FALSE;
+    if (scr) LoadRGB4(&scr->ViewPort, palette, 32);
+}
+
+/* Randomly dims the bonus-boss arena to near black for a few seconds at a
+ * time, leaving only the robots' light pens (and the status-text pens drawn
+ * over them) bright, then restores the normal palette. Uses a countdown
+ * timer the same way StepBonusBoss's pattern picker does, rather than a
+ * per-tick chance, so the on/off durations stay predictable and bounded. */
+static void UpdateNightMode(void)
+{
+    if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0 ||
+        bonusBossExplosionTicks > 0 || empCountdownTicks > 0) {
+        StopNightMode();
+        nightModeTicks = 0;
+        return;
+    }
+
+    if (nightModeTicks > 0) {
+        if (!nightModeActive) {
+            UWORD dimmed[32];
+            WORD i;
+
+            for (i = 0; i < 32; i++) {
+                UWORD c = palette[i];
+                UWORD r = (c >> 8) & 0xF;
+                UWORD g = (c >> 4) & 0xF;
+                UWORD b = c & 0xF;
+                dimmed[i] = (UWORD)(((r / NIGHT_MODE_DIM_DIVISOR) << 8) |
+                                     ((g / NIGHT_MODE_DIM_DIVISOR) << 4) |
+                                      (b / NIGHT_MODE_DIM_DIVISOR));
+            }
+            /* Pens 7 and 10-15 are the vivid accent colours the robot sprite
+             * sheets actually paint their small highlight/sensor-light
+             * details with (confirmed by decoding the airobotN.iff art —
+             * most variants' bright pixels land on 7, 10, 12, or 14; a
+             * couple of variants barely have any bright pixels to begin
+             * with, which no palette trick can invent). Keep the whole
+             * cluster lit, plus the EMP system's own light pens for
+             * consistency, so as many variants as possible actually glow. */
+            for (i = 0; i < 32; i++) {
+                BOOL keepLit = (i == 7) || (i >= 10 && i <= 15) ||
+                                (i == EMP_ROBOT_LIGHT_PEN_A) || (i == EMP_ROBOT_LIGHT_PEN_B);
+                if (keepLit) dimmed[i] = palette[i];
+            }
+            dimmed[EMP_ROBOT_LIGHT_PEN_A] = 0xFFF;
+            dimmed[EMP_ROBOT_LIGHT_PEN_B] = 0xFFF;
+            if (scr) LoadRGB4(&scr->ViewPort, dimmed, 32);
+            nightModeActive = TRUE;
+        }
+        nightModeTicks--;
+        if (nightModeTicks <= 0) {
+            StopNightMode();
+            nightModeCooldownTicks = NIGHT_MODE_MIN_GAP_TICKS +
+                (WORD)RandRange(NIGHT_MODE_MAX_GAP_TICKS - NIGHT_MODE_MIN_GAP_TICKS + 1);
+        }
+        return;
+    }
+
+    if (nightModeCooldownTicks > 0) {
+        nightModeCooldownTicks--;
+        return;
+    }
+
+    nightModeTicks = NIGHT_MODE_MIN_DURATION_TICKS +
+        (WORD)RandRange(NIGHT_MODE_MAX_DURATION_TICKS - NIGHT_MODE_MIN_DURATION_TICKS + 1);
+}
+
 static void LoadGamePalette(void)
 {
     DisableTitleCopperGradient(FALSE);
     empPaletteCycleActive = FALSE;
+    nightModeActive = FALSE;
     empPaletteCyclePhase = -1;
     LoadRGB4(&scr->ViewPort, palette, 32);
     introPaletteActive = FALSE;
@@ -4088,6 +4422,29 @@ static WORD EmpRobotCountdownNumber(WORD id)
     return secondsLeft;
 }
 
+static BOOL RobotLowBatteryWarningActive(WORD id)
+{
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (robots[id].battery > 25) return FALSE;
+    /* Sitting on the dock already means it's recharging, so the reminder to
+     * go dock would be pointless there. */
+    if (map[robots[id].tileY][robots[id].tileX] == TILE_DOCK) return FALSE;
+    return TRUE;
+}
+
+/* Shares the EMP stun countdown's above-head box and dirty-rect tracking:
+ * 1..5 = seconds left stunned (drawn as a number), -1 = battery low (drawn
+ * as a warning icon), 0 = nothing to show. Stun takes priority since it is
+ * the more urgent state and the two never need to show at once. */
+static WORD EmpRobotVisualState(WORD id)
+{
+    WORD countdown = EmpRobotCountdownNumber(id);
+
+    if (countdown > 0) return countdown;
+    if (RobotLowBatteryWarningActive(id)) return -1;
+    return 0;
+}
+
 static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect)
 {
     WORD left;
@@ -4129,7 +4486,7 @@ static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect)
     WORD sy;
 
     if (!rect || id < 0 || id >= robotCount) return FALSE;
-    if (EmpRobotCountdownNumber(id) <= 0) return FALSE;
+    if (EmpRobotVisualState(id) == 0) return FALSE;
 
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py);
@@ -4140,18 +4497,30 @@ static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect)
 static void DrawEmpRobotVisual(WORD id)
 {
     struct DirtyRect rect;
-    WORD secondsLeft;
+    WORD state;
     WORD pen;
     WORD textX;
     WORD textY;
     char b[4];
 
-    secondsLeft = EmpRobotCountdownNumber(id);
-    if (secondsLeft <= 0) return;
+    state = EmpRobotVisualState(id);
+    if (state == 0) return;
     if (!GetEmpRobotVisualRect(id, &rect)) return;
 
-    snprintf(b, sizeof(b), "%d", secondsLeft);
-    pen = (robots[id].stunTicks & 4) ? 14 : 10;
+    if (state < 0) {
+        /* Low battery: a plain "!" above the head, since there is no stun
+         * countdown to show and the reminder just needs to catch the eye. */
+        b[0] = '!';
+        b[1] = '\0';
+        pen = 14;
+    } else {
+        snprintf(b, sizeof(b), "%d", state);
+        pen = (robots[id].stunTicks & 4) ? 14 : 10;
+    }
+    /* Pens 10/14 already stay lit in night mode's protected cluster, but
+     * pin the text to pure white there instead of their usual accent
+     * colours so it reads clearly as urgent against the dimmed room. */
+    if (nightModeActive) pen = 7;
 
     textX = rect.x + ((rect.w - MiniTextWidth(b, 1)) / 2);
     textY = rect.y + 1;
@@ -4196,7 +4565,10 @@ static void InitRobots(void)
     WORD i;
 
     robotCount = humanPlayers + aiRivals;
-    if (humanPlayers < 1) humanPlayers = 1;
+    /* Demo/attract mode deliberately runs with zero human players so every
+     * robot is AI-controlled; every other caller still needs at least 1. */
+    if (humanPlayers < 1 && !demoModeActive) humanPlayers = 1;
+    if (humanPlayers < 0) humanPlayers = 0;
     if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
     if (robotCount < humanPlayers) robotCount = humanPlayers;
     if (robotCount > MAX_ROBOTS) robotCount = MAX_ROBOTS;
@@ -4508,7 +4880,17 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     ny = robots[id].tileY + dy;
 
     if (!RobotCanPassTile(id, nx, ny)) return FALSE;
-    if (RobotAtTile(nx, ny, id)) return FALSE;
+    if (RobotAtTile(nx, ny, id)) {
+        /* During the bonus boss fight, walking into a teammate who is out of
+         * charge shoves them one tile further along instead of just
+         * blocking, the same way the boss shoves a grazed robot, so a
+         * stranded robot can be nudged back toward a dock instead of
+         * getting stuck. */
+        if (gameState != GAME_BONUS_PLAYING ||
+            !TryPushStrandedRobot(RobotIdAtTile(nx, ny, id), dx, dy)) {
+            return FALSE;
+        }
+    }
 
     if (robots[id].powerType == POWER_WALL_SMASH && robots[id].powerMovesLeft > 0 && map[ny][nx] == TILE_WALL) {
         map[ny][nx] = TILE_FLOOR;
@@ -4954,6 +5336,28 @@ static void ChooseAiMove(WORD id)
         return;
     }
 
+    /* Easy AI still docks sensibly on low battery, but otherwise plays badly:
+     * most turns it shuffles off in a random passable direction instead of
+     * beelining for the nearest dirt, so it cleans far slower than Normal/
+     * Hard and a human can comfortably out-clean it. */
+    if (bestX < 0 && aiDifficulty <= 0 && RandRange(EASY_AI_CONFUSION_CHANCE) < EASY_AI_CONFUSION_ROLL) {
+        WORD wanderDirs[4];
+
+        aiTargetDirtX[id] = -1;
+        aiTargetDirtY[id] = -1;
+        ShuffleAiDirs(wanderDirs);
+        for (dir = 0; dir < 4; dir++) {
+            WORD r = wanderDirs[dir];
+            if (curX + dirX[r] == aiPrevTileX[id] && curY + dirY[r] == aiPrevTileY[id]) continue;
+            if (StartRobotMove(id, dirX[r], dirY[r])) return;
+        }
+        for (dir = 0; dir < 4; dir++) {
+            WORD r = wanderDirs[dir];
+            if (StartRobotMove(id, dirX[r], dirY[r])) return;
+        }
+        return;
+    }
+
     if (bestX < 0) {
         x = aiTargetDirtX[id];
         y = aiTargetDirtY[id];
@@ -5068,6 +5472,16 @@ static BOOL AnyRobotCanMove(void)
     return FALSE;
 }
 
+/* Longer matches for more robots on the field: a 1-player match keeps the
+ * original 5 rounds, and every player/AI rival added beyond a 2-competitor
+ * match adds 2 more rounds (2p=6, 3p=8, 4p=10, ...). */
+static WORD MatchRoundCount(void)
+{
+    WORD rounds = (robotCount * 2) + 2;
+    if (rounds < 5) rounds = 5;
+    return rounds;
+}
+
 static void CheckEndState(void)
 {
     WORD i;
@@ -5092,7 +5506,16 @@ static void CheckEndState(void)
     }
     roundWins[roundWinner]++;
 
-    if (roundIndex >= 4) {
+    /* Attract mode has no one to press "continue", so a finished demo round
+     * just rolls straight into a fresh one instead of showing the human
+     * round/match-end screens; any real input exits back to the title
+     * screen long before this would normally come up. */
+    if (demoModeActive) {
+        StartDemoMode();
+        return;
+    }
+
+    if (roundIndex >= MatchRoundCount() - 1) {
         finalWinner = 0;
         for (i = 1; i < robotCount; i++) {
             if (totalScores[i] > totalScores[finalWinner]) {
@@ -5193,11 +5616,21 @@ static void ResetBonusBoss(void)
     bonusBossY = MAP_Y + ((MAP_H * TILE_SIZE) - (ROBOT_H * BONUS_BOSS_SCALE)) / 2;
     bonusBossDx = 1;
     bonusBossDy = 1;
+    bonusBossPatternMode = BOSS_PATTERN_DIAGONAL;
+    bonusBossPatternTicks = BOSS_PATTERN_MIN_TICKS;
+    bonusBossSpinAngle = 0;
+    bonusBossSpinRadiusStep = 0;
+    bonusBossSpinRadiusDir = 1;
+    bonusBossSpinRadiusTickCounter = 0;
     bonusBossPhase = 0;
     bonusBossFacingState = SPR_DOWN;
     bonusBossFireTicks = BONUS_BOSS_FIRE_INTERVAL_TICKS;
     bonusAiFireTicks = BONUS_AI_FIRE_INTERVAL_TICKS;
     bonusBossExplosionTicks = 0;
+    nightModeActive = FALSE;
+    nightModeTicks = 0;
+    nightModeCooldownTicks = NIGHT_MODE_MIN_GAP_TICKS +
+        (WORD)RandRange(NIGHT_MODE_MAX_GAP_TICKS - NIGHT_MODE_MIN_GAP_TICKS + 1);
     { WORD i; for (i = 0; i < MAX_ROBOTS; i++) { bonusBossTouchCooldown[i] = 0; bonusBossTouching[i] = FALSE; } }
 }
 
@@ -5228,6 +5661,72 @@ static BOOL RectsOverlap(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, W
     return TRUE;
 }
 
+/* How much of the robot's box the boss box currently covers, as a fraction
+ * along each axis. A near-full run-over covers most of both axes; a glancing
+ * touch on a corner/edge only covers a sliver of one or both. */
+static BOOL RectOverlapCoversMost(WORD ax, WORD ay, WORD aw, WORD ah, WORD bx, WORD by, WORD bw, WORD bh)
+{
+    WORD ix0 = (ax > bx) ? ax : bx;
+    WORD iy0 = (ay > by) ? ay : by;
+    WORD ix1 = (ax + aw < bx + bw) ? (ax + aw) : (bx + bw);
+    WORD iy1 = (ay + ah < by + bh) ? (ay + ah) : (by + bh);
+    WORD overlapW = ix1 - ix0;
+    WORD overlapH = iy1 - iy0;
+
+    if (overlapW <= 0 || overlapH <= 0) return FALSE;
+    return (overlapW * BONUS_BOSS_STUN_OVERLAP_DEN >= aw * BONUS_BOSS_STUN_OVERLAP_NUM) &&
+           (overlapH * BONUS_BOSS_STUN_OVERLAP_DEN >= ah * BONUS_BOSS_STUN_OVERLAP_NUM);
+}
+
+/* A glancing hit only stops the robot and shoves it back one tile away from
+ * the boss, unlike BossStunRobot's full multi-second stun. */
+static void BossPushBackRobot(WORD id, WORD bossCenterX, WORD bossCenterY)
+{
+    WORD robotCenterX;
+    WORD robotCenterY;
+    WORD pushDx = 0;
+    WORD pushDy = 0;
+    WORD newX;
+    WORD newY;
+
+    if (id < 0 || id >= robotCount) return;
+
+    if (robots[id].moving) {
+        robots[id].tileX = robots[id].targetX;
+        robots[id].tileY = robots[id].targetY;
+        robots[id].px = TO_FP(robots[id].tileX * TILE_SIZE);
+        robots[id].py = TO_FP(robots[id].tileY * TILE_SIZE);
+        robots[id].targetPx = robots[id].px;
+        robots[id].targetPy = robots[id].py;
+        robots[id].moving = FALSE;
+    }
+
+    robotCenterX = MAP_X + FP_TO_INT(robots[id].px) + (ROBOT_W / 2);
+    robotCenterY = MAP_Y + FP_TO_INT(robots[id].py) + (ROBOT_H / 2);
+
+    if (AbsW(robotCenterX - bossCenterX) >= AbsW(robotCenterY - bossCenterY)) {
+        pushDx = (robotCenterX >= bossCenterX) ? 1 : -1;
+    } else {
+        pushDy = (robotCenterY >= bossCenterY) ? 1 : -1;
+    }
+
+    newX = robots[id].tileX + pushDx;
+    newY = robots[id].tileY + pushDy;
+    if (RobotCanPassTile(id, newX, newY) && !RobotAtTile(newX, newY, id)) {
+        robots[id].tileX = newX;
+        robots[id].tileY = newY;
+        robots[id].px = TO_FP(newX * TILE_SIZE);
+        robots[id].py = TO_FP(newY * TILE_SIZE);
+        robots[id].targetPx = robots[id].px;
+        robots[id].targetPy = robots[id].py;
+    }
+
+    robots[id].stunTicks = 0;
+    robots[id].boltStunned = FALSE;
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s BOSS PUSHED BACK", RobotTag(id));
+    lastPowerTicks = 40;
+}
+
 static void FireBossBolt(void)
 {
     static const WORD dirs[8][2] = {
@@ -5255,10 +5754,50 @@ static void FireBossBolt(void)
     }
 }
 
+/* Rolls the boss's next movement pattern: a straight diagonal bounce (the
+ * original behaviour), a single-axis horizontal or vertical sweep, or an
+ * outward spiral from the arena centre. Always picking a different mode
+ * from the current one keeps a run from feeling repetitive. */
+static void ChooseBossPattern(void)
+{
+    WORD mode = (WORD)RandRange(BOSS_PATTERN_MODE_COUNT);
+
+    if (BOSS_PATTERN_MODE_COUNT > 1 && mode == bonusBossPatternMode) {
+        mode = (WORD)((mode + 1 + RandRange(BOSS_PATTERN_MODE_COUNT - 1)) % BOSS_PATTERN_MODE_COUNT);
+    }
+    bonusBossPatternMode = mode;
+    bonusBossPatternTicks = BOSS_PATTERN_MIN_TICKS +
+        (WORD)RandRange(BOSS_PATTERN_MAX_TICKS - BOSS_PATTERN_MIN_TICKS + 1);
+
+    switch (mode) {
+        case BOSS_PATTERN_HORIZONTAL:
+            bonusBossDx = (RandRange(2) == 0) ? -1 : 1;
+            bonusBossDy = 0;
+            break;
+        case BOSS_PATTERN_VERTICAL:
+            bonusBossDx = 0;
+            bonusBossDy = (RandRange(2) == 0) ? -1 : 1;
+            break;
+        case BOSS_PATTERN_SPIN:
+            bonusBossSpinAngle = (WORD)RandRange(32);
+            bonusBossSpinRadiusStep = 0;
+            bonusBossSpinRadiusDir = 1;
+            bonusBossSpinRadiusTickCounter = 0;
+            break;
+        case BOSS_PATTERN_DIAGONAL:
+        default:
+            bonusBossDx = (RandRange(2) == 0) ? -1 : 1;
+            bonusBossDy = (RandRange(2) == 0) ? -1 : 1;
+            break;
+    }
+}
+
 static void StepBonusBoss(void)
 {
     WORD bossW = ROBOT_W * BONUS_BOSS_SCALE;
     WORD bossH = ROBOT_H * BONUS_BOSS_SCALE;
+    WORD minX = TILE_SIZE;
+    WORD maxX = SCREEN_W - TILE_SIZE - bossW;
     WORD minY = MAP_Y + TILE_SIZE;
     WORD maxY = SCREEN_H - TILE_SIZE - bossH;
     WORD i;
@@ -5266,16 +5805,53 @@ static void StepBonusBoss(void)
     if (gameState != GAME_BONUS_PLAYING || bonusBossHealth <= 0) return;
 
     bonusBossPhase = (bonusBossPhase + 1) & 31;
-    bonusBossX += bonusBossDx;
-    bonusBossY += bonusBossDy;
 
-    if (bonusBossX <= TILE_SIZE || bonusBossX >= SCREEN_W - TILE_SIZE - bossW) {
-        bonusBossDx = -bonusBossDx;
+    if (bonusBossPatternTicks > 0) bonusBossPatternTicks--;
+    if (bonusBossPatternTicks <= 0) ChooseBossPattern();
+
+    if (bonusBossPatternMode == BOSS_PATTERN_SPIN) {
+        WORD centerX = (minX + maxX) / 2;
+        WORD centerY = (minY + maxY) / 2;
+        WORD maxRadiusX = (maxX - minX) / 2;
+        WORD maxRadiusY = (maxY - minY) / 2;
+        WORD radiusX;
+        WORD radiusY;
+
+        bonusBossSpinRadiusTickCounter++;
+        if (bonusBossSpinRadiusTickCounter >= BOSS_SPIN_RADIUS_GROW_TICKS) {
+            bonusBossSpinRadiusTickCounter = 0;
+            bonusBossSpinRadiusStep += bonusBossSpinRadiusDir;
+            if (bonusBossSpinRadiusStep >= BOSS_SPIN_RADIUS_STEPS) {
+                bonusBossSpinRadiusStep = BOSS_SPIN_RADIUS_STEPS;
+                bonusBossSpinRadiusDir = -1;
+            } else if (bonusBossSpinRadiusStep <= 0) {
+                bonusBossSpinRadiusStep = 0;
+                bonusBossSpinRadiusDir = 1;
+            }
+        }
+        bonusBossSpinAngle = (bonusBossSpinAngle + 1) & 31;
+
+        radiusX = (maxRadiusX * bonusBossSpinRadiusStep) / BOSS_SPIN_RADIUS_STEPS;
+        radiusY = (maxRadiusY * bonusBossSpinRadiusStep) / BOSS_SPIN_RADIUS_STEPS;
+
+        bonusBossX = centerX + (radiusX * IntroEffectSin(bonusBossSpinAngle)) / 13;
+        bonusBossY = centerY + (radiusY * IntroEffectSin(bonusBossSpinAngle + 8)) / 13;
+        if (bonusBossX < minX) bonusBossX = minX;
+        if (bonusBossX > maxX) bonusBossX = maxX;
+        if (bonusBossY < minY) bonusBossY = minY;
+        if (bonusBossY > maxY) bonusBossY = maxY;
+    } else {
         bonusBossX += bonusBossDx;
-    }
-    if (bonusBossY <= minY || bonusBossY >= maxY) {
-        bonusBossDy = -bonusBossDy;
         bonusBossY += bonusBossDy;
+
+        if (bonusBossX <= minX || bonusBossX >= maxX) {
+            bonusBossDx = -bonusBossDx;
+            bonusBossX += bonusBossDx;
+        }
+        if (bonusBossY <= minY || bonusBossY >= maxY) {
+            bonusBossDy = -bonusBossDy;
+            bonusBossY += bonusBossDy;
+        }
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -5288,8 +5864,13 @@ static void StepBonusBoss(void)
         touching = RectsOverlap(rx, ry, ROBOT_W, ROBOT_H, bonusBossX, bonusBossY, bossW, bossH);
         if (touching) {
             if (!bonusBossTouching[i] && bonusBossTouchCooldown[i] <= 0) {
-                BossStunRobot(i, "BOSS");
-                bonusBossTouchCooldown[i] = BONUS_BOSS_TOUCH_COOLDOWN_TICKS;
+                if (RectOverlapCoversMost(rx, ry, ROBOT_W, ROBOT_H, bonusBossX, bonusBossY, bossW, bossH)) {
+                    BossStunRobot(i, "BOSS");
+                    bonusBossTouchCooldown[i] = BONUS_BOSS_TOUCH_COOLDOWN_TICKS;
+                } else {
+                    BossPushBackRobot(i, bonusBossX + (bossW / 2), bonusBossY + (bossH / 2));
+                    bonusBossTouchCooldown[i] = BONUS_BOSS_GRAZE_COOLDOWN_TICKS;
+                }
             }
             bonusBossTouching[i] = TRUE;
         } else {
@@ -5336,6 +5917,7 @@ static void FinishBonusRound(void)
     MarkBossHpTextDirty();
     MarkHudStatusTextDirty();
     bonusBossExplosionTicks = 0;
+    StopNightMode();
     FreeBonusBossCache();
     gameState = GAME_BONUS_END;
     StopGameplaySamples();
@@ -5419,6 +6001,9 @@ static void EnterTitleScreen(void)
     gameState = GAME_TITLE;
     introTicks = 0;
     humanPlayers = 1;
+    demoModeActive = FALSE;
+    demoJoyPrimed = FALSE;
+    titleIdleTicks = 0;
     titleSelectPlayer = 0;
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
@@ -5478,10 +6063,12 @@ static void StepGame(void)
 
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
         StopEmpPaletteCycle();
+        StopNightMode();
         return;
     }
 
     UpdateEmpPaletteCycle();
+    UpdateNightMode();
 
     BeginGameplayDirtyRects();
 
@@ -7044,6 +7631,46 @@ static void StartMatch(WORD players, WORD rivals)
     ResetLevel();
 }
 
+/* Attract mode: 4 AI-only robots clean a random room by themselves, Easy
+ * difficulty so they don't shoot at each other. Any real key, joystick, or
+ * mouse input immediately drops back to the title screen (see HandleRawKey/
+ * PollJoysticks/PollWindowMessages); a finished round just starts another
+ * one via the demoModeActive branch in CheckEndState rather than showing
+ * the normal round/match-end screens. */
+static void StartDemoMode(void)
+{
+    WORD i;
+
+    StopMenuMusic();
+    demoModeActive = TRUE;
+    /* The first joystick poll after D/idle start establishes a baseline.
+     * Only a new edge after that baseline is allowed to cancel the demo. */
+    demoJoyPrimed = FALSE;
+    humanPlayers = 0;
+    aiRivals = 4;
+    aiDifficulty = 0;
+    roundIndex = 0;
+    MarkHudStatusTextDirty();
+    bonusAvailable = FALSE;
+    bonusBossHealth = 0;
+    for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
+    titleTwoPlayerArmed = FALSE;
+    titlePlayer2Locked = FALSE;
+    titleSelectPlayer = 0;
+    aiDifficultyMenuOpen = FALSE;
+    aiSelectMenuOpen = FALSE;
+    ResetAllJoystickConfirmHolds();
+    /* The menu-driven match-start paths (ActivateAiDifficultyMenu/
+     * ActivateAiSelectMenu) always mark the title screen fully dirty before
+     * handing off to gameplay, via their CloseAiDifficultyMenu/
+     * CloseAiSelectMenu calls. D is a direct shortcut with no menu to close,
+     * so without this the title screen's cached bitmap could still be
+     * flagged clean and never get overdrawn, leaving it visible under/after
+     * the demo starts. */
+    MarkTitleAllDirty();
+    ResetLevel();
+}
+
 static void StartWithRivals(WORD rivals)
 {
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) {
@@ -7119,6 +7746,11 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
     if (playSound) PlayBoltFireSample();
 }
 
+/* Holding two perpendicular directions at once (e.g. up+right) fires a 45
+ * degree bolt instead of picking just one axis, the way the boss's own
+ * bolts already travel on all 8 headings (see FireBossBolt/StepPlayerBolt).
+ * Grid movement itself stays 4-directional (StartRobotMove/ChoosePlayerMove
+ * are unaffected); this only changes which way a stationary shot flies. */
 static void FirePlayerBolt(WORD id)
 {
     WORD dirX = 0, dirY = 0;
@@ -7127,18 +7759,27 @@ static void FirePlayerBolt(WORD id)
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
 
-    if (robots[id].moving) {
-        dirX = robots[id].targetX - robots[id].tileX;
-        dirY = robots[id].targetY - robots[id].tileY;
-    } else if (keyLeft[id]) dirX = -1;
-    else if (keyRight[id]) dirX = 1;
-    else if (keyUp[id]) dirY = -1;
-    else if (keyDown[id]) dirY = 1;
-    else if (joyLeft[id]) dirX = -1;
-    else if (joyRight[id]) dirX = 1;
-    else if (joyUp[id]) dirY = -1;
-    else if (joyDown[id]) dirY = 1;
-    else { dirX = playerFacingX[id]; dirY = playerFacingY[id]; }
+    /* Check currently-held input first, on both axes independently, so
+     * holding two perpendicular directions at once (e.g. continuing left
+     * while also holding up) fires diagonally even though grid movement
+     * itself only ever travels one axis at a time. Only fall back to the
+     * in-progress move's axis or last facing when nothing is held right
+     * now (e.g. fire pressed the instant direction keys are released). */
+    if (keyLeft[id] || joyLeft[id]) dirX = -1;
+    else if (keyRight[id] || joyRight[id]) dirX = 1;
+
+    if (keyUp[id] || joyUp[id]) dirY = -1;
+    else if (keyDown[id] || joyDown[id]) dirY = 1;
+
+    if (dirX == 0 && dirY == 0) {
+        if (robots[id].moving) {
+            dirX = robots[id].targetX - robots[id].tileX;
+            dirY = robots[id].targetY - robots[id].tileY;
+        } else {
+            dirX = playerFacingX[id];
+            dirY = playerFacingY[id];
+        }
+    }
     if (dirX == 0 && dirY == 0) dirY = -1;
 
     playerFacingX[id] = dirX;
@@ -7379,6 +8020,16 @@ static void HandleRawKey(UWORD rawCode)
     BOOL keyUpEvent = (rawCode & 0x80) ? TRUE : FALSE;
     UWORD code = rawCode & 0x7F;
 
+    /* Attract mode: any keypress hands control straight back to a real
+     * player instead of being interpreted as a P1/P2 command. */
+    if (demoModeActive) {
+        if (!keyUpEvent) {
+            demoModeActive = FALSE;
+            EnterTitleScreen();
+        }
+        return;
+    }
+
     if (HandleAiDifficultyMenuRawKey(code, keyUpEvent)) {
         return;
     }
@@ -7412,6 +8063,11 @@ static void HandleRawKey(UWORD rawCode)
         if (code == RAW_Z) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, -1); return; }
         if (code == RAW_C) { if (!titleTwoPlayerArmed || titlePlayer2Locked) TitleArmTwoPlayer(); titleSelectPlayer = 1; MarkTitlePanelDirty(); TitleChooseVariant(1, 1); return; }
         if (code == RAW_V) { TitlePlayer2Fire(); return; }
+        /* Don't hijack the title screen into a demo while the AI
+         * difficulty/rival menus are up mid-selection - starting a match
+         * pulls the rug out from under whatever the player was choosing
+         * and can leave that menu's cached overlay stuck on screen. */
+        if (code == RAW_D && !aiDifficultyMenuOpen && !aiSelectMenuOpen) { StartDemoMode(); return; }
         if (code == RAW_0 && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(0); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
@@ -7611,7 +8267,10 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiDifficultyMenuOpen) {
         if (id == 0) {
-            HandleAiDifficultyJoystick(up, down, confirmPressed);
+            /* A plain fire tap selects the highlighted entry here too, not
+             * just blue/hold-to-confirm, so a single-fire-button stick or an
+             * undetected CD32 pad can still drive this menu. */
+            HandleAiDifficultyJoystick(up, down, confirmPressed || firePressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7620,7 +8279,7 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 
     if (aiSelectMenuOpen) {
         if (id == 0) {
-            HandleAiSelectJoystick(up, down, confirmPressed);
+            HandleAiSelectJoystick(up, down, confirmPressed || firePressed);
         }
         prevLeft[id] = left;
         prevRight[id] = right;
@@ -7672,29 +8331,19 @@ static void HandleTitleJoystick(WORD id, BOOL left, BOOL right, BOOL up, BOOL do
 static void PollJoysticks(void)
 {
     UWORD dat[MAX_HUMAN_PLAYERS];
-    BOOL cd32Pad[MAX_HUMAN_PLAYERS];
-    ULONG padState[MAX_HUMAN_PLAYERS];
     WORD i;
 
-    /* Read a CD32 game controller through lowlevel.library first: it drives the
-     * pad's shift register itself to expose all seven buttons.  Only Player 1's
-     * joystick port (lowlevel port 1) is read this way; Player 2 sits on the
-     * mouse port (port 0), and polling that through ReadJoyPort every frame
-     * could disturb Intuition's mouse/RMB handling the menus depend on, so P2
-     * stays on the direct register path below.  Only a detected game controller
-     * takes the lowlevel path; plain sticks fall through unchanged.  Either
-     * pad's Play button pauses, so P1's Play covers the common CD32 setup. */
-    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
-        cd32Pad[i] = FALSE;
-        padState[i] = 0;
-    }
-    if (LowLevelBase) {
-        ULONG s = ReadJoyPort(1); /* lowlevel port 1 = joystick port = P1 */
-        if ((s & JP_TYPE_MASK) == JP_TYPE_GAMECTLR) {
-            cd32Pad[0] = TRUE;
-            padState[0] = s;
-        }
-    }
+    /* CD32 pads were previously read through lowlevel.library's ReadJoyPort()
+     * to expose all seven buttons via its shift-register protocol. That call
+     * ran every single frame right before the direct joy1dat/CIA reads below,
+     * and on real hardware left P1's port completely unresponsive (movement
+     * and fire both dead) -- almost certainly the two fighting over the same
+     * POTGO/shift-register lines. A CD32 pad's d-pad and red fire button are
+     * already wired to the standard joystick lines for compatibility, and its
+     * blue button already reads through the POTY pin trick in
+     * ReadJoystickBlueButton below, so dropping the lowlevel path only costs
+     * the pad's Play button (Q still pauses from the keyboard) in exchange
+     * for the port actually working. */
 
     /* Drive the four pot data lines high as outputs so the second-button
      * (two-button stick button 2) read in ReadJoystickBlueButton is valid this
@@ -7706,53 +8355,75 @@ static void PollJoysticks(void)
 
     for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
         WORD stateBefore = gameState;
-        BOOL left, right, up, down, fire, blue, play;
+        BOOL left, right, up, down, fire, blue;
         BOOL bluePressed;
-        BOOL playPressed;
         BOOL directionActive;
         BOOL firePressed;
         BOOL holdConfirmed;
         BOOL confirmPressed;
 
-        if (cd32Pad[i]) {
-            ULONG s = padState[i];
-            left  = (s & JPF_JOY_LEFT)    ? TRUE : FALSE;
-            right = (s & JPF_JOY_RIGHT)   ? TRUE : FALSE;
-            up    = (s & JPF_JOY_UP)      ? TRUE : FALSE;
-            down  = (s & JPF_JOY_DOWN)    ? TRUE : FALSE;
-            fire  = (s & JPF_BUTTON_RED)  ? TRUE : FALSE;
-            blue  = (s & JPF_BUTTON_BLUE) ? TRUE : FALSE;
-            play  = (s & JPF_BUTTON_PLAY) ? TRUE : FALSE;
-        } else {
-            left  = JOY_LEFT(dat[i]);
-            right = JOY_RIGHT(dat[i]);
-            up    = JOY_UP(dat[i]);
-            down  = JOY_DOWN(dat[i]);
-            fire  = ReadJoystickFire(i);
-            blue  = ReadJoystickBlueButton(i);
-            play  = FALSE;
+        left  = JOY_LEFT(dat[i]);
+        right = JOY_RIGHT(dat[i]);
+        up    = JOY_UP(dat[i]);
+        down  = JOY_DOWN(dat[i]);
+        fire  = ReadJoystickFire(i);
+        blue  = ReadJoystickBlueButton(i);
+
+        directionActive = left || right || up || down;
+
+        /* Outside the title screen, keep mouse-port protection for the direct
+         * read: a mouse left click is electrically the same as J2/P2 fire.
+         * During the title screen, allow fire-only input so player 2 can
+         * join/arm before moving the stick and so hold-to-confirm works. The
+         * intro screen gets the same exemption so a P2 joystick's fire button
+         * can skip it (a stray mouse click there already skips the intro too,
+         * via the SELECTDOWN handler in PollWindowMessages).
+         */
+        if (gameState != GAME_TITLE && gameState != GAME_INTRO && i == 1 && !joyEnabled[i] && !directionActive) {
+            fire = FALSE;
         }
 
         bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
-        playPressed = (play && !joyPlayPrev[i]) ? TRUE : FALSE;
-        directionActive = left || right || up || down;
 
-        /* CD32 Play/Pause toggles the pause overlay during gameplay. Handle it
-         * before the fire logic so a pause press is never consumed as a shot,
-         * and so either pad can pause. */
-        if (playPressed && (stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING)) {
-            if (pauseMenuOpen) ClosePauseMenu();
-            else OpenPauseMenu();
-        }
+        if (gameState == GAME_TITLE && (directionActive || fire || blue)) titleIdleTicks = 0;
 
-        /* Outside the title screen, keep mouse-port protection for the direct
-         * read: a mouse left click is electrically the same as J2/P2 fire.  A
-         * detected CD32 pad reports fire on its own RED line, so it is exempt.
-         * During the title screen, allow fire-only input so player 2 can
-         * join/arm before moving the stick and so hold-to-confirm works.
-         */
-        if (!cd32Pad[i] && gameState != GAME_TITLE && i == 1 && !joyEnabled[i] && !directionActive) {
-            fire = FALSE;
+        if (demoModeActive) {
+            BOOL newDemoInput;
+
+            if (!demoJoyPrimed) {
+                demoPrevLeft[i] = left;
+                demoPrevRight[i] = right;
+                demoPrevUp[i] = up;
+                demoPrevDown[i] = down;
+                demoPrevFire[i] = fire;
+                demoPrevBlue[i] = blue;
+                joyFirePrev[i] = fire;
+                joyBluePrev[i] = blue;
+                if (i == MAX_HUMAN_PLAYERS - 1) demoJoyPrimed = TRUE;
+                continue;
+            }
+
+            newDemoInput = (left && !demoPrevLeft[i]) ||
+                           (right && !demoPrevRight[i]) ||
+                           (up && !demoPrevUp[i]) ||
+                           (down && !demoPrevDown[i]) ||
+                           (fire && !demoPrevFire[i]) ||
+                           (blue && !demoPrevBlue[i]);
+
+            demoPrevLeft[i] = left;
+            demoPrevRight[i] = right;
+            demoPrevUp[i] = up;
+            demoPrevDown[i] = down;
+            demoPrevFire[i] = fire;
+            demoPrevBlue[i] = blue;
+
+            if (newDemoInput) {
+                demoModeActive = FALSE;
+                joyFirePrev[i] = fire;
+                joyBluePrev[i] = blue;
+                EnterTitleScreen();
+                return;
+            }
         }
 
         firePressed = (fire && !joyFirePrev[i]) ? TRUE : FALSE;
@@ -7786,7 +8457,6 @@ static void PollJoysticks(void)
         }
         joyFirePrev[i] = fire;
         joyBluePrev[i] = blue;
-        joyPlayPrev[i] = play;
     }
 }
 
@@ -7802,9 +8472,16 @@ static void PollWindowMessages(void)
 
         ReplyMsg((struct Message *)msg);
 
+        if (gameState == GAME_TITLE) titleIdleTicks = 0;
+
         if (cls == IDCMP_RAWKEY) {
             HandleRawKey(code);
         } else if (cls == IDCMP_MOUSEBUTTONS) {
+            if (demoModeActive && code == SELECTDOWN) {
+                demoModeActive = FALSE;
+                EnterTitleScreen();
+                continue;
+            }
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
             if (code == MENUDOWN && gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
                 if (aiDifficultyMenuOpen) ActivateAiDifficultyMenu();
@@ -7917,7 +8594,7 @@ static BOOL OpenGameScreen(void)
         printf("Optional PROGDIR:tiles/robovac-title.iff not loaded; starting at menu\n");
     }
 
-    LoadMenuMusicSample();
+    LoadMenuMusicStream();
     LoadRoundStartSamples();
     LoadGameplaySamples();
 
@@ -8003,11 +8680,6 @@ static void CloseGameScreen(void)
         FreeMem(audioSilenceWord, sizeof(UWORD));
         audioSilenceWord = NULL;
     }
-
-    if (LowLevelBase) {
-        CloseLibrary(LowLevelBase);
-        LowLevelBase = NULL;
-    }
 }
 
 int main(void)
@@ -8018,12 +8690,6 @@ int main(void)
         return 20;
     }
 
-    /* Optional: present on CD32 and AGA machines with it installed. When open,
-     * PollJoysticks reads CD32 game controllers (all seven buttons, including
-     * Play/Pause) through ReadJoyPort; otherwise it falls back to reading the
-     * ports directly. Missing library is not an error. */
-    LowLevelBase = OpenLibrary("lowlevel.library", 0);
-
     gameState = introTitleBM ? GAME_INTRO : GAME_TITLE;
     if (gameState == GAME_TITLE) {
         PrepareTitlePresentation();
@@ -8032,6 +8698,17 @@ int main(void)
     while (running) {
         PollWindowMessages();
         PollJoysticks();
+
+        if (gameState == GAME_TITLE && !aiDifficultyMenuOpen && !aiSelectMenuOpen) {
+            titleIdleTicks++;
+            if (titleIdleTicks >= TITLE_IDLE_DEMO_TICKS) {
+                titleIdleTicks = 0;
+                StartDemoMode();
+            }
+        } else {
+            titleIdleTicks = 0;
+        }
+
         StepGame();
         DrawFrame();
         WaitTOF();
