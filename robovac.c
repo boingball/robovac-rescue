@@ -29,6 +29,7 @@
  *   4          - cycle game speed on title screen (low/normal/high)
  *   1/2/3,E/N/H - choose Easy/Normal/Hard when AI difficulty is prompted
  *   O          - hidden 9-rival mode (battle mode)
+ *   D          - hidden Hoover Mode (straight-pattern cleaning showcase)
  *   Esc       - quit
  */
 
@@ -98,9 +99,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TO_FP(x)    ((x) << FP_SHIFT)
 #define FP_TO_INT(x) ((x) >> FP_SHIFT)
 
-#define MOVE_SPEED  (3 * FP_ONE)
-#define DOUBLE_SPEED_MOVE_SPEED  (6 * FP_ONE)
-#define EMERGENCY_MOVE_SPEED  (2 * FP_ONE)
+#define MOVE_SPEED  (2 * FP_ONE)
+#define DOUBLE_SPEED_MOVE_SPEED  (4 * FP_ONE)
+#define EMERGENCY_MOVE_SPEED  (1 * FP_ONE)
 #define EMERGENCY_DOCK_MOVES  5
 #define DOCK_CHARGE_TICKS     250
 #define POWERUP_CLEAN_TARGET    5
@@ -113,6 +114,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_DIRT_DROP       5
 #define POWERUP_QUAD_RADIUS     1
 #define ROBOT_TURN_TICKS        1
+#define SPEED_FLASH_TICKS       36
+#define TITLE_J1_SPIN_DIVISOR   3
 #define BONUS_SCORE_THRESHOLD    50
 #define BONUS_BOSS_MAX_HEALTH    50
 #define BONUS_BOSS_HIT_POINTS    2
@@ -283,6 +286,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define EMP_FLOOR_PEN 9
 #define EMP_ROBOT_LIGHT_PEN_A 29
 #define EMP_ROBOT_LIGHT_PEN_B 30
+#define EMP_ROOM_DIM_DIVISOR  3
 
 /* Boss-fight "night mode": at random points the room dims to near-black,
  * with only the robots' light pens (and the status-text pens that ride on
@@ -346,6 +350,7 @@ struct Robot {
     WORD turnTicks;
     WORD turnDirection;
     UBYTE spriteVariant;
+    WORD tablesPushed;
 };
 
 
@@ -469,6 +474,9 @@ static WORD titleSelectPlayer = 0;
 static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
+static BOOL hooverModeActive = FALSE;
+static WORD hooverModeDir[MAX_ROBOTS];
+static WORD speedFlashTicks[MAX_ROBOTS];
 static UWORD *audioSilenceWord = NULL;
 static BOOL demoModeActive = FALSE;
 static BOOL demoJoyPrimed = FALSE;
@@ -538,10 +546,22 @@ static void InitTitleEffectQuality(void)
            (LONG)titleSpinAdvanceDivisor);
 }
 
+/* Kept near the title animation because the carousel deliberately reacts to
+ * whether the physical J1 has been activated. */
+static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+
 static void AdvanceTitleCarouselSpin(void)
 {
+    WORD divisor = titleSpinAdvanceDivisor;
+
+    /* Once J1 has been pressed, the player is actively using the carousel.
+     * Give the selected hoover a calmer, more deliberate spin so the
+     * joystick selection feels controllable on a real CRT. Keyboard-only
+     * selection keeps the existing CPU-tuned animation rate. */
+    if (joyEnabled[0]) divisor += 2;
+
     titleSpinAdvanceCounter++;
-    if (titleSpinAdvanceCounter >= titleSpinAdvanceDivisor) {
+    if (titleSpinAdvanceCounter >= divisor) {
         titleSpinAdvanceCounter = 0;
         titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
     }
@@ -632,6 +652,7 @@ static WORD roundIndex = 0;
 static WORD roundWins[MAX_ROBOTS] = {0,0,0,0};
 static WORD totalScores[MAX_ROBOTS] = {0,0,0,0};
 static WORD roundScores[MAX_ROBOTS] = {0,0,0,0};
+static WORD totalTablePushes[MAX_ROBOTS] = {0,0,0,0};
 static WORD roundWinner = -1;
 static WORD finalWinner = -1;
 static BOOL bonusAvailable = FALSE;
@@ -668,9 +689,7 @@ static WORD aiDifficultyPendingRivals = 0;
 static WORD aiDifficulty = 1;
 static WORD roundCountdownTicks = 0;
 static WORD roundGoTicks = 0;
-static WORD roundCountdownSoundNumber = 0;
 static BOOL roundGoSoundPlayed = FALSE;
-static WORD roundCountdownLastSoundNumber = 0;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL keyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -681,7 +700,6 @@ static BOOL joyRight[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyUp[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyDown[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyFirePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
-static BOOL joyEnabled[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -976,6 +994,7 @@ static void CloseAiDifficultyMenu(void);
 static void OpenAiDifficultyMenu(WORD players, WORD rivals);
 static void StartMatch(WORD players, WORD rivals);
 static void StartDemoMode(void);
+static void StartHooverMode(void);
 static void StartBonusRound(void);
 static void FinishBonusRound(void);
 static BOOL BuildBonusBossCache(void);
@@ -2247,6 +2266,10 @@ static void StartRoundCountdownAudio(void)
     StopMenuMusic();
     StopRoundStartSamples();
     PlayGetReadySample();
+    /* countdown.8svx is one complete three-dong 3-2-1 phrase. Start it once
+     * and let it play through; restarting the phrase at every digit was what
+     * made the countdown sound like it was missing/duplicating a dong. */
+    PlayCountdownSample();
 }
 
 static void PlayGetReadySample(void)
@@ -2258,9 +2281,6 @@ static void PlayCountdownSample(void)
 {
     StopCountdownSample();
     PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
-    if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_STEP_FRAMES) {
-        countdownSample.ticksRemaining = ROUND_COUNTDOWN_STEP_FRAMES;
-    }
 }
 
 static void PlayGoSample(void)
@@ -3393,7 +3413,22 @@ static void UpdateEmpPaletteCycle(void)
 
     if (empPaletteCycleActive && empPaletteCyclePhase == phase) return;
 
-    for (i = 0; i < 32; i++) cycled[i] = palette[i];
+    for (i = 0; i < 32; i++) {
+        UWORD c = palette[i];
+        UWORD r = (c >> 8) & 0xF;
+        UWORD g = (c >> 4) & 0xF;
+        UWORD b = c & 0xF;
+
+        /* EMP kills the room lighting as well as the robots' controls. Keep
+         * the robot palette intact so the players remain readable, but push
+         * the room colours down to a convincing emergency-light level. */
+        if (i < 16) {
+            r /= EMP_ROOM_DIM_DIVISOR;
+            g /= EMP_ROOM_DIM_DIVISOR;
+            b /= EMP_ROOM_DIM_DIVISOR;
+        }
+        cycled[i] = (UWORD)((r << 8) | (g << 4) | b);
+    }
 
     cycled[EMP_FLOOR_PEN] = floorCycle[phase];
     cycled[EMP_ROBOT_LIGHT_PEN_A] = lightCycleA[phase];
@@ -4310,6 +4345,27 @@ static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection)
     }
 }
 
+static void DrawSpeedFlash(WORD id, WORD sx, WORD sy)
+{
+    WORD pulse;
+
+    if (id < 0 || id >= robotCount || speedFlashTicks[id] <= 0) return;
+    pulse = (speedFlashTicks[id] >> 2) & 3;
+    if (pulse == 1 || pulse == 3) return;
+
+    /* Four little corner flashes read as motion energy around the hoover and
+     * stay cheap enough for the 68020 path. */
+    SetAPen(&renderRP, (pulse == 0) ? 14 : 13);
+    RectFill(&renderRP, sx - 2, sy - 2, sx + 1, sy - 1);
+    RectFill(&renderRP, sx - 2, sy - 2, sx - 1, sy + 1);
+    RectFill(&renderRP, sx + ROBOT_W - 1, sy - 2, sx + ROBOT_W + 2, sy - 1);
+    RectFill(&renderRP, sx + ROBOT_W + 1, sy - 2, sx + ROBOT_W + 2, sy + 1);
+    RectFill(&renderRP, sx - 2, sy + ROBOT_H + 1, sx + 1, sy + ROBOT_H + 2);
+    RectFill(&renderRP, sx - 2, sy + ROBOT_H - 1, sx - 1, sy + ROBOT_H + 2);
+    RectFill(&renderRP, sx + ROBOT_W - 1, sy + ROBOT_H + 1, sx + ROBOT_W + 2, sy + ROBOT_H + 2);
+    RectFill(&renderRP, sx + ROBOT_W + 1, sy + ROBOT_H - 1, sx + ROBOT_W + 2, sy + ROBOT_H + 2);
+}
+
 static void DrawRobotBob(WORD id)
 {
     WORD sx;
@@ -4321,6 +4377,8 @@ static void DrawRobotBob(WORD id)
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py);
     srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].spriteIndex) * ROBOT_W;
+
+    DrawSpeedFlash(id, sx, sy);
 
     SetAPen(&renderRP, 6);
     if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
@@ -4603,6 +4661,9 @@ static void InitRobots(void)
         robots[i].prevSpriteIndex = SPR_READY;
         robots[i].turnTicks = 0;
         robots[i].turnDirection = 1;
+        robots[i].tablesPushed = 0;
+        speedFlashTicks[i] = 0;
+        hooverModeDir[i] = (i & 1) ? 2 : 0;
         if (i < humanPlayers) {
             robots[i].spriteVariant = (UBYTE)selectedPlayerVariant[i];
         } else {
@@ -4710,6 +4771,13 @@ static void TriggerRobotPower(WORD id)
     robots[id].powerMovesLeft = POWERUP_DURATION_MOVES;
     snprintf(lastPowerText, sizeof(lastPowerText), "%s: %s!", RobotTag(id), powerNames[variant]);
     lastPowerTicks = 180;
+
+    if (robots[id].powerType == POWER_DOUBLE_SPEED) {
+        /* The speed power gets a visible arcade-style flash without needing
+         * another sprite sheet or an expensive per-pixel trail. */
+        speedFlashTicks[id] = SPEED_FLASH_TICKS;
+        ForceGameplayFullPresent();
+    }
 
     if (robots[id].powerType == POWER_EMP || robots[id].powerType == POWER_DIRT_DROP) {
         robots[id].powerUseCount++;
@@ -4845,8 +4913,6 @@ static void ResetLevel(void)
     bonusBossExplosionTicks = 0;
     roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
     roundGoTicks = 0;
-    roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
-    roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
     ResetGameplaySpeedFrameCounter();
     empCountdownTicks = 0;
@@ -4859,7 +4925,31 @@ static void ResetLevel(void)
     BuildRoomBuffer();
     ForceGameplayFullPresent();
     StartRoundCountdownAudio();
-    roundCountdownLastSoundNumber = 0;
+}
+
+static BOOL TryPushTable(WORD id, WORD tx, WORD ty, WORD dx, WORD dy)
+{
+    WORD pushX = tx + dx;
+    WORD pushY = ty + dy;
+
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
+    if (map[ty][tx] != TILE_TABLE) return FALSE;
+    if (pushX <= 0 || pushY <= 0 || pushX >= MAP_W - 1 || pushY >= MAP_H - 1) return FALSE;
+    /* Do not bury dirt, docks or another piece of furniture under a table. */
+    if (map[pushY][pushX] != TILE_FLOOR) return FALSE;
+    if (RobotAtTile(pushX, pushY, id)) return FALSE;
+
+    map[ty][tx] = TILE_FLOOR;
+    map[pushY][pushX] = TILE_TABLE;
+    UpdateRoomTile(tx, ty);
+    UpdateRoomTile(pushX, pushY);
+    robots[id].tablesPushed++;
+    totalTablePushes[id]++;
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s TABLE SHOVED", RobotTag(id));
+    lastPowerTicks = 45;
+    MarkHudStatusTextDirty();
+    ForceGameplayFullPresent();
+    return TRUE;
 }
 
 static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
@@ -4879,6 +4969,9 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     nx = robots[id].tileX + dx;
     ny = robots[id].tileY + dy;
 
+    if (nx >= 0 && ny >= 0 && nx < MAP_W && ny < MAP_H && map[ny][nx] == TILE_TABLE) {
+        if (!TryPushTable(id, nx, ny, dx, dy)) return FALSE;
+    }
     if (!RobotCanPassTile(id, nx, ny)) return FALSE;
     if (RobotAtTile(nx, ny, id)) {
         /* During the bonus boss fight, walking into a teammate who is out of
@@ -5299,6 +5392,44 @@ static BOOL AiFindPathStep(WORD id, WORD targetX, WORD targetY, WORD *outDx, WOR
     return FALSE;
 }
 
+static void ChooseHooverModeMove(WORD id)
+{
+    static const WORD dirX[4] = {1, 0, -1, 0};
+    static const WORD dirY[4] = {0, 1, 0, -1};
+    WORD first;
+    WORD attempt;
+
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0) return;
+
+    /* Keep the showcase running long enough to be useful: when a hoover is
+     * low on charge, use the normal shortest path to its dock, then resume
+     * its straight sweep once it has refilled. */
+    if (robots[id].battery <= 25) {
+        WORD dx = 0;
+        WORD dy = 0;
+        if (AiFindPathStep(id, RobotDockX(id), RobotDockY(id), &dx, &dy, NULL) &&
+            (dx != 0 || dy != 0)) {
+            StartRobotMove(id, dx, dy);
+        }
+        return;
+    }
+
+    /* Each AI holds a straight line until the room layout stops it, then
+     * turns clockwise. Staggered starting directions make the four hoovers
+     * sweep the room in visibly different patterns instead of converging on
+     * the same dirt target. */
+    first = hooverModeDir[id] & 3;
+    for (attempt = 0; attempt < 4; attempt++) {
+        WORD dir = (first + attempt) & 3;
+        if (StartRobotMove(id, dirX[dir], dirY[dir])) {
+            hooverModeDir[id] = dir;
+            return;
+        }
+    }
+    hooverModeDir[id] = (first + 1) & 3;
+}
+
 static void ChooseAiMove(WORD id)
 {
     WORD x;
@@ -5320,6 +5451,11 @@ static void ChooseAiMove(WORD id)
     if (id < humanPlayers || id >= robotCount) return;
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
+
+    if (hooverModeActive) {
+        ChooseHooverModeMove(id);
+        return;
+    }
 
     curX = robots[id].tileX;
     curY = robots[id].tileY;
@@ -5511,7 +5647,8 @@ static void CheckEndState(void)
      * round/match-end screens; any real input exits back to the title
      * screen long before this would normally come up. */
     if (demoModeActive) {
-        StartDemoMode();
+        if (hooverModeActive) StartHooverMode();
+        else StartDemoMode();
         return;
     }
 
@@ -5965,8 +6102,6 @@ static void StartBonusRound(void)
     lastPowerTicks = 0;
     roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
     roundGoTicks = 0;
-    roundCountdownSoundNumber = ROUND_COUNTDOWN_SECONDS;
-    roundCountdownLastSoundNumber = 0;
     roundGoSoundPlayed = FALSE;
     ResetGameplaySpeedFrameCounter();
     empCountdownTicks = 0;
@@ -5989,7 +6124,6 @@ static void StartBonusRound(void)
     BuildRoomBuffer();
     ForceGameplayFullPresent();
     StartRoundCountdownAudio();
-    roundCountdownLastSoundNumber = 0;
 }
 
 static void EnterTitleScreen(void)
@@ -6002,6 +6136,7 @@ static void EnterTitleScreen(void)
     introTicks = 0;
     humanPlayers = 1;
     demoModeActive = FALSE;
+    hooverModeActive = FALSE;
     demoJoyPrimed = FALSE;
     titleIdleTicks = 0;
     titleSelectPlayer = 0;
@@ -6055,6 +6190,7 @@ static void StepGame(void)
 {
     WORD i;
     WORD frameTicks = 1;
+    BOOL speedFlashActive = FALSE;
 
     if (gameState == GAME_INTRO) {
         StepIntro();
@@ -6067,8 +6203,10 @@ static void StepGame(void)
         return;
     }
 
-    UpdateEmpPaletteCycle();
     UpdateNightMode();
+    /* Apply EMP after any night-mode transition so the EMP room dimming is
+     * the final palette state for the frame. */
+    UpdateEmpPaletteCycle();
 
     BeginGameplayDirtyRects();
 
@@ -6084,11 +6222,6 @@ static void StepGame(void)
     if (roundCountdownTicks > 0) {
         if (frameTicks < roundCountdownTicks) {
             roundCountdownTicks -= frameTicks;
-            roundCountdownSoundNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
-            if (roundCountdownSoundNumber != roundCountdownLastSoundNumber) {
-                PlayCountdownSample();
-                roundCountdownLastSoundNumber = roundCountdownSoundNumber;
-            }
             ForceGameplayFullPresent();
             FinishGameplayDirtyRects();
             return;
@@ -6122,6 +6255,8 @@ static void StepGame(void)
 
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
+        if (speedFlashTicks[i] > 0) speedFlashTicks[i]--;
+        if (speedFlashTicks[i] > 0) speedFlashActive = TRUE;
         if (robots[i].turnTicks > 0) robots[i].turnTicks--;
         if (robots[i].stunTicks > 0) {
             robots[i].stunTicks--;
@@ -6162,6 +6297,7 @@ static void StepGame(void)
             CleanTileForRobot(i, robots[i].tileX, robots[i].tileY);
         }
     }
+    if (speedFlashActive) ForceGameplayFullPresent();
     StepBonusAiFire();
     StepMainGameAiFire();
     StepPlayerBolts();
@@ -6705,6 +6841,8 @@ static void DrawLeaderboardScreen(BOOL finalBoard)
 {
     WORD order[MAX_ROBOTS];
     WORD i;
+    WORD winnerScale;
+    WORD winnerTop;
     char b[80];
 
     SetAPen(&renderRP, 0);
@@ -6713,30 +6851,36 @@ static void DrawLeaderboardScreen(BOOL finalBoard)
     BuildRankOrder(order);
     finalWinner = order[0];
     titleSpinPhase = (titleSpinPhase + 1) & (TITLE_SPIN_STEPS - 1);
+    winnerScale = 3 + ((titleSpinPhase >> 3) & 1);
+    winnerTop = 80 - ((ROBOT_H * winnerScale) / 2);
 
     MiniTextCentered(&renderRP, 8, finalBoard ? "FINAL SCORE BOARD" : "CONGRATS WINNER", finalBoard ? 7 : 14, 2);
     snprintf(b, sizeof(b), "1ST %s %s", RobotControlLabel(order[0]), RobotTag(order[0]));
     MiniTextCentered(&renderRP, 30, b, 13, 2);
-    DrawRobotLarge(order[0], (SCREEN_W - ROBOT_W * 4) / 2, 48, 4, titleSpinPhase);
+    DrawRobotLarge(order[0], (SCREEN_W - ROBOT_W * winnerScale) / 2,
+                   winnerTop, winnerScale, titleSpinPhase);
+    snprintf(b, sizeof(b), "SCORE:%d WINS:%d TABLES:%d",
+             totalScores[order[0]], roundWins[order[0]], totalTablePushes[order[0]]);
+    MiniTextCentered(&renderRP, 108, b, 10, 1);
 
     if (robotCount > 1) {
-        DrawRobotIcon(order[1], 12, 112, SPR_DOWN);
+        DrawRobotIcon(order[1], 12, 122, SPR_DOWN);
         snprintf(b, sizeof(b), "2ND %s %s  %d", RobotControlLabel(order[1]), RobotTag(order[1]), totalScores[order[1]]);
-        MiniText(&renderRP, 30, 120, b, 7);
+        MiniText(&renderRP, 30, 130, b, 7);
     }
     if (robotCount > 2) {
-        DrawRobotIcon(order[2], 156, 112, SPR_DOWN);
+        DrawRobotIcon(order[2], 156, 122, SPR_DOWN);
         snprintf(b, sizeof(b), "3RD %s %s  %d", RobotControlLabel(order[2]), RobotTag(order[2]), totalScores[order[2]]);
-        MiniText(&renderRP, 174, 120, b, 7);
+        MiniText(&renderRP, 174, 130, b, 7);
     }
 
-    MiniTextCentered(&renderRP, 136, "BOARD", 8, 1);
+    MiniTextCentered(&renderRP, 145, "BOARD", 8, 1);
     for (i = 0; i < robotCount && i < 10; i++) {
         WORD id = order[i];
         WORD col = i / 5;
         WORD row = i % 5;
         WORD x = 8 + (col * 154);
-        WORD y = 150 + row * 17;
+        WORD y = 158 + row * 17;
         DrawRobotIcon(id, x, y - 8, SPR_DOWN);
         snprintf(b, sizeof(b), "%d %s %s P:%d W:%d", i + 1, RobotControlLabel(id), RobotTag(id), totalScores[id], roundWins[id]);
         MiniText(&renderRP, x + 18, y, b, (i == 0) ? 14 : 7);
@@ -6843,6 +6987,12 @@ static void DrawHud(void)
             if (gameState == GAME_BONUS_PLAYING) {
                 snprintf(cachedHudStatusText, sizeof(cachedHudStatusText),
                          "R6 BONUS BOSS:%d MOVE:%d", bonusBossHealth, batteryCostPerMove);
+            } else if (hooverModeActive) {
+                snprintf(cachedHudStatusText, sizeof(cachedHudStatusText),
+                         "HOOVER MODE %s DIRT:%d", roomNames[roomType], dirtLeft);
+            } else if (demoModeActive) {
+                snprintf(cachedHudStatusText, sizeof(cachedHudStatusText),
+                         "ATTRACT %s DIRT:%d", roomNames[roomType], dirtLeft);
             } else {
                 snprintf(cachedHudStatusText, sizeof(cachedHudStatusText),
                          "R%d %s DIRT:%d MOVE:%d", roundIndex + 1, roomNames[roomType], dirtLeft, batteryCostPerMove);
@@ -7622,7 +7772,11 @@ static void StartMatch(WORD players, WORD rivals)
     MarkHudStatusTextDirty();
     bonusAvailable = FALSE;
     bonusBossHealth = 0;
-    for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
+    for (i = 0; i < MAX_ROBOTS; i++) {
+        roundWins[i] = 0;
+        totalScores[i] = 0;
+        totalTablePushes[i] = 0;
+    }
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
     titleSelectPlayer = 0;
@@ -7643,7 +7797,8 @@ static void StartDemoMode(void)
 
     StopMenuMusic();
     demoModeActive = TRUE;
-    /* The first joystick poll after D/idle start establishes a baseline.
+    hooverModeActive = FALSE;
+    /* The first joystick poll after an idle attract start establishes a baseline.
      * Only a new edge after that baseline is allowed to cancel the demo. */
     demoJoyPrimed = FALSE;
     humanPlayers = 0;
@@ -7653,7 +7808,11 @@ static void StartDemoMode(void)
     MarkHudStatusTextDirty();
     bonusAvailable = FALSE;
     bonusBossHealth = 0;
-    for (i = 0; i < MAX_ROBOTS; i++) { roundWins[i] = 0; totalScores[i] = 0; }
+    for (i = 0; i < MAX_ROBOTS; i++) {
+        roundWins[i] = 0;
+        totalScores[i] = 0;
+        totalTablePushes[i] = 0;
+    }
     titleTwoPlayerArmed = FALSE;
     titlePlayer2Locked = FALSE;
     titleSelectPlayer = 0;
@@ -7663,10 +7822,44 @@ static void StartDemoMode(void)
     /* The menu-driven match-start paths (ActivateAiDifficultyMenu/
      * ActivateAiSelectMenu) always mark the title screen fully dirty before
      * handing off to gameplay, via their CloseAiDifficultyMenu/
-     * CloseAiSelectMenu calls. D is a direct shortcut with no menu to close,
+     * CloseAiSelectMenu calls. The idle attract start is a direct shortcut
+     * with no menu to close,
      * so without this the title screen's cached bitmap could still be
      * flagged clean and never get overdrawn, leaving it visible under/after
      * the demo starts. */
+    MarkTitleAllDirty();
+    ResetLevel();
+}
+
+/* Hidden Hoover Mode: a self-running cleaning-pattern showcase. The same
+ * four AI hoovers used by the attract demo are given deterministic straight
+ * sweeps, making D a fun screensaver for the room layouts and furniture. */
+static void StartHooverMode(void)
+{
+    WORD i;
+
+    StopMenuMusic();
+    demoModeActive = TRUE;
+    hooverModeActive = TRUE;
+    demoJoyPrimed = FALSE;
+    humanPlayers = 0;
+    aiRivals = 4;
+    aiDifficulty = 0;
+    roundIndex = 0;
+    MarkHudStatusTextDirty();
+    bonusAvailable = FALSE;
+    bonusBossHealth = 0;
+    for (i = 0; i < MAX_ROBOTS; i++) {
+        roundWins[i] = 0;
+        totalScores[i] = 0;
+        totalTablePushes[i] = 0;
+    }
+    titleTwoPlayerArmed = FALSE;
+    titlePlayer2Locked = FALSE;
+    titleSelectPlayer = 0;
+    aiDifficultyMenuOpen = FALSE;
+    aiSelectMenuOpen = FALSE;
+    ResetAllJoystickConfirmHolds();
     MarkTitleAllDirty();
     ResetLevel();
 }
@@ -8067,7 +8260,7 @@ static void HandleRawKey(UWORD rawCode)
          * difficulty/rival menus are up mid-selection - starting a match
          * pulls the rug out from under whatever the player was choosing
          * and can leave that menu's cached overlay stuck on screen. */
-        if (code == RAW_D && !aiDifficultyMenuOpen && !aiSelectMenuOpen) { StartDemoMode(); return; }
+        if (code == RAW_D && !aiDifficultyMenuOpen && !aiSelectMenuOpen) { StartHooverMode(); return; }
         if (code == RAW_0 && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(0); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }
