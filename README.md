@@ -33,12 +33,12 @@ Detailed actions:
 - `1` / `2` / `3`: choose AI rival count from the one-player title screen; choosing at least one AI opens the Easy / Normal / Hard difficulty prompt.
 - `0` / `1` / `2` / `3`: choose AI rival count from the two-player AI prompt; choosing `0` starts immediately, while `1`-`3` opens the difficulty prompt.
 - AI difficulty: Easy AI does not fire back, Normal AI fires only at close range, and Hard AI fires from longer range.
-- `D`: hidden Hoover Mode: four AI hoovers clean the room using straight-line sweeps and turn when the room layout stops them. Any input returns to the title screen.
+- `D`: hidden Hoover Mode: four AI hoovers clean the room using fresh random hoover variants and headings. They keep straight cleaning lines where possible, then use dirt/open-space/recent-path look-ahead to turn around walls, tables, and other hoovers. Any input returns to the title screen.
 - `Esc`: quit
 
 ## Demo / Attract Mode
 
-Leave the title screen idle for 30 seconds to start the normal attract demo: 4 AI robots (Easy difficulty, so they don't shoot each other) clean a random room on their own, looping into a fresh room whenever one finishes instead of showing the normal round/match-end screens. Press `D` for the separate Hoover Mode, which uses deterministic straight-line cleaning patterns and also loops through rooms. Any keypress, joystick input, or mouse click immediately drops back to the title screen.
+Leave the title screen idle for 30 seconds to start the normal attract demo: 4 AI robots (Easy difficulty, so they don't shoot each other) clean a random room on their own, looping into a fresh room whenever one finishes instead of showing the normal round/match-end screens. Press `D` for the separate Hoover Mode, which randomises the four hoovers and their headings, uses intelligent straight-line cleaning patterns, and also loops through rooms. Any keypress, joystick input, or mouse click immediately drops back to the title screen.
 
 ## Robot Super Powers
 
@@ -52,7 +52,7 @@ Every robot tracks a clean streak toward the super power tied to that robot vari
 - Bristle Blitz: battery burst that instantly refills the robot.
 - Static Sweep: wall smash for 20 moves, breaking interior wall tiles while moving.
 
-The Dust Viper's speed effect flashes around the hoover while active. EMP also dims the room lighting, leaving the robot colours readable. Tables can be pushed one square when a hoover walks into them, provided the square behind them is clear; the winner screen records table shoves alongside score and round wins.
+The Dust Viper's speed effect leaves a short cached blitter motion trail behind the hoover. EMP also dims the room lighting, leaving the robot colours readable. Tables can be pushed one square when a hoover walks into them, provided the square behind them is clear; the winner screen records table shoves alongside score and round wins.
 
 The HUD shows each robot's current clean-streak count, flashes `P` while a timed power is active, and announces each triggered power.
 
@@ -93,7 +93,7 @@ Dirt increases each round:
 - Round 4: 32
 - Round 5: 38
 
-Hoovers now start at a calmer base speed so a room lasts longer; the double-speed power remains noticeably faster.
+Hoovers now start at a calmer base speed so a room lasts longer; the double-speed power remains noticeably faster. The title carousel keeps its normal full-speed animation after J1 is enabled.
 
 Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spawn/dock tiles).
 

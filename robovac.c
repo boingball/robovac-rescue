@@ -115,7 +115,10 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define POWERUP_QUAD_RADIUS     1
 #define ROBOT_TURN_TICKS        1
 #define SPEED_FLASH_TICKS       36
-#define TITLE_J1_SPIN_DIVISOR   3
+#define SPEED_TRAIL_FRAME_COUNT 4
+#define SPEED_TRAIL_W           24
+#define SPEED_TRAIL_H           24
+#define HOOVER_RANDOM_TURN_CHANCE 8
 #define BONUS_SCORE_THRESHOLD    50
 #define BONUS_BOSS_MAX_HEALTH    50
 #define BONUS_BOSS_HIT_POINTS    2
@@ -395,6 +398,9 @@ static struct BitMap *boltMaskBM = NULL;
 static struct RastPort robotScaledRP;
 static struct BitMap *robotScaledCacheBM = NULL;
 static struct BitMap *robotScaledMaskBM = NULL;
+static struct RastPort speedTrailRP;
+static struct BitMap *speedTrailBM = NULL;
+static struct BitMap *speedTrailMaskBM = NULL;
 static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
@@ -554,11 +560,10 @@ static void AdvanceTitleCarouselSpin(void)
 {
     WORD divisor = titleSpinAdvanceDivisor;
 
-    /* Once J1 has been pressed, the player is actively using the carousel.
-     * Give the selected hoover a calmer, more deliberate spin so the
-     * joystick selection feels controllable on a real CRT. Keyboard-only
-     * selection keeps the existing CPU-tuned animation rate. */
-    if (joyEnabled[0]) divisor += 2;
+    /* Once J1 is active the carousel is being used as a selector. Keep its
+     * phase moving at the original one-step-per-frame rate so input never
+     * makes the selected hoover appear to crawl. */
+    if (joyEnabled[0]) divisor = 1;
 
     titleSpinAdvanceCounter++;
     if (titleSpinAdvanceCounter >= divisor) {
@@ -774,6 +779,7 @@ static WORD dirtyPrevRobotTurnTicks[MAX_ROBOTS];
 static WORD dirtyPrevRobotTurnDirection[MAX_ROBOTS];
 static UBYTE dirtyPrevRobotQuadActive[MAX_ROBOTS];
 static UBYTE dirtyPrevRobotTileUnder[MAX_ROBOTS];
+static WORD dirtyPrevRobotSpeedFlashTicks[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPx[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPy[MAX_ROBOTS];
 static BOOL dirtyPrevPlayerBoltActive[MAX_ROBOTS];
@@ -1077,6 +1083,8 @@ static void UpdateEmpPaletteCycle(void);
 static void StopEmpPaletteCycle(void);
 static void UpdateNightMode(void);
 static void StopNightMode(void);
+static BOOL BuildSpeedTrailCache(void);
+static void FreeSpeedTrailCache(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -1296,6 +1304,7 @@ static BOOL RobotNeedsCurrentDirtyRect(WORD id)
     if (robots[id].battery != dirtyPrevRobotBattery[id]) return TRUE;
     if (robots[id].turnTicks != dirtyPrevRobotTurnTicks[id]) return TRUE;
     if (robots[id].turnDirection != dirtyPrevRobotTurnDirection[id]) return TRUE;
+    if (speedFlashTicks[id] != dirtyPrevRobotSpeedFlashTicks[id]) return TRUE;
     if (quadActive != dirtyPrevRobotQuadActive[id]) return TRUE;
     if (DirtyRobotTileUnder(id) != dirtyPrevRobotTileUnder[id]) return TRUE;
     if (DirtyOverlayIntersectsRobot(id)) return TRUE;
@@ -1320,6 +1329,7 @@ static void StoreDirtyRobotVisualState(WORD id)
     dirtyPrevRobotTurnDirection[id] = robots[id].turnDirection;
     dirtyPrevRobotQuadActive[id] = (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) ? 1 : 0;
     dirtyPrevRobotTileUnder[id] = DirtyRobotTileUnder(id);
+    dirtyPrevRobotSpeedFlashTicks[id] = speedFlashTicks[id];
 }
 
 static ULONG DirtyRectArea(struct DirtyRect *rect)
@@ -1514,7 +1524,10 @@ static void GetRobotDirtyBounds(LONG px, LONG py, WORD id, WORD *x, WORD *y, WOR
     WORD top;
     WORD right;
     WORD bottom;
-    const WORD margin = 2;
+    /* Include the cached speed trail around both the previous and current
+     * robot positions. Keeping this slightly generous makes the dirty-rect
+     * path erase an old trail without needing a full-frame redraw. */
+    const WORD margin = 8;
 
     if (RobotDirtyBoundsUseQuad(id)) {
         left = sx - (ROBOT_W / 2);
@@ -4252,9 +4265,14 @@ static BOOL InitRobotBobs(void)
         printf("Could not allocate scaled robot BOB cache; quad robot will use slower fallback drawing\n");
     }
 
+    if (!BuildSpeedTrailCache()) {
+        printf("Could not allocate speed motion-trail cache; speed power will have no trail\n");
+    }
+
     if (!BuildTitleCarouselRotationCache()) {
         FreeBoltCache();
         FreeRobotScaledCache();
+        FreeSpeedTrailCache();
         FreeBitMap(robotCacheBM);
         FreeBitMap(robotMaskBM);
         robotCacheBM = NULL;
@@ -4345,25 +4363,106 @@ static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection)
     }
 }
 
-static void DrawSpeedFlash(WORD id, WORD sx, WORD sy)
+static void BuildSpeedTrailBar(struct RastPort *maskRP, WORD x, WORD y,
+                               WORD w, WORD h, UBYTE pen)
 {
-    WORD pulse;
+    SetAPen(&speedTrailRP, pen);
+    RectFill(&speedTrailRP, x, y, x + w - 1, y + h - 1);
+    SetAPen(maskRP, 1);
+    RectFill(maskRP, x, y, x + w - 1, y + h - 1);
+}
+
+static BOOL BuildSpeedTrailCache(void)
+{
+    struct RastPort maskRP;
+    WORD frame;
+
+    speedTrailBM = AllocBitMap(SPEED_TRAIL_W * SPEED_TRAIL_FRAME_COUNT,
+                               SPEED_TRAIL_H, DEPTH,
+                               BMF_CLEAR | BMF_DISPLAYABLE,
+                               scr->RastPort.BitMap);
+    speedTrailMaskBM = AllocBitMap(SPEED_TRAIL_W * SPEED_TRAIL_FRAME_COUNT,
+                                   SPEED_TRAIL_H, 1,
+                                   BMF_CLEAR | BMF_DISPLAYABLE,
+                                   scr->RastPort.BitMap);
+    if (!speedTrailBM || !speedTrailMaskBM) {
+        FreeSpeedTrailCache();
+        return FALSE;
+    }
+
+    InitRastPort(&speedTrailRP);
+    speedTrailRP.BitMap = speedTrailBM;
+    InitRastPort(&maskRP);
+    maskRP.BitMap = speedTrailMaskBM;
+
+    /* Each frame is a short, stepped streak. It is deliberately built once
+     * in chip RAM and stamped with BltMaskBitMapRastPort during gameplay.
+     * The robot is drawn over the near end of the streak. */
+    for (frame = 0; frame < SPEED_TRAIL_FRAME_COUNT; frame++) {
+        WORD x = frame * SPEED_TRAIL_W;
+
+        switch (frame) {
+            case 0: /* left-facing: trail extends to the right */
+                BuildSpeedTrailBar(&maskRP, x + 16, 7, 8, 3, 13);
+                BuildSpeedTrailBar(&maskRP, x + 12, 6, 4, 5, 13);
+                BuildSpeedTrailBar(&maskRP, x + 8, 5, 4, 7, 14);
+                break;
+            case 1: /* right-facing: trail extends to the left */
+                BuildSpeedTrailBar(&maskRP, x + 0, 7, 8, 3, 13);
+                BuildSpeedTrailBar(&maskRP, x + 8, 6, 4, 5, 13);
+                BuildSpeedTrailBar(&maskRP, x + 12, 5, 4, 7, 14);
+                break;
+            case 2: /* up-facing: trail extends below */
+                BuildSpeedTrailBar(&maskRP, x + 7, 16, 3, 8, 13);
+                BuildSpeedTrailBar(&maskRP, x + 6, 12, 5, 4, 13);
+                BuildSpeedTrailBar(&maskRP, x + 5, 8, 7, 4, 14);
+                break;
+            default: /* down-facing: trail extends above */
+                BuildSpeedTrailBar(&maskRP, x + 7, 0, 3, 8, 13);
+                BuildSpeedTrailBar(&maskRP, x + 6, 8, 5, 4, 13);
+                BuildSpeedTrailBar(&maskRP, x + 5, 12, 7, 4, 14);
+                break;
+        }
+    }
+
+    return TRUE;
+}
+
+static void FreeSpeedTrailCache(void)
+{
+    if (speedTrailBM) {
+        FreeBitMap(speedTrailBM);
+        speedTrailBM = NULL;
+    }
+    if (speedTrailMaskBM) {
+        FreeBitMap(speedTrailMaskBM);
+        speedTrailMaskBM = NULL;
+    }
+    speedTrailRP.BitMap = NULL;
+}
+
+static void DrawSpeedMotionBlur(WORD id, WORD sx, WORD sy)
+{
+    WORD frame;
 
     if (id < 0 || id >= robotCount || speedFlashTicks[id] <= 0) return;
-    pulse = (speedFlashTicks[id] >> 2) & 3;
-    if (pulse == 1 || pulse == 3) return;
+    if (!speedTrailBM || !speedTrailMaskBM || !speedTrailMaskBM->Planes[0]) return;
 
-    /* Four little corner flashes read as motion energy around the hoover and
-     * stay cheap enough for the 68020 path. */
-    SetAPen(&renderRP, (pulse == 0) ? 14 : 13);
-    RectFill(&renderRP, sx - 2, sy - 2, sx + 1, sy - 1);
-    RectFill(&renderRP, sx - 2, sy - 2, sx - 1, sy + 1);
-    RectFill(&renderRP, sx + ROBOT_W - 1, sy - 2, sx + ROBOT_W + 2, sy - 1);
-    RectFill(&renderRP, sx + ROBOT_W + 1, sy - 2, sx + ROBOT_W + 2, sy + 1);
-    RectFill(&renderRP, sx - 2, sy + ROBOT_H + 1, sx + 1, sy + ROBOT_H + 2);
-    RectFill(&renderRP, sx - 2, sy + ROBOT_H - 1, sx - 1, sy + ROBOT_H + 2);
-    RectFill(&renderRP, sx + ROBOT_W - 1, sy + ROBOT_H + 1, sx + ROBOT_W + 2, sy + ROBOT_H + 2);
-    RectFill(&renderRP, sx + ROBOT_W + 1, sy + ROBOT_H - 1, sx + ROBOT_W + 2, sy + ROBOT_H + 2);
+    switch (robots[id].spriteIndex) {
+        case SPR_LEFT:  frame = 0; break;
+        case SPR_RIGHT: frame = 1; break;
+        case SPR_UP:    frame = 2; break;
+        case SPR_DOWN:  frame = 3; break;
+        default: return;
+    }
+
+    /* The masked blit is the per-frame effect. No CPU pixel/rectangle work
+     * and no forced full-screen presentation are needed. */
+    BltMaskBitMapRastPort(speedTrailBM, frame * SPEED_TRAIL_W, 0,
+                          &renderRP, sx - 4, sy - 4,
+                          SPEED_TRAIL_W, SPEED_TRAIL_H,
+                          (ABC | ABNC | ANBC),
+                          speedTrailMaskBM->Planes[0]);
 }
 
 static void DrawRobotBob(WORD id)
@@ -4378,7 +4477,7 @@ static void DrawRobotBob(WORD id)
     sy = MAP_Y + FP_TO_INT(robots[id].py);
     srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].spriteIndex) * ROBOT_W;
 
-    DrawSpeedFlash(id, sx, sy);
+    DrawSpeedMotionBlur(id, sx, sy);
 
     SetAPen(&renderRP, 6);
     if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
@@ -4663,9 +4762,14 @@ static void InitRobots(void)
         robots[i].turnDirection = 1;
         robots[i].tablesPushed = 0;
         speedFlashTicks[i] = 0;
-        hooverModeDir[i] = (i & 1) ? 2 : 0;
+        hooverModeDir[i] = hooverModeActive ? (WORD)RandRange(4) : ((i & 1) ? 2 : 0);
         if (i < humanPlayers) {
             robots[i].spriteVariant = (UBYTE)selectedPlayerVariant[i];
+        } else if (hooverModeActive) {
+            /* Hoover Mode is a screensaver/showcase, so give each new room a
+             * fresh mix of robot personalities instead of repeating the
+             * selected-player sequence. */
+            robots[i].spriteVariant = (UBYTE)RandRange(ROBOT_VARIANTS);
         } else {
             robots[i].spriteVariant = (UBYTE)((selectedPlayerVariant[0] + i) % ROBOT_VARIANTS);
         }
@@ -4773,10 +4877,8 @@ static void TriggerRobotPower(WORD id)
     lastPowerTicks = 180;
 
     if (robots[id].powerType == POWER_DOUBLE_SPEED) {
-        /* The speed power gets a visible arcade-style flash without needing
-         * another sprite sheet or an expensive per-pixel trail. */
+        /* The speed power gets a short cached blitter trail. */
         speedFlashTicks[id] = SPEED_FLASH_TICKS;
-        ForceGameplayFullPresent();
     }
 
     if (robots[id].powerType == POWER_EMP || robots[id].powerType == POWER_DIRT_DROP) {
@@ -5396,8 +5498,10 @@ static void ChooseHooverModeMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
     static const WORD dirY[4] = {0, 1, 0, -1};
-    WORD first;
-    WORD attempt;
+    WORD preferred;
+    WORD bestDir = -1;
+    WORD bestScore = -32767;
+    WORD dir;
 
     if (id < humanPlayers || id >= robotCount) return;
     if (robots[id].moving || robots[id].stunTicks > 0) return;
@@ -5415,19 +5519,69 @@ static void ChooseHooverModeMove(WORD id)
         return;
     }
 
-    /* Each AI holds a straight line until the room layout stops it, then
-     * turns clockwise. Staggered starting directions make the four hoovers
-     * sweep the room in visibly different patterns instead of converging on
-     * the same dirt target. */
-    first = hooverModeDir[id] & 3;
-    for (attempt = 0; attempt < 4; attempt++) {
-        WORD dir = (first + attempt) & 3;
-        if (StartRobotMove(id, dirX[dir], dirY[dir])) {
-            hooverModeDir[id] = dir;
-            return;
+    /* Each AI normally holds a straight line. Occasionally bend the line so
+     * the showcase does not look like four clockwork toys, then use a small
+     * amount of look-ahead when a wall, table, or another hoover blocks it. */
+    preferred = hooverModeDir[id] & 3;
+    if (RandRange(HOOVER_RANDOM_TURN_CHANCE) == 0) {
+        preferred = (preferred + 1 + RandRange(3)) & 3;
+    }
+
+    if (StartRobotMove(id, dirX[preferred], dirY[preferred])) {
+        hooverModeDir[id] = preferred;
+        return;
+    }
+
+    /* Score alternatives instead of always turning clockwise. This favours
+     * dirt and open space, penalises immediate backtracking, and explicitly
+     * refuses a tile occupied or already targeted by another hoover. */
+    for (dir = 0; dir < 4; dir++) {
+        WORD nx = robots[id].tileX + dirX[dir];
+        WORD ny = robots[id].tileY + dirY[dir];
+        WORD score = 0;
+        WORD exits = 0;
+        WORD look;
+
+        if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+        if (map[ny][nx] == TILE_TABLE) {
+            WORD pushX = nx + dirX[dir];
+            WORD pushY = ny + dirY[dir];
+            if (pushX <= 0 || pushY <= 0 || pushX >= MAP_W - 1 || pushY >= MAP_H - 1 ||
+                map[pushY][pushX] != TILE_FLOOR || RobotAtTile(pushX, pushY, id)) continue;
+        } else if (!RobotCanPassTile(id, nx, ny)) {
+            continue;
+        }
+        if (RobotAtTile(nx, ny, id)) continue;
+
+        if (map[ny][nx] == TILE_DIRT) score += 20;
+        if (dir == preferred) score += 10;
+        if (dir == ((preferred + 2) & 3)) score -= 12;
+        score -= AiRecentVisitPenalty(id, nx, ny);
+
+        for (look = 0; look < 4; look++) {
+            WORD ex = nx + dirX[look];
+            WORD ey = ny + dirY[look];
+            if (ex < 0 || ey < 0 || ex >= MAP_W || ey >= MAP_H) continue;
+            if (!RobotCanPassTile(id, ex, ey) || RobotAtTile(ex, ey, id)) continue;
+            exits++;
+        }
+        score += exits * 3;
+        score += (WORD)RandRange(6); /* break ties without looking scripted */
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestDir = dir;
         }
     }
-    hooverModeDir[id] = (first + 1) & 3;
+
+    if (bestDir >= 0 && StartRobotMove(id, dirX[bestDir], dirY[bestDir])) {
+        hooverModeDir[id] = bestDir;
+        return;
+    }
+
+    /* Four hoovers can briefly box one another in. A fresh random heading
+     * gives them a chance to separate on the next decision tick. */
+    hooverModeDir[id] = (preferred + 1 + RandRange(3)) & 3;
 }
 
 static void ChooseAiMove(WORD id)
@@ -6190,7 +6344,6 @@ static void StepGame(void)
 {
     WORD i;
     WORD frameTicks = 1;
-    BOOL speedFlashActive = FALSE;
 
     if (gameState == GAME_INTRO) {
         StepIntro();
@@ -6256,7 +6409,6 @@ static void StepGame(void)
     for (i = 0; i < robotCount; i++) {
         StepRobotMovement(i);
         if (speedFlashTicks[i] > 0) speedFlashTicks[i]--;
-        if (speedFlashTicks[i] > 0) speedFlashActive = TRUE;
         if (robots[i].turnTicks > 0) robots[i].turnTicks--;
         if (robots[i].stunTicks > 0) {
             robots[i].stunTicks--;
@@ -6297,7 +6449,6 @@ static void StepGame(void)
             CleanTileForRobot(i, robots[i].tileX, robots[i].tileY);
         }
     }
-    if (speedFlashActive) ForceGameplayFullPresent();
     StepBonusAiFire();
     StepMainGameAiFire();
     StepPlayerBolts();
@@ -8832,6 +8983,7 @@ static void CloseGameScreen(void)
     FreeBonusBossCache();
     FreeBoltCache();
     FreeRobotScaledCache();
+    FreeSpeedTrailCache();
 
     if (robotCacheBM) {
         FreeBitMap(robotCacheBM);
