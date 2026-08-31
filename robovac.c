@@ -694,6 +694,7 @@ static WORD aiDifficultyPendingRivals = 0;
 static WORD aiDifficulty = 1;
 static WORD roundCountdownTicks = 0;
 static WORD roundGoTicks = 0;
+static WORD roundCountdownLastSoundNumber = 0;
 static BOOL roundGoSoundPlayed = FALSE;
 
 static BOOL keyLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
@@ -1174,6 +1175,17 @@ static UWORD RandRange(UWORD n)
     rng = rng * 1103515245UL + 12345UL;
     if (!n) return 0;
     return (UWORD)((rng >> 16) % n);
+}
+
+static void SeedRandom(void)
+{
+    struct DateStamp stamp;
+
+    DateStamp(&stamp);
+    rng ^= ((ULONG)stamp.ds_Days << 16);
+    rng ^= ((ULONG)stamp.ds_Minute << 8);
+    rng ^= (ULONG)stamp.ds_Tick;
+    if (rng == 0) rng = 0x1234ABCDUL;
 }
 
 static WORD AbsW(WORD v)
@@ -2278,11 +2290,8 @@ static void StartRoundCountdownAudio(void)
     StopGameplaySamples();
     StopMenuMusic();
     StopRoundStartSamples();
+    roundCountdownLastSoundNumber = 0;
     PlayGetReadySample();
-    /* countdown.8svx is one complete three-dong 3-2-1 phrase. Start it once
-     * and let it play through; restarting the phrase at every digit was what
-     * made the countdown sound like it was missing/duplicating a dong. */
-    PlayCountdownSample();
 }
 
 static void PlayGetReadySample(void)
@@ -2294,6 +2303,13 @@ static void PlayCountdownSample(void)
 {
     StopCountdownSample();
     PlayOneShotSample(&countdownSample, COUNTDOWN_AUDIO_CHANNEL);
+    /* countdown.8svx is one long dong. Give each number one PAL countdown
+     * step, so the same sample is deliberately struck once for 3, 2, and 1
+     * instead of letting a single sample get clipped at the end of the
+     * countdown. */
+    if (countdownSample.playing && countdownSample.ticksRemaining > ROUND_COUNTDOWN_STEP_FRAMES) {
+        countdownSample.ticksRemaining = ROUND_COUNTDOWN_STEP_FRAMES;
+    }
 }
 
 static void PlayGoSample(void)
@@ -4720,6 +4736,44 @@ static void SetRobotTile(WORD id, WORD tx, WORD ty)
 static void InitRobots(void)
 {
     WORD i;
+    WORD hooverStartX[MAX_ROBOTS];
+    WORD hooverStartY[MAX_ROBOTS];
+
+    for (i = 0; i < MAX_ROBOTS; i++) {
+        hooverStartX[i] = -1;
+        hooverStartY[i] = -1;
+    }
+
+    if (hooverModeActive) {
+        /* Start the showcase spread around the room rather than putting all
+         * of its personality on the four fixed match spawn points. Dirt has
+         * already been laid down, so only genuinely open floor is selected. */
+        for (i = 0; i < 4; i++) {
+            WORD tries;
+            for (tries = 0; tries < 200; tries++) {
+                WORD x = 1 + RandRange(MAP_W - 2);
+                WORD y = 1 + RandRange(MAP_H - 2);
+                WORD j;
+                BOOL used = FALSE;
+
+                if (map[y][x] != TILE_FLOOR) continue;
+                for (j = 0; j < i; j++) {
+                    if (hooverStartX[j] == x && hooverStartY[j] == y) {
+                        used = TRUE;
+                        break;
+                    }
+                }
+                if (used) continue;
+                hooverStartX[i] = x;
+                hooverStartY[i] = y;
+                break;
+            }
+            if (hooverStartX[i] < 0) {
+                hooverStartX[i] = RobotStartX(i);
+                hooverStartY[i] = RobotStartY(i);
+            }
+        }
+    }
 
     robotCount = humanPlayers + aiRivals;
     /* Demo/attract mode deliberately runs with zero human players so every
@@ -4731,14 +4785,17 @@ static void InitRobots(void)
     if (robotCount > MAX_ROBOTS) robotCount = MAX_ROBOTS;
 
     for (i = 0; i < robotCount; i++) {
-        SetRobotTile(i, RobotStartX(i), RobotStartY(i));
-        aiPrevTileX[i] = RobotStartX(i);
-        aiPrevTileY[i] = RobotStartY(i);
+        WORD startX = (hooverModeActive && i < 4) ? hooverStartX[i] : RobotStartX(i);
+        WORD startY = (hooverModeActive && i < 4) ? hooverStartY[i] : RobotStartY(i);
+
+        SetRobotTile(i, startX, startY);
+        aiPrevTileX[i] = startX;
+        aiPrevTileY[i] = startY;
         {
             WORD h;
             for (h = 0; h < AI_RECENT_TILE_COUNT; h++) {
-                aiRecentTileX[i][h] = RobotStartX(i);
-                aiRecentTileY[i][h] = RobotStartY(i);
+                aiRecentTileX[i][h] = startX;
+                aiRecentTileY[i][h] = startY;
             }
         }
         aiTargetDirtX[i] = -1;
@@ -5509,7 +5566,12 @@ static void ChooseHooverModeMove(WORD id)
     /* Keep the showcase running long enough to be useful: when a hoover is
      * low on charge, use the normal shortest path to its dock, then resume
      * its straight sweep once it has refilled. */
-    if (robots[id].battery <= 25) {
+    if (hooverModeActive && robots[id].battery <= 25) {
+        /* D is a cleaning showcase rather than a battery-management game.
+         * Refill between sweeps so the AI cannot strand itself at a dock or
+         * wait forever when another hoover temporarily blocks a path. */
+        robots[id].battery = maxBattery;
+    } else if (robots[id].battery <= 25) {
         WORD dx = 0;
         WORD dy = 0;
         if (AiFindPathStep(id, RobotDockX(id), RobotDockY(id), &dx, &dy, NULL) &&
@@ -6344,6 +6406,7 @@ static void StepGame(void)
 {
     WORD i;
     WORD frameTicks = 1;
+    WORD countdownNumber;
 
     if (gameState == GAME_INTRO) {
         StepIntro();
@@ -6373,6 +6436,12 @@ static void StepGame(void)
     StepRoundStartSamples();
 
     if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+
         if (frameTicks < roundCountdownTicks) {
             roundCountdownTicks -= frameTicks;
             ForceGameplayFullPresent();
@@ -6822,6 +6891,7 @@ static void DrawTitleCarousel(void)
 {
     WORD slot;
     WORD baseFrame;
+    WORD centreSlot = ROBOT_VARIANTS / 2;
     static const WORD slotX[ROBOT_VARIANTS] = {24, 64, 104, 144, 184, 224, 264};
 
     AdvanceTitleCarouselSpin();
@@ -6841,9 +6911,16 @@ static void DrawTitleCarousel(void)
         while (variant < 0) variant += ROBOT_VARIANTS;
         while (variant >= ROBOT_VARIANTS) variant -= ROBOT_VARIANTS;
 
-        if (effectQuality == EFFECT_LOW) {
-            if (slot < (ROBOT_VARIANTS / 2) - 1 || slot > (ROBOT_VARIANTS / 2) + 1) continue;
-            if (slot == (ROBOT_VARIANTS / 2)) {
+        if (joyEnabled[0]) {
+            /* Once the physical stick is enabled, leave the neighbouring
+             * hoovers in the already-cached static panel and animate only
+             * the selected one. This keeps J1 selection responsive on an
+             * 68020/030 while retaining the full phase rate. */
+            if (slot != centreSlot) continue;
+            DrawCachedTitleRobotSpinFrame(variant, baseFrame, x, y);
+        } else if (effectQuality == EFFECT_LOW) {
+            if (slot < centreSlot - 1 || slot > centreSlot + 1) continue;
+            if (slot == centreSlot) {
                 DrawCachedTitleRobotSpinFrame(variant, baseFrame, x, y);
             } else {
                 DrawTitleRobotStatic(variant, SPR_READY, x, y);
@@ -9030,6 +9107,7 @@ static void CloseGameScreen(void)
 int main(void)
 {
     printf("RoboVac Rescue smooth AI prototype starting...\n");
+    SeedRandom();
 
     if (!OpenGameScreen()) {
         return 20;
