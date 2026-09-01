@@ -55,6 +55,14 @@ The Dust Viper's speed effect leaves a short cached blitter motion trail behind 
 
 The HUD shows each robot's current clean-streak count, flashes `P` while a timed power is active, and announces each triggered power.
 
+## Dirt Storm
+
+Once per round, as the room is about to be fully cleaned, there's a chance a runaway broken hoover zips in from the left wall and sweeps across a row, scattering fresh dirt behind it (ignoring walls, tables, and docks - it just flies straight through). It does this three times, on three different random rows, each with a short pause in between, giving a round extra life instead of ending it early. Hit it with an energy bolt at any point and the whole event stops dead, worth 2 bonus points.
+
+## Big Head Mode
+
+Press `G` at any time during play to toggle every robot to double size, purely for laughs - it's the same visual effect as the Neon Nibbler's quad-ghost power, just switched on permanently for everyone until you press `G` again. It has no effect on collisions, cleaning radius, or anything else gameplay-related.
+
 ## Match Structure
 
 - A solo match (no AI rivals) is 5 rounds. Every robot on the field beyond a 2-robot match adds 2 more rounds: 2 robots (e.g. 2 players, or 1 player + 1 AI rival) play 6 rounds, 3 play 8, 4 play 10, and so on.

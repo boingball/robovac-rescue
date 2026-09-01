@@ -120,6 +120,18 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define SPEED_TRAIL_H           24
 #define HOOVER_RANDOM_TURN_CHANCE 8
 #define BONUS_SCORE_THRESHOLD    50
+
+/* Dirt Storm: a runaway "broken" hoover that zips across a row, ignoring
+ * walls/tables, scattering fresh dirt as it goes. Fires once per round,
+ * just as the room is about to be fully cleaned, to stretch play out a
+ * little - shooting it with a bolt cancels the whole event. */
+#define DIRT_STORM_SPEED             (8 * FP_ONE)
+#define DIRT_STORM_PASSES            3
+#define DIRT_STORM_GAP_TICKS         30
+#define DIRT_STORM_TRIGGER_DIRT_LEFT 5
+#define DIRT_STORM_TRIGGER_CHANCE_PCT 50
+#define DIRT_STORM_DROP_CHANCE_PCT   65
+#define DIRT_STORM_STOP_POINTS       5
 #define BONUS_BOSS_MAX_HEALTH    50
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
@@ -222,6 +234,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_C       0x33
 #define RAW_V       0x34
 #define RAW_D       0x22
+#define RAW_G       0x24
 
 /* Attract/demo mode: idles on the title screen this long with no input
  * before it kicks in on its own (D also starts it immediately). */
@@ -482,6 +495,11 @@ static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 static BOOL hooverModeActive = FALSE;
+/* Hidden Big Head mode (toggle with G): purely a visual gag, drawn via the
+ * same 2x scaled sprite/dirty-rect path already used for the Quad powerup.
+ * It must never touch the POWER_QUAD gameplay checks (wall-phasing, area
+ * cleaning) - only where a robot's sprite is drawn or dirty-rect-sized. */
+static BOOL bigHeadMode = FALSE;
 static WORD hooverModeDir[MAX_ROBOTS];
 static WORD speedFlashTicks[MAX_ROBOTS];
 static UWORD *audioSilenceWord = NULL;
@@ -591,6 +609,14 @@ static struct DirtPos dirtList[MAP_W * MAP_H];
 static WORD dirtListCount = 0;
 static BOOL dirtListValid = FALSE;
 static WORD dirtLeft = 0;
+static BOOL dirtStormActive = FALSE;
+static BOOL dirtStormTriggeredThisRound = FALSE;
+static LONG dirtStormPx = 0;
+static WORD dirtStormTileY = 0;
+static WORD dirtStormLastDropTileX = 0;
+static WORD dirtStormPassesLeft = 0;
+static WORD dirtStormGapTicks = 0;
+static UBYTE dirtStormVariant = 0;
 static WORD moves = 0;
 static WORD maxBattery = 110;
 static WORD batteryCostPerMove = 1;
@@ -974,6 +1000,10 @@ static WORD RoundDirtTarget(WORD round)
 }
 static void StepPlayerBolts(void);
 static void StepBossBolts(void);
+static void MaybeStartDirtStorm(void);
+static void StepDirtStorm(void);
+static void StopDirtStorm(WORD stopperId);
+static void DrawDirtStorm(void);
 static void StepBonusAiFire(void);
 static void StepMainGameAiFire(void);
 static BOOL ActivateSpaceOrFireAction(void);
@@ -1310,7 +1340,7 @@ static BOOL RobotNeedsCurrentDirtyRect(WORD id)
     if (!dirtyPrevRobotValid[id]) return TRUE;
     if (robots[id].px != dirtyPrevRobotPx[id] || robots[id].py != dirtyPrevRobotPy[id]) return TRUE;
 
-    quadActive = (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) ? 1 : 0;
+    quadActive = (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) ? 1 : 0;
     if (robots[id].spriteIndex != dirtyPrevRobotSpriteIndex[id]) return TRUE;
     if (robots[id].prevSpriteIndex != dirtyPrevRobotPrevSpriteIndex[id]) return TRUE;
     if (robots[id].powerType != dirtyPrevRobotPowerType[id]) return TRUE;
@@ -1342,7 +1372,7 @@ static void StoreDirtyRobotVisualState(WORD id)
     dirtyPrevRobotBattery[id] = robots[id].battery;
     dirtyPrevRobotTurnTicks[id] = robots[id].turnTicks;
     dirtyPrevRobotTurnDirection[id] = robots[id].turnDirection;
-    dirtyPrevRobotQuadActive[id] = (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) ? 1 : 0;
+    dirtyPrevRobotQuadActive[id] = (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) ? 1 : 0;
     dirtyPrevRobotTileUnder[id] = DirtyRobotTileUnder(id);
     dirtyPrevRobotSpeedFlashTicks[id] = speedFlashTicks[id];
 }
@@ -1520,6 +1550,7 @@ static BOOL RobotDirtyBoundsUseQuad(WORD id)
 {
     if (id < 0 || id >= robotCount) return FALSE;
 
+    if (bigHeadMode) return TRUE;
     if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) return TRUE;
 
     if (dirtyPrevRobotValid[id] &&
@@ -4557,14 +4588,14 @@ static void DrawRobotBob(WORD id)
     DrawSpeedMotionBlur(id, sx, sy);
 
     SetAPen(&renderRP, 6);
-    if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+    if (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
         RectFill(&renderRP, sx, sy + 21, sx + 23, sy + 24);
     } else {
         RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
     }
 
     if (robotCacheBM && robotMaskBM && robotMaskBM->Planes[0]) {
-        if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+        if (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
             DrawRobotBobScaled2(srcX, sx, sy);
         } else if (robots[id].turnTicks > 0 && robots[id].prevSpriteIndex != robots[id].spriteIndex) {
             WORD turnSrcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].prevSpriteIndex) * ROBOT_W;
@@ -4907,6 +4938,7 @@ static WORD CleanTileForRobot(WORD id, WORD tx, WORD ty)
     RemoveDirtListTile(tx, ty);
     robots[id].score++;
     UpdateRoomTile(tx, ty);
+    MaybeStartDirtStorm();
     return 1;
 }
 
@@ -5093,6 +5125,118 @@ static void SpawnRoundDirt(WORD count)
     }
 }
 
+static void DirtStormBeginPass(void)
+{
+    dirtStormTileY = 1 + RandRange(MAP_H - 2);
+    /* Start a tile width off the left wall so it visibly flies in rather
+     * than popping into existence. */
+    dirtStormPx = -(LONG)(TILE_SIZE * FP_ONE);
+    dirtStormLastDropTileX = -999;
+    dirtStormVariant = (UBYTE)RandRange(ROBOT_VARIANTS);
+    dirtStormActive = TRUE;
+}
+
+static void MaybeStartDirtStorm(void)
+{
+    if (gameState != GAME_PLAYING) return;
+    if (demoModeActive || hooverModeActive) return;
+    if (dirtStormTriggeredThisRound) return;
+    if (dirtStormActive || dirtStormPassesLeft > 0) return;
+    /* Fire while there's still a healthy few tiles left, not right on the
+     * final one - the storm's first dirt only lands a couple of frames
+     * after this, so triggering here keeps CheckEndState from ending the
+     * round on dirtLeft hitting 0 before the storm can refill it. */
+    if (dirtLeft <= 0 || dirtLeft > DIRT_STORM_TRIGGER_DIRT_LEFT) return;
+
+    /* Only roll once per round either way, so a round that doesn't get the
+     * storm this time won't keep re-rolling on every tile cleaned after. */
+    dirtStormTriggeredThisRound = TRUE;
+    if ((WORD)RandRange(100) >= DIRT_STORM_TRIGGER_CHANCE_PCT) return;
+
+    dirtStormPassesLeft = DIRT_STORM_PASSES;
+    dirtStormGapTicks = 0;
+    DirtStormBeginPass();
+}
+
+static void StepDirtStorm(void)
+{
+    WORD tx;
+
+    if (gameState != GAME_PLAYING) return;
+
+    if (!dirtStormActive) {
+        if (dirtStormGapTicks > 0) {
+            dirtStormGapTicks--;
+            if (dirtStormGapTicks <= 0 && dirtStormPassesLeft > 0) DirtStormBeginPass();
+        }
+        return;
+    }
+
+    dirtStormPx += DIRT_STORM_SPEED;
+    tx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
+
+    if (tx != dirtStormLastDropTileX) {
+        dirtStormLastDropTileX = tx;
+        if (tx >= 0 && tx < MAP_W &&
+            ValidDirtTile(tx, dirtStormTileY) &&
+            !RobotAtTile(tx, dirtStormTileY, -1) &&
+            (WORD)RandRange(100) < DIRT_STORM_DROP_CHANCE_PCT) {
+            map[dirtStormTileY][tx] = TILE_DIRT;
+            AddDirtListTile(tx, dirtStormTileY);
+            UpdateRoomTile(tx, dirtStormTileY);
+        }
+    }
+
+    if (tx >= MAP_W) {
+        dirtStormActive = FALSE;
+        dirtStormPassesLeft--;
+        if (dirtStormPassesLeft > 0) dirtStormGapTicks = DIRT_STORM_GAP_TICKS;
+        return;
+    }
+
+    /* Hand-rolling dirty rects for a sprite that crosses the whole room
+     * every second or so isn't worth the risk of getting it wrong - force
+     * a full redraw for the storm's brief lifetime instead, the same way
+     * the round countdown does. */
+    ForceGameplayFullPresent();
+}
+
+static void StopDirtStorm(WORD stopperId)
+{
+    if (!dirtStormActive) return;
+    dirtStormActive = FALSE;
+    dirtStormPassesLeft = 0;
+    dirtStormGapTicks = 0;
+    ForceGameplayFullPresent();
+
+    if (stopperId >= 0 && stopperId < robotCount) {
+        robots[stopperId].score += DIRT_STORM_STOP_POINTS;
+        totalScores[stopperId] += DIRT_STORM_STOP_POINTS;
+        snprintf(lastPowerText, sizeof(lastPowerText), "%s STOPPED THE SWEEPER +%d", RobotTag(stopperId), DIRT_STORM_STOP_POINTS);
+        lastPowerTicks = 80;
+    }
+}
+
+static void DrawDirtStorm(void)
+{
+    WORD sx;
+    WORD sy;
+    WORD srcX;
+
+    if (!dirtStormActive) return;
+    if (!robotCacheBM || !robotMaskBM || !robotMaskBM->Planes[0]) return;
+
+    sx = MAP_X + FP_TO_INT(dirtStormPx);
+    sy = MAP_Y + (dirtStormTileY * TILE_SIZE);
+    srcX = (dirtStormVariant * SPR_STATE_COUNT + SPR_LOW_BATTERY) * ROBOT_W;
+
+    BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
+                          &renderRP, sx, sy,
+                          ROBOT_W, ROBOT_H,
+                          (ABC | ABNC | ANBC),
+                          robotMaskBM->Planes[0]);
+}
+
 static void ResetLevel(void)
 {
     WORD x, y;
@@ -5145,6 +5289,10 @@ static void ResetLevel(void)
     ResetGameplaySpeedFrameCounter();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
+    dirtStormActive = FALSE;
+    dirtStormTriggeredThisRound = FALSE;
+    dirtStormPassesLeft = 0;
+    dirtStormGapTicks = 0;
     gameState = GAME_PLAYING;
     ClosePauseMenu();
 
@@ -6599,6 +6747,7 @@ static void StepGame(void)
     }
     StepBonusAiFire();
     StepMainGameAiFire();
+    StepDirtStorm();
     StepPlayerBolts();
     StepBossBolts();
     if (bonusBossExplosionTicks > 0) bonusBossExplosionTicks--;
@@ -7736,6 +7885,7 @@ static void DrawFrame(void)
     DrawBossBolts();
     DrawBossExplosion();
     DrawBonusBoss();
+    DrawDirtStorm();
     DrawRoundStartOverlay();
     DrawEmpRobotVisuals();
 
@@ -8346,6 +8496,15 @@ static void StepPlayerBolt(WORD ownerId)
 
     if (gameState == GAME_BONUS_PLAYING) return;
 
+    if (dirtStormActive) {
+        WORD stormTx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
+        if (AbsW(stormTx - tx) + AbsW(dirtStormTileY - ty) <= 1) {
+            StopDirtStorm(ownerId);
+            bolt->active = FALSE;
+            return;
+        }
+    }
+
     for (i = 0; i < robotCount; i++) {
         if (i == ownerId) continue;
         if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
@@ -8574,6 +8733,18 @@ static void HandleRawKey(UWORD rawCode)
 
     if (!keyUpEvent && code == RAW_Q && (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING)) {
         OpenPauseMenu();
+        return;
+    }
+
+    /* Hidden Big Head mode: a purely cosmetic toggle, works any time during
+     * play. `B` was already taken by Player 1's fire, so this rides `G`. */
+    if (!keyUpEvent && code == RAW_G) {
+        bigHeadMode = !bigHeadMode;
+        if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+            ForceGameplayFullPresent();
+            snprintf(lastPowerText, sizeof(lastPowerText), "BIG MODE %s", bigHeadMode ? "ON" : "OFF");
+            lastPowerTicks = 80;
+        }
         return;
     }
 
