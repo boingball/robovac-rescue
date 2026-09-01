@@ -186,7 +186,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TILE_MARKER    7
 #define TILE_COUNT     8
 #define WALL_ROTATION_COUNT 4
-#define TILE_CACHE_COUNT (TILE_COUNT + WALL_ROTATION_COUNT)
+#define FLOOR_ROTATION_COUNT 4
+#define TILE_CACHE_COUNT (TILE_COUNT + WALL_ROTATION_COUNT + FLOOR_ROTATION_COUNT)
 
 #define GAME_INTRO      0
 #define GAME_TITLE      1
@@ -709,6 +710,8 @@ static BOOL joyFirePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL pauseJoyUpPrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL pauseJoyDownPrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -2998,6 +3001,54 @@ static void BuildWallRotationsInCache(void)
     }
 }
 
+/* The floor art is a single repeating texture, which looks visibly tiled
+ * across a whole room. Pre-rotate it into the same four orientations used
+ * for walls above, then BlitTileTo picks a rotation per tile from its map
+ * position so the floor reads as a varied pattern instead of one texture
+ * stamped identically everywhere. */
+static void BuildFloorRotationsInCache(void)
+{
+    WORD srcBaseX = TILE_FLOOR * TILE_SIZE;
+    UBYTE rot;
+
+    for (rot = 0; rot < FLOOR_ROTATION_COUNT; rot++) {
+        WORD dstBaseX = (TILE_COUNT + WALL_ROTATION_COUNT + rot) * TILE_SIZE;
+        WORD x;
+        WORD y;
+
+        if (rot == 0) {
+            BltBitMap(tileCacheBM, srcBaseX, 0,
+                      tileCacheBM, dstBaseX, 0,
+                      TILE_SIZE, TILE_SIZE,
+                      0xC0, 0xFF, NULL);
+            continue;
+        }
+
+        for (y = 0; y < TILE_SIZE; y++) {
+            for (x = 0; x < TILE_SIZE; x++) {
+                WORD sx;
+                WORD sy;
+                LONG pen;
+
+                if (rot == 1) {
+                    sx = y;
+                    sy = TILE_SIZE - 1 - x;
+                } else if (rot == 2) {
+                    sx = TILE_SIZE - 1 - x;
+                    sy = TILE_SIZE - 1 - y;
+                } else {
+                    sx = TILE_SIZE - 1 - y;
+                    sy = x;
+                }
+
+                pen = ReadPixel(&tileRP, srcBaseX + sx, sy);
+                SetAPen(&tileRP, (UBYTE)pen);
+                WritePixel(&tileRP, dstBaseX + x, y);
+            }
+        }
+    }
+}
+
 static BOOL InitTileCache(void)
 {
     UBYTE i;
@@ -3018,6 +3069,7 @@ static BOOL InitTileCache(void)
     }
 
     BuildWallRotationsInCache();
+    BuildFloorRotationsInCache();
 
     return TRUE;
 }
@@ -3031,7 +3083,16 @@ static void BlitTileTo(struct RastPort *rp, UBYTE tileType, WORD tx, WORD ty)
     if (!tileCacheBM) return;
     if (tileType >= TILE_COUNT) tileType = TILE_FLOOR;
 
-    srcX = tileType * TILE_SIZE;
+    if (tileType == TILE_FLOOR) {
+        /* Deterministic per-tile pick (not per-frame random) so a cleaned
+         * tile's texture doesn't flicker between orientations on redraw -
+         * a simple checkerboard-ish mix of the coordinates spreads the four
+         * rotations out so no obvious repeating grid remains. */
+        UBYTE rot = (UBYTE)(((tx * 3) + (ty * 7)) & (FLOOR_ROTATION_COUNT - 1));
+        srcX = (TILE_COUNT + WALL_ROTATION_COUNT + rot) * TILE_SIZE;
+    } else {
+        srcX = tileType * TILE_SIZE;
+    }
     dstX = MAP_X + tx * TILE_SIZE;
     dstY = MAP_Y + ty * TILE_SIZE;
 
@@ -5057,10 +5118,18 @@ static void ResetLevel(void)
         }
     }
 
-    map[1][1] = TILE_DOCK;
-    map[1][18] = TILE_DOCK;
-    map[11][1] = TILE_DOCK;
-    map[11][18] = TILE_DOCK;
+    {
+        /* Every robot that will actually spawn needs its own dock tile, not
+         * just the first four - the secret 9-rival mode (O) silently left
+         * robots 5-10 with no reachable TILE_DOCK, so they could never
+         * recharge once InitRobots placed them at RobotStartX/Y below. */
+        WORD dockCount = humanPlayers + aiRivals;
+        WORD di;
+        if (dockCount > MAX_ROBOTS) dockCount = MAX_ROBOTS;
+        for (di = 0; di < dockCount; di++) {
+            map[RobotDockY(di)][RobotDockX(di)] = TILE_DOCK;
+        }
+    }
 
     ClearDirtList();
     SpawnRoundDirt(RoundDirtTarget(roundIndex));
@@ -6912,12 +6981,18 @@ static void DrawTitleCarousel(void)
         while (variant >= ROBOT_VARIANTS) variant -= ROBOT_VARIANTS;
 
         if (joyEnabled[0]) {
-            /* Once the physical stick is enabled, leave the neighbouring
-             * hoovers in the already-cached static panel and animate only
-             * the selected one. This keeps J1 selection responsive on an
-             * 68020/030 while retaining the full phase rate. */
-            if (slot != centreSlot) continue;
-            DrawCachedTitleRobotSpinFrame(variant, baseFrame, x, y);
+            /* Once the physical stick is enabled, keep the neighbouring
+             * hoovers visible but stop animating them and spin only the
+             * selected one. The static panel cache only holds the empty
+             * slot frames, not the robot sprites, so the neighbours must
+             * still be drawn here (as a static pose) or they simply vanish.
+             * This keeps J1 selection responsive on an 68020/030 while
+             * retaining the full phase rate for the selected hoover. */
+            if (slot == centreSlot) {
+                DrawCachedTitleRobotSpinFrame(variant, baseFrame, x, y);
+            } else {
+                DrawTitleRobotStatic(variant, SPR_READY, x, y);
+            }
         } else if (effectQuality == EFFECT_LOW) {
             if (slot < centreSlot - 1 || slot > centreSlot + 1) continue;
             if (slot == centreSlot) {
@@ -7803,11 +7878,20 @@ static void ClearMovementKeys(void)
 
 static void OpenPauseMenu(void)
 {
+    WORD i;
+
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     pauseMenuOpen = TRUE;
     pauseMenuSelection = 0;
     ForceGameplayFullPresent();
     ClearMovementKeys();
+    /* Treat whatever direction a stick already happens to be held in as
+     * already consumed, so opening the pause menu with the stick pushed
+     * (e.g. mid-move) can't immediately toggle the selection by itself. */
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        pauseJoyUpPrev[i] = TRUE;
+        pauseJoyDownPrev[i] = TRUE;
+    }
 }
 
 static void ClosePauseMenu(void)
@@ -8807,6 +8891,37 @@ static void PollJoysticks(void)
         bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
 
         if (gameState == GAME_TITLE && (directionActive || fire || blue)) titleIdleTicks = 0;
+
+        if (gameState == GAME_INTRO) {
+            if (fire || blue) {
+                joyFirePrev[i] = fire;
+                joyBluePrev[i] = blue;
+                EnterTitleScreen();
+                return;
+            }
+            joyFirePrev[i] = fire;
+            joyBluePrev[i] = blue;
+            continue;
+        }
+
+        if (pauseMenuOpen) {
+            BOOL upEdge = up && !pauseJoyUpPrev[i];
+            BOOL downEdge = down && !pauseJoyDownPrev[i];
+            BOOL fireEdge = fire && !joyFirePrev[i];
+
+            pauseJoyUpPrev[i] = up;
+            pauseJoyDownPrev[i] = down;
+            joyFirePrev[i] = fire;
+            joyBluePrev[i] = blue;
+
+            if (upEdge || downEdge) {
+                pauseMenuSelection = 1 - pauseMenuSelection;
+            }
+            if (fireEdge || bluePressed) {
+                ActivatePauseMenuSelection();
+            }
+            continue;
+        }
 
         if (demoModeActive) {
             BOOL newDemoInput;

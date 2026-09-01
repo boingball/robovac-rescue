@@ -27,7 +27,7 @@ Detailed actions:
   - On the title screen, start the match (or lock Player 2 if Player 2 is selecting; locked two-player mode opens the AI rival prompt) with `Space`, the joystick **blue (second) button**, RMB, or by holding fire for about two seconds.
   - At the end of a round, continue to the next round with `Space`, joystick fire, or RMB.
   - At the end of a match, start a new best-of-5 with `Space`, joystick fire, or RMB.
-- Pause: `Q` pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys and `Enter`; `Q` or `Esc` resumes.
+- Pause: `Q` pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
 - `R`:
   - During match: reset current round
 - `1` / `2` / `3`: choose AI rival count from the one-player title screen; choosing at least one AI opens the Easy / Normal / Hard difficulty prompt.
