@@ -6488,19 +6488,29 @@ static void StepGame(void)
         return;
     }
 
+    if (pauseMenuOpen) {
+        /* Suspend any active EMP/night-mode palette dimming while paused,
+         * rather than letting UpdateNightMode/UpdateEmpPaletteCycle keep
+         * cycling it - the pause menu text shares low pens (7/14) with the
+         * dimmed room colours, so an EMP blackout mid-pause otherwise left
+         * the menu unreadable. Neither effect's own countdown ticks down
+         * below, so resuming picks the dim back up exactly where it left
+         * off. */
+        StopEmpPaletteCycle();
+        StopNightMode();
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
     UpdateNightMode();
     /* Apply EMP after any night-mode transition so the EMP room dimming is
      * the final palette state for the frame. */
     UpdateEmpPaletteCycle();
 
     BeginGameplayDirtyRects();
-
-    if (pauseMenuOpen) {
-        ServiceHooverMoveSample();
-        ForceGameplayFullPresent();
-        FinishGameplayDirtyRects();
-        return;
-    }
 
     StepRoundStartSamples();
 
