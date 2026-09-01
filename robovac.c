@@ -5235,6 +5235,21 @@ static void DrawDirtStorm(void)
                           ROBOT_W, ROBOT_H,
                           (ABC | ABNC | ANBC),
                           robotMaskBM->Planes[0]);
+
+    /* All seven hoover variants share the same 16-colour sprite sheet
+     * palette, just with different pens painted in their art, so there's
+     * no free pen to permanently recolour just this one sprite without
+     * risking corrupting art we can't preview on real hardware. Flicker
+     * the same warning pens the stun indicator already uses instead, so
+     * the storm reads as visibly damaged/sparking on top of whichever
+     * variant got picked this pass. */
+    {
+        UBYTE sparkPen = EmpWarningPen();
+        SetAPen(&renderRP, sparkPen);
+        RectFill(&renderRP, sx + 2, sy + 2, sx + 3, sy + 3);
+        RectFill(&renderRP, sx + 12, sy + 6, sx + 13, sy + 7);
+        RectFill(&renderRP, sx + 6, sy + 11, sx + 7, sy + 12);
+    }
 }
 
 static void ResetLevel(void)

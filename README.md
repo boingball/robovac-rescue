@@ -57,7 +57,7 @@ The HUD shows each robot's current clean-streak count, flashes `P` while a timed
 
 ## Dirt Storm
 
-Once per round, as the room is about to be fully cleaned, there's a chance a runaway broken hoover zips in from the left wall and sweeps across a row, scattering fresh dirt behind it (ignoring walls, tables, and docks - it just flies straight through). It does this three times, on three different random rows, each with a short pause in between, giving a round extra life instead of ending it early. Hit it with an energy bolt at any point and the whole event stops dead, worth 2 bonus points.
+Once per round, as the room is about to be fully cleaned, there's a chance a runaway broken hoover zips in from the left wall and sweeps across a row, scattering fresh dirt behind it (ignoring walls, tables, and docks - it just flies straight through). It does this three times, on three different random rows, each with a short pause in between, giving a round extra life instead of ending it early. It flickers with the same warning-coloured sparks as a stunned hoover so it reads as visibly broken next to whichever of the seven normal hoover skins it happens to borrow. Hit it with an energy bolt at any point and the whole event stops dead, worth 2 bonus points.
 
 ## Big Head Mode
 
