@@ -7281,7 +7281,10 @@ static void DrawHud(void)
         snprintf(b, sizeof(b), "ROUND WINNER: %s", RobotName(roundWinner));
         PutText(&renderRP, 14, 10, b, 13);
         DrawRobotHealthStrip();
-        PutText(&renderRP, 62, 30, "Press Space/Fire for next round", 7);
+        /* The health strip's boxes run down to y=29; a baseline of just 30
+         * put this text's ascent right through the bottom row of scores.
+         * Push it down a line so it sits clear underneath. */
+        PutText(&renderRP, 62, 42, "Press Space/Fire for next round", 7);
         return;
     }
 
@@ -7289,7 +7292,7 @@ static void DrawHud(void)
         snprintf(b, sizeof(b), "MATCH WINNER: %s", RobotName(finalWinner));
         PutText(&renderRP, 42, 10, b, 12);
         DrawRobotHealthStrip();
-        PutText(&renderRP, 72, 30, bonusAvailable ? "Space/Fire bonus" : "Space/Fire", 7);
+        PutText(&renderRP, 72, 42, bonusAvailable ? "Space/Fire bonus" : "Space/Fire", 7);
         return;
     }
 
@@ -7436,7 +7439,7 @@ static void DrawAiSelectMenu(void)
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, left, top, right, bottom);
 
-    MiniTextCentered(&renderRP, top + 10, "TWO PLAYER AI", 7, 2);
+    MiniTextCentered(&renderRP, top + 10, (humanPlayers >= 2) ? "TWO PLAYER AI" : "AI RIVALS", 7, 2);
     MiniTextCentered(&renderRP, top + 28, "HOW MANY RIVALS?", 8, 1);
 
     for (i = 0; i < 4; i++) {
@@ -7917,9 +7920,11 @@ static void OpenAiSelectMenu(WORD initialSelection)
     if (gameState != GAME_TITLE) return;
     if (initialSelection < 0) initialSelection = 0;
     if (initialSelection > 3) initialSelection = 3;
-    humanPlayers = 2;
-    titleTwoPlayerArmed = TRUE;
-    titlePlayer2Locked = TRUE;
+    /* Both solo and two-player flows use this same "how many AI" popup;
+     * the two-player call sites (TitleLockPlayer2/StartWithRivals) already
+     * arm humanPlayers/titleTwoPlayerArmed/titlePlayer2Locked before they
+     * get here, so this must not force them - doing so used to hijack a
+     * solo game into two-player mode the moment this opened. */
     titleSelectPlayer = 0;
     aiSelectMenuOpen = TRUE;
     aiSelectMenuSelection = initialSelection;
@@ -7975,7 +7980,7 @@ static void ActivateAiSelectMenu(void)
 {
     WORD rivals = aiSelectMenuSelection;
     CloseAiSelectMenu();
-    OpenAiDifficultyMenu(2, rivals);
+    OpenAiDifficultyMenu(humanPlayers, rivals);
 }
 
 static BOOL HandleAiDifficultyMenuRawKey(UWORD code, BOOL keyUpEvent)
@@ -8525,8 +8530,13 @@ static BOOL ActivateSpaceOrFireAction(void)
     if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); return TRUE; }
     if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
-    if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(aiRivals); return TRUE; }
-    if (gameState == GAME_TITLE) { OpenAiDifficultyMenu(humanPlayers, aiRivals); return TRUE; }
+    /* Solo confirms land here too, not just the two-player flow: previously
+     * this skipped straight to the difficulty popup using whatever aiRivals
+     * happened to be left over (default 1), so a joystick-only player who
+     * had no way to type "1"/"2"/"3"/"O" first could never actually choose
+     * a rival count - they always got 1 AI. Show the same "how many rivals"
+     * popup two-player mode gets instead. */
+    if (gameState == GAME_TITLE) { OpenAiSelectMenu(aiRivals); return TRUE; }
     return FALSE;
 }
 
@@ -8602,7 +8612,7 @@ static void HandleRawKey(UWORD rawCode)
         if (gameState == GAME_BONUS_PLAYING) { StartBonusRound(); return; }
     }
 
-    if (!keyUpEvent && code == RAW_SPACE) {
+    if (!keyUpEvent && (code == RAW_SPACE || code == RAW_RETURN)) {
         if (ActivateSpaceOrFireAction()) return;
     }
 
