@@ -28,7 +28,7 @@ Detailed actions:
   - At the end of a round, continue to the next round with `Space`/`Enter`, joystick fire, or RMB.
   - At the end of a Robo Party mini-game, continue to the next cleaning round with `Space`/`Enter`, joystick fire, or RMB.
   - At the end of a match, return to the title screen with `Space`/`Enter`, joystick fire, or RMB.
-- Pause: `Q` pauses during a cleaning round, RoboRace, RoboPuck, or bonus battle. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
+- Pause: `Q` pauses during a cleaning round, RoboRace, RoboPuck, Bumper Bots, or bonus battle. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
 - `R`:
   - During a match: reset the current cleaning round, race, or bonus battle.
 - `1` / `2` / `3`: keyboard shortcut that skips the "how many rivals" prompt and jumps straight to the Easy / Normal / Hard difficulty prompt with that many AI rivals, from either the one-player title screen or the two-player AI prompt (where `0` is also available, and starts immediately with no AI).
@@ -67,7 +67,7 @@ Press `G` at any time during play to toggle every robot to double size, purely f
 ## Match Structure
 
 - A solo match (no AI rivals) is 5 rounds. Every robot on the field beyond a 2-robot match adds 2 more rounds: 2 robots (e.g. 2 players, or 1 player + 1 AI rival) play 6 rounds, 3 play 8, 4 play 10, and so on.
-- Robo Party interrupts the match after cleaning rounds 2 and 4, without adding another full cleaning round. RoboRace and RoboPuck alternate without an immediate repeat.
+- Robo Party interrupts the match after cleaning rounds 2 and 4, without adding another full cleaning round. RoboRace, RoboPuck, and Bumper Bots rotate randomly, without an immediate repeat.
 - Each round picks a random room type.
 - Dirt cleaned is scored as points.
 - Hitting another robot with an energy bolt is worth 2 points. A bolted robot cannot be bolted again while stunned, and gets 2 seconds of bolt immunity after the stun ends so it can escape.
@@ -91,13 +91,25 @@ After cleaning rounds 2 and 4, the match switches to a short Robo Party intermis
 
 ## Robo Party: RoboPuck
 
-RoboPuck is a 2D Rocket League-style team game in a clean arena:
+RoboPuck is a goal-scoring team game in a clean arena:
 
 - Odd and even robot slots form two mirrored teams, so it naturally supports 1v1, 2v2, and mixed human/AI teams.
 - Robots remain on the familiar grid while the puck is a masked BOB with smooth fixed-point movement, wall bounces, rolling resistance, and angled rebounds.
 - AI robots approach from behind the puck and drive it toward the opposing goal.
-- The first team to 3 goals wins. Otherwise the team leading after 35 seconds wins; a tie goes to sudden-death overtime.
+- The first team to 3 goals wins. Otherwise the team leading after 3 minutes wins; a tie goes to sudden-death overtime.
 - Every winning-team robot earns 3 match points and every other robot earns 1 point.
+- Whoever last touched the puck before it crosses the line gets their name flashed on the HUD alongside the goal.
+
+## Robo Party: Bumper Bots
+
+Bumper Bots is a free-for-all elimination game on a tiny floor "rug" surrounded by the abyss:
+
+- Every robot spawns spread around a small arena; walking off the edge on your own is blocked, same as any wall.
+- Shoulder-barge a rival by walking into them to shove them one tile back. Fire an energy bolt to knock them back three tiles instead, in whatever direction (including diagonals) it was fired.
+- A robot pushed past the edge of the rug falls off and is eliminated instantly - watch your footing near the border.
+- The match lasts up to 1 minute, or ends the moment only one robot remains standing.
+- Knocking a rival off the rug earns the attacker 5 bonus points immediately, on top of the usual 3/2/1 placement points at the end.
+- The HUD flashes who KO'd whom (or "FELL OFF" for an unassisted tumble) each time a robot is eliminated.
 
 The intro, active mini-game, and result screen use separate game states so more Robo Party games can be added without changing the normal cleaning-round flow.
 
