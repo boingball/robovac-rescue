@@ -127,7 +127,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
  * and leaves a small enum/switch seam for Puck and Dirt Dash later. */
 #define MINIGAME_NONE            0
 #define MINIGAME_RACE            1
-#define MINIGAME_COUNT           1
+#define MINIGAME_PUCK            2
+#define MINIGAME_COUNT           2
 #define MINIGAME_INTRO_TICKS     100
 #define RACE_LAPS                2
 #define RACE_TIME_TICKS          (40 * 50)
@@ -137,12 +138,31 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RACE_BOOST_SPEED         (5 * FP_ONE)
 #define RACE_BOOST_MOVES         8
 #define RACE_BUMP_STUN_TICKS     6
+#define RACE_TURN_TICKS          5
+#define RACE_DRIFT_PIXELS        4
+
+/* RoboPuck keeps the robots on the familiar tile grid, but the puck itself
+ * uses fixed-point, per-frame movement and a masked BOB.  That gives the
+ * little 2D Rocket League intermission smooth motion without adding a
+ * second general-purpose physics engine. */
+#define PUCK_W                    12
+#define PUCK_H                    12
+#define PUCK_TIME_TICKS           (35 * 50)
+#define PUCK_GOALS_TO_WIN         3
+#define PUCK_ROBOT_MOVE_SPEED     (3 * FP_ONE)
+#define PUCK_KICK_SPEED           (6 * FP_ONE)
+#define PUCK_MAX_SPEED            (7 * FP_ONE)
+#define PUCK_HIT_COOLDOWN_TICKS   4
+#define PUCK_GOAL_PAUSE_TICKS     40
+#define PUCK_GOAL_TOP_TILE        4
+#define PUCK_GOAL_BOTTOM_TILE     9
+#define DIRT_CLEAN_BATTERY_COST   1
 
 /* Dirt Storm: a runaway "broken" hoover that zips across a row, ignoring
  * walls/tables, scattering fresh dirt as it goes. Fires once per round,
  * just as the room is about to be fully cleaned, to stretch play out a
  * little - shooting it with a bolt cancels the whole event. */
-#define DIRT_STORM_SPEED             (8 * FP_ONE)
+#define DIRT_STORM_SPEED             (4 * FP_ONE)
 #define DIRT_STORM_PASSES            3
 #define DIRT_STORM_GAP_TICKS         30
 #define DIRT_STORM_TRIGGER_DIRT_LEFT 5
@@ -444,6 +464,9 @@ static struct BitMap *robotScaledMaskBM = NULL;
 static struct RastPort speedTrailRP;
 static struct BitMap *speedTrailBM = NULL;
 static struct BitMap *speedTrailMaskBM = NULL;
+static struct RastPort puckRP;
+static struct BitMap *puckBM = NULL;
+static struct BitMap *puckMaskBM = NULL;
 static struct RastPort titleCarouselRP;
 static struct BitMap *titleCarouselBM = NULL;
 static struct BitMap *titleCarouselMaskBM = NULL;
@@ -646,6 +669,7 @@ static WORD dirtStormLastDropTileX = 0;
 static WORD dirtStormPassesLeft = 0;
 static WORD dirtStormGapTicks = 0;
 static UBYTE dirtStormVariant = 0;
+static WORD dirtStormSpinPhase = 0;
 static WORD moves = 0;
 static WORD maxBattery = 110;
 static WORD batteryCostPerMove = 1;
@@ -735,6 +759,16 @@ static WORD raceNextCheckpoint[MAX_ROBOTS];
 static WORD racePlace[MAX_ROBOTS];
 static WORD raceBoostMoves[MAX_ROBOTS];
 static WORD raceFinishCount = 0;
+static LONG puckPx = 0;
+static LONG puckPy = 0;
+static LONG puckVx = 0;
+static LONG puckVy = 0;
+static WORD puckTicksRemaining = 0;
+static WORD puckTeamScore[2] = {0, 0};
+static WORD puckGoalPauseTicks = 0;
+static WORD puckHitCooldownTicks = 0;
+static WORD puckLastTouch = -1;
+static WORD puckScoringTeam = -1;
 static BOOL bonusAvailable = FALSE;
 static WORD bonusBossHealth = 0;
 static WORD bonusBossX = 0;
@@ -887,6 +921,12 @@ static WORD dirtyPrevRobotCount = -1;
 static WORD dirtyPrevRaceSecond = -1;
 static WORD dirtyPrevRaceLap[MAX_ROBOTS];
 static WORD dirtyPrevRacePlace[MAX_ROBOTS];
+static LONG dirtyPrevPuckPx = 0;
+static LONG dirtyPrevPuckPy = 0;
+static BOOL dirtyPrevPuckValid = FALSE;
+static WORD dirtyPrevPuckSecond = -1;
+static WORD dirtyPrevPuckScore[2] = {-1, -1};
+static WORD dirtyPrevPuckScoringTeam = -2;
 #endif
 
 static ULONG rng = 0x1234ABCD;
@@ -1104,6 +1144,11 @@ static void StepRoboRace(void);
 static void FinishRoboRace(void);
 static void RaceHandleRobotArrival(WORD id);
 static void ChooseRaceAiMove(WORD id);
+static void StartRoboPuck(void);
+static void StepRoboPuck(void);
+static void FinishRoboPuck(void);
+static void ChoosePuckAiMove(WORD id);
+static void RestartCurrentMiniGame(void);
 static BOOL IsArenaPlaying(void);
 static void DrawMiniGameIntroScreen(void);
 static void DrawMiniGameEndScreen(void);
@@ -1191,6 +1236,9 @@ static void UpdateNightMode(void);
 static void StopNightMode(void);
 static BOOL BuildSpeedTrailCache(void);
 static void FreeSpeedTrailCache(void);
+static BOOL BuildPuckCache(void);
+static void FreePuckCache(void);
+static void DrawPuck(void);
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -1714,6 +1762,12 @@ static void AddDirtyBoltAt(LONG px, LONG py)
     AddDirtyRect(MAP_X + FP_TO_INT(px) - 1, MAP_Y + FP_TO_INT(py) - 1, ROBOT_W + 2, ROBOT_H + 2);
 }
 
+static void AddDirtyPuckAt(LONG px, LONG py)
+{
+    AddDirtyRect(MAP_X + FP_TO_INT(px) - 2, MAP_Y + FP_TO_INT(py) - 2,
+                 PUCK_W + 4, PUCK_H + 4);
+}
+
 static void AddDirtyBolt(struct Bolt *bolt)
 {
     if (!bolt || !bolt->active) return;
@@ -1802,9 +1856,14 @@ static void MarkDirtyHudIfChanged(void)
         changed = TRUE;
     }
 
-    if (gameState == GAME_MINIGAME_PLAYING &&
-        dirtyPrevRaceSecond != (raceTicksRemaining / 50)) {
-        changed = TRUE;
+    if (gameState == GAME_MINIGAME_PLAYING) {
+        if (miniGameType == MINIGAME_RACE &&
+            dirtyPrevRaceSecond != (raceTicksRemaining / 50)) changed = TRUE;
+        if (miniGameType == MINIGAME_PUCK &&
+            (dirtyPrevPuckSecond != (puckTicksRemaining / 50) ||
+             dirtyPrevPuckScore[0] != puckTeamScore[0] ||
+             dirtyPrevPuckScore[1] != puckTeamScore[1] ||
+             dirtyPrevPuckScoringTeam != puckScoringTeam)) changed = TRUE;
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -1837,6 +1896,10 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevRobotCount = robotCount;
     dirtyPrevBossHealth = bonusBossHealth;
     dirtyPrevRaceSecond = raceTicksRemaining / 50;
+    dirtyPrevPuckSecond = puckTicksRemaining / 50;
+    dirtyPrevPuckScore[0] = puckTeamScore[0];
+    dirtyPrevPuckScore[1] = puckTeamScore[1];
+    dirtyPrevPuckScoringTeam = puckScoringTeam;
     for (i = 0; i < robotCount; i++) {
         dirtyPrevBattery[i] = robots[i].battery;
         dirtyPrevScore[i] = robots[i].score;
@@ -1894,6 +1957,11 @@ static void BeginGameplayDirtyRects(void)
     MarkDirtyRoundGoOverlay();
     MarkDirtyEmpOverlay();
 
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_PUCK &&
+        dirtyPrevPuckValid) {
+        AddDirtyPuckAt(dirtyPrevPuckPx, dirtyPrevPuckPy);
+    }
+
     for (i = 0; i < robotCount; i++) {
         if (dirtyPrevPlayerBoltActive[i]) AddDirtyBoltAt(dirtyPrevPlayerBoltPx[i], dirtyPrevPlayerBoltPy[i]);
     }
@@ -1920,6 +1988,15 @@ static void FinishGameplayDirtyRects(void)
         StoreDirtyRobotVisualState(i);
     }
     for (i = robotCount; i < MAX_ROBOTS; i++) dirtyPrevRobotValid[i] = FALSE;
+
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_PUCK) {
+        AddDirtyPuckAt(puckPx, puckPy);
+        dirtyPrevPuckPx = puckPx;
+        dirtyPrevPuckPy = puckPy;
+        dirtyPrevPuckValid = TRUE;
+    } else {
+        dirtyPrevPuckValid = FALSE;
+    }
 
     for (i = 0; i < robotCount; i++) {
         AddDirtyBolt(&playerBolts[i]);
@@ -4479,10 +4556,15 @@ static BOOL InitRobotBobs(void)
         printf("Could not allocate speed motion-trail cache; speed power will have no trail\n");
     }
 
+    if (!BuildPuckCache()) {
+        printf("Could not allocate RoboPuck BOB cache; simple puck fallback enabled\n");
+    }
+
     if (!BuildTitleCarouselRotationCache()) {
         FreeBoltCache();
         FreeRobotScaledCache();
         FreeSpeedTrailCache();
+        FreePuckCache();
         FreeBitMap(robotCacheBM);
         FreeBitMap(robotMaskBM);
         robotCacheBM = NULL;
@@ -4651,6 +4733,53 @@ static void FreeSpeedTrailCache(void)
     speedTrailRP.BitMap = NULL;
 }
 
+static BOOL BuildPuckCache(void)
+{
+    struct RastPort maskRP;
+    static const UBYTE rowLeft[PUCK_H] = {4,2,1,0,0,0,0,0,0,1,2,4};
+    static const UBYTE rowRight[PUCK_H] = {7,9,10,11,11,11,11,11,11,10,9,7};
+    WORD y;
+
+    puckBM = AllocBitMap(PUCK_W, PUCK_H, DEPTH,
+                         BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    puckMaskBM = AllocBitMap(PUCK_W, PUCK_H, 1,
+                             BMF_CLEAR | BMF_DISPLAYABLE, scr->RastPort.BitMap);
+    if (!puckBM || !puckMaskBM) {
+        FreePuckCache();
+        return FALSE;
+    }
+
+    InitRastPort(&puckRP);
+    puckRP.BitMap = puckBM;
+    InitRastPort(&maskRP);
+    maskRP.BitMap = puckMaskBM;
+
+    for (y = 0; y < PUCK_H; y++) {
+        SetAPen(&puckRP, (y < 3) ? 14 : 13);
+        RectFill(&puckRP, rowLeft[y], y, rowRight[y], y);
+        SetAPen(&maskRP, 1);
+        RectFill(&maskRP, rowLeft[y], y, rowRight[y], y);
+    }
+    SetAPen(&puckRP, 10);
+    RectFill(&puckRP, 3, 2, 5, 3);
+    SetAPen(&puckRP, 12);
+    RectFill(&puckRP, 4, 8, 8, 9);
+    return TRUE;
+}
+
+static void FreePuckCache(void)
+{
+    if (puckBM) {
+        FreeBitMap(puckBM);
+        puckBM = NULL;
+    }
+    if (puckMaskBM) {
+        FreeBitMap(puckMaskBM);
+        puckMaskBM = NULL;
+    }
+    puckRP.BitMap = NULL;
+}
+
 static void DrawSpeedMotionBlur(WORD id, WORD sx, WORD sy)
 {
     WORD frame;
@@ -4680,26 +4809,52 @@ static void DrawRobotBob(WORD id)
     WORD sx;
     WORD sy;
     WORD srcX;
+    WORD raceTurning;
 
     if (id < 0 || id >= robotCount) return;
 
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py);
     srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].spriteIndex) * ROBOT_W;
+    raceTurning = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_RACE &&
+                   robots[id].turnTicks > 0 &&
+                   robots[id].prevSpriteIndex != robots[id].spriteIndex) ? TRUE : FALSE;
+
+    if (raceTurning) {
+        WORD drift = (robots[id].turnTicks * RACE_DRIFT_PIXELS + RACE_TURN_TICKS - 1) / RACE_TURN_TICKS;
+        switch (robots[id].prevSpriteIndex) {
+            case SPR_LEFT:  sx -= drift; break;
+            case SPR_RIGHT: sx += drift; break;
+            case SPR_UP:    sy -= drift; break;
+            case SPR_DOWN:  sy += drift; break;
+        }
+    }
 
     DrawSpeedMotionBlur(id, sx, sy);
 
-    SetAPen(&renderRP, 6);
-    if (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
-        RectFill(&renderRP, sx, sy + 21, sx + 23, sy + 24);
-    } else {
-        RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
+    /* Big Head is intended to be the original BOB at a clean 2x scale.
+     * The normal ground shadow looked like an accidental line glued to the
+     * bottom of the enlarged sprite, so omit it in this visual-only mode. */
+    if (!bigHeadMode) {
+        SetAPen(&renderRP, 6);
+        if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+            RectFill(&renderRP, sx, sy + 21, sx + 23, sy + 24);
+        } else {
+            RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
+        }
     }
 
     if (robotCacheBM && robotMaskBM && robotMaskBM->Planes[0]) {
         if (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
             DrawRobotBobScaled2(srcX, sx, sy);
-        } else if (robots[id].turnTicks > 0 && robots[id].prevSpriteIndex != robots[id].spriteIndex) {
+        } else if (raceTurning && robots[id].turnTicks > 3) {
+            WORD turnSrcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].prevSpriteIndex) * ROBOT_W;
+            BltMaskBitMapRastPort(robotCacheBM, turnSrcX, 0,
+                                  &renderRP, sx, sy,
+                                  ROBOT_W, ROBOT_H,
+                                  (ABC | ABNC | ANBC),
+                                  robotMaskBM->Planes[0]);
+        } else if (robots[id].turnTicks > 1 && robots[id].prevSpriteIndex != robots[id].spriteIndex) {
             WORD turnSrcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].prevSpriteIndex) * ROBOT_W;
             DrawRobotBobTurn45(turnSrcX, sx, sy, robots[id].turnDirection);
         } else {
@@ -5039,6 +5194,10 @@ static WORD CleanTileForRobot(WORD id, WORD tx, WORD ty)
     map[ty][tx] = TILE_FLOOR;
     RemoveDirtListTile(tx, ty);
     robots[id].score++;
+    if (gameState == GAME_PLAYING && robots[id].battery > 0) {
+        robots[id].battery -= DIRT_CLEAN_BATTERY_COST;
+        if (robots[id].battery < 0) robots[id].battery = 0;
+    }
     UpdateRoomTile(tx, ty);
     MaybeStartDirtStorm();
     return 1;
@@ -5094,7 +5253,8 @@ static void SetRobotMoveSprite(WORD id, UBYTE newSpriteIndex)
     if (oldDir >= 0 && newDir >= 0 && oldDir != newDir) {
         delta = (newDir - oldDir + 4) & 3;
         robots[id].turnDirection = (delta == 3) ? -1 : 1;
-        robots[id].turnTicks = ROBOT_TURN_TICKS;
+        robots[id].turnTicks = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_RACE) ?
+                               RACE_TURN_TICKS : ROBOT_TURN_TICKS;
     } else {
         robots[id].turnTicks = 0;
         robots[id].turnDirection = 1;
@@ -5235,6 +5395,7 @@ static void DirtStormBeginPass(void)
     dirtStormPx = -(LONG)(TILE_SIZE * FP_ONE);
     dirtStormLastDropTileX = -999;
     dirtStormVariant = (UBYTE)RandRange(ROBOT_VARIANTS);
+    dirtStormSpinPhase = 0;
     dirtStormActive = TRUE;
 }
 
@@ -5275,6 +5436,7 @@ static void StepDirtStorm(void)
     }
 
     dirtStormPx += DIRT_STORM_SPEED;
+    dirtStormSpinPhase = (dirtStormSpinPhase + 1) & 15;
     tx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
 
     if (tx != dirtStormLastDropTileX) {
@@ -5289,10 +5451,14 @@ static void StepDirtStorm(void)
         }
     }
 
-    if (tx >= MAP_W) {
+    if (FP_TO_INT(dirtStormPx) >= SCREEN_W) {
         dirtStormActive = FALSE;
         dirtStormPassesLeft--;
         if (dirtStormPassesLeft > 0) dirtStormGapTicks = DIRT_STORM_GAP_TICKS;
+        /* Erase the final off-screen BOB immediately.  Without this forced
+         * present, the last dirty/full frame could remain visible until an
+         * unrelated tile changed and made the hoover appear to hang. */
+        ForceGameplayFullPresent();
         return;
     }
 
@@ -5324,19 +5490,28 @@ static void DrawDirtStorm(void)
     WORD sx;
     WORD sy;
     WORD srcX;
+    WORD spinStep;
+    UBYTE spinState;
+    static const UBYTE spinStates[4] = {SPR_UP, SPR_RIGHT, SPR_DOWN, SPR_LEFT};
 
     if (!dirtStormActive) return;
     if (!robotCacheBM || !robotMaskBM || !robotMaskBM->Planes[0]) return;
 
     sx = MAP_X + FP_TO_INT(dirtStormPx);
     sy = MAP_Y + (dirtStormTileY * TILE_SIZE);
-    srcX = (dirtStormVariant * SPR_STATE_COUNT + SPR_LOW_BATTERY) * ROBOT_W;
+    spinStep = (dirtStormSpinPhase >> 1) & 7;
+    spinState = spinStates[(spinStep >> 1) & 3];
+    srcX = (dirtStormVariant * SPR_STATE_COUNT + spinState) * ROBOT_W;
 
-    BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
-                          &renderRP, sx, sy,
-                          ROBOT_W, ROBOT_H,
-                          (ABC | ABNC | ANBC),
-                          robotMaskBM->Planes[0]);
+    if (spinStep & 1) {
+        DrawRobotBobTurn45(srcX, sx, sy, 1);
+    } else {
+        BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
+                              &renderRP, sx, sy,
+                              ROBOT_W, ROBOT_H,
+                              (ABC | ABNC | ANBC),
+                              robotMaskBM->Planes[0]);
+    }
 
     /* All seven hoover variants share the same 16-colour sprite sheet
      * palette, just with different pens painted in their art, so there's
@@ -5352,6 +5527,31 @@ static void DrawDirtStorm(void)
         RectFill(&renderRP, sx + 12, sy + 6, sx + 13, sy + 7);
         RectFill(&renderRP, sx + 6, sy + 11, sx + 7, sy + 12);
     }
+}
+
+static void DrawPuck(void)
+{
+    WORD sx;
+    WORD sy;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PUCK) return;
+    sx = MAP_X + FP_TO_INT(puckPx);
+    sy = MAP_Y + FP_TO_INT(puckPy);
+
+    if (puckBM && puckMaskBM && puckMaskBM->Planes[0]) {
+        BltMaskBitMapRastPort(puckBM, 0, 0,
+                              &renderRP, sx, sy,
+                              PUCK_W, PUCK_H,
+                              (ABC | ABNC | ANBC),
+                              puckMaskBM->Planes[0]);
+        return;
+    }
+
+    SetAPen(&renderRP, 13);
+    RectFill(&renderRP, sx + 2, sy, sx + 9, sy + 11);
+    RectFill(&renderRP, sx, sy + 3, sx + 11, sy + 8);
+    SetAPen(&renderRP, 14);
+    RectFill(&renderRP, sx + 3, sy + 2, sx + 5, sy + 3);
 }
 
 static void ResetLevel(void)
@@ -5548,6 +5748,102 @@ static void StartRoboRace(void)
     StartRoundCountdownAudio();
 }
 
+static WORD PuckTeamForRobot(WORD id)
+{
+    return id & 1;
+}
+
+static void ResetPuckPosition(void)
+{
+    puckPx = TO_FP((SCREEN_W - PUCK_W) / 2);
+    puckPy = TO_FP(((MAP_H * TILE_SIZE) - PUCK_H) / 2);
+    puckVx = 0;
+    puckVy = 0;
+    puckHitCooldownTicks = 0;
+    puckLastTouch = -1;
+}
+
+static void StartRoboPuck(void)
+{
+    WORD x;
+    WORD y;
+    WORD i;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClearMovementKeys();
+    ClosePauseMenu();
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            if (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) {
+                map[y][x] = TILE_WALL;
+            } else {
+                map[y][x] = TILE_FLOOR;
+            }
+        }
+    }
+
+    /* The marker tiles are open goal mouths, not obstacles.  Team 0 starts
+     * on the left and attacks right; Team 1 mirrors it. */
+    for (y = PUCK_GOAL_TOP_TILE; y <= PUCK_GOAL_BOTTOM_TILE; y++) {
+        map[y][0] = TILE_MARKER;
+        map[y][MAP_W - 1] = TILE_MARKER;
+    }
+
+    ClearDirtList();
+    for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
+    dirtStormActive = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+
+    gameState = GAME_MINIGAME_PLAYING;
+    InitRobots();
+    for (i = 0; i < robotCount; i++) {
+        UBYTE variant = robots[i].spriteVariant;
+        WORD team = PuckTeamForRobot(i);
+        WORD slot = i >> 1;
+        WORD startY = 3 + ((slot * 2) % 9);
+
+        SetRobotTile(i, team == 0 ? 3 : MAP_W - 4, startY);
+        robots[i].spriteVariant = variant;
+        robots[i].battery = maxBattery;
+        robots[i].powerType = POWER_NONE;
+        robots[i].powerMovesLeft = 0;
+        robots[i].stunTicks = 0;
+        robots[i].spriteIndex = team == 0 ? SPR_RIGHT : SPR_LEFT;
+        robots[i].prevSpriteIndex = robots[i].spriteIndex;
+        robots[i].turnTicks = 0;
+        raceBoostMoves[i] = 0;
+        speedFlashTicks[i] = 0;
+        aiPrevTileX[i] = robots[i].tileX;
+        aiPrevTileY[i] = robots[i].tileY;
+    }
+
+    puckTeamScore[0] = 0;
+    puckTeamScore[1] = 0;
+    puckTicksRemaining = PUCK_TIME_TICKS;
+    puckGoalPauseTicks = 0;
+    puckScoringTeam = -1;
+    ResetPuckPosition();
+#if USE_DIRTY_RECTS
+    dirtyPrevPuckValid = FALSE;
+#endif
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
+    roundGoTicks = 0;
+    roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
+    MarkHudStatusTextDirty();
+    BuildRoomBuffer();
+    ForceGameplayFullPresent();
+    StartRoundCountdownAudio();
+}
+
 static BOOL RaceCheckpointReached(WORD id, WORD checkpoint)
 {
     const struct RaceCheckpoint *gate;
@@ -5567,6 +5863,7 @@ static void RaceHandleRobotArrival(WORD id)
 {
     WORD checkpoint;
 
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_RACE) return;
     if (id < 0 || id >= robotCount) return;
 
     if (map[robots[id].tileY][robots[id].tileX] == TILE_DOCK) {
@@ -5613,7 +5910,7 @@ static void FinishRoboRace(void)
     WORD pass;
     static const WORD points[3] = {3, 2, 1};
 
-    if (gameState != GAME_MINIGAME_PLAYING) return;
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_RACE) return;
 
     for (i = 0; i < robotCount; i++) order[i] = i;
     for (pass = 0; pass < robotCount - 1; pass++) {
@@ -5644,7 +5941,7 @@ static BOOL TryRaceBumpRobot(WORD blockedId, WORD dx, WORD dy)
     WORD pushX;
     WORD pushY;
 
-    if (gameState != GAME_MINIGAME_PLAYING) return FALSE;
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_RACE) return FALSE;
     if (blockedId < 0 || blockedId >= robotCount || robots[blockedId].moving) return FALSE;
     if (racePlace[blockedId] >= 0) return FALSE;
 
@@ -5721,7 +6018,7 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
          * blocking, the same way the boss shoves a grazed robot, so a
          * stranded robot can be nudged back toward a dock instead of
          * getting stuck. */
-        if (gameState == GAME_MINIGAME_PLAYING) {
+        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_RACE) {
             if (!TryRaceBumpRobot(blockedId, dx, dy)) return FALSE;
         } else if (gameState != GAME_BONUS_PLAYING ||
                    !TryPushStrandedRobot(blockedId, dx, dy)) {
@@ -5799,8 +6096,10 @@ static void FinishRobotTileMove(WORD id)
     robots[id].moving = FALSE;
 
     if (gameState == GAME_MINIGAME_PLAYING) {
-        if (raceBoostMoves[id] > 0) raceBoostMoves[id]--;
-        RaceHandleRobotArrival(id);
+        if (miniGameType == MINIGAME_RACE) {
+            if (raceBoostMoves[id] > 0) raceBoostMoves[id]--;
+            RaceHandleRobotArrival(id);
+        }
         return;
     }
 
@@ -5853,7 +6152,11 @@ static void StepRobotMovement(WORD id)
     {
         LONG stepSpeed;
         if (gameState == GAME_MINIGAME_PLAYING) {
-            stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
+            if (miniGameType == MINIGAME_RACE) {
+                stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
+            } else {
+                stepSpeed = PUCK_ROBOT_MOVE_SPEED;
+            }
         } else {
             stepSpeed = (robots[id].battery <= 0) ? EMERGENCY_MOVE_SPEED : MOVE_SPEED;
         }
@@ -6192,6 +6495,41 @@ static void ChooseRaceAiMove(WORD id)
     }
 }
 
+static void ChoosePuckAiMove(WORD id)
+{
+    WORD targetX;
+    WORD targetY;
+    WORD dx = 0;
+    WORD dy = 0;
+    WORD team;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PUCK) return;
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0 || puckGoalPauseTicks > 0) return;
+
+    team = PuckTeamForRobot(id);
+    targetX = FP_TO_INT(puckPx + TO_FP(PUCK_W / 2)) / TILE_SIZE;
+    targetY = FP_TO_INT(puckPy + TO_FP(PUCK_H / 2)) / TILE_SIZE;
+
+    /* Approach from behind so the next tile step knocks the puck toward the
+     * opponent's goal instead of merely orbiting it. */
+    targetX += (team == 0) ? -1 : 1;
+    if (targetX < 1) targetX = 1;
+    if (targetX > MAP_W - 2) targetX = MAP_W - 2;
+    if (targetY < 1) targetY = 1;
+    if (targetY > MAP_H - 2) targetY = MAP_H - 2;
+
+    if (AiFindPathStep(id, targetX, targetY, &dx, &dy, NULL) &&
+        (dx != 0 || dy != 0) && StartRobotMove(id, dx, dy)) return;
+
+    /* If already behind the puck, drive straight through it. */
+    dx = (team == 0) ? 1 : -1;
+    if (StartRobotMove(id, dx, 0)) return;
+
+    if (robots[id].tileY < targetY) StartRobotMove(id, 0, 1);
+    else if (robots[id].tileY > targetY) StartRobotMove(id, 0, -1);
+}
+
 static void ChooseHooverModeMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
@@ -6310,7 +6648,8 @@ static void ChooseAiMove(WORD id)
     if (robots[id].stunTicks > 0) return;
 
     if (gameState == GAME_MINIGAME_PLAYING) {
-        ChooseRaceAiMove(id);
+        if (miniGameType == MINIGAME_RACE) ChooseRaceAiMove(id);
+        else if (miniGameType == MINIGAME_PUCK) ChoosePuckAiMove(id);
         return;
     }
 
@@ -7049,12 +7388,229 @@ static void StepIntro(void)
     introTicks++;
 }
 
+static void LimitPuckVelocity(void)
+{
+    if (puckVx > PUCK_MAX_SPEED) puckVx = PUCK_MAX_SPEED;
+    if (puckVx < -PUCK_MAX_SPEED) puckVx = -PUCK_MAX_SPEED;
+    if (puckVy > PUCK_MAX_SPEED) puckVy = PUCK_MAX_SPEED;
+    if (puckVy < -PUCK_MAX_SPEED) puckVy = -PUCK_MAX_SPEED;
+}
+
+static void ScorePuckGoal(WORD team)
+{
+    if (team < 0 || team > 1) return;
+    puckTeamScore[team]++;
+    puckScoringTeam = team;
+    puckGoalPauseTicks = PUCK_GOAL_PAUSE_TICKS;
+    ResetPuckPosition();
+
+    if (puckTeamScore[team] >= PUCK_GOALS_TO_WIN) FinishRoboPuck();
+}
+
+static void StepPuckPhysics(void)
+{
+    WORD x;
+    WORD y;
+    WORD goalTop = PUCK_GOAL_TOP_TILE * TILE_SIZE;
+    WORD goalBottom = (PUCK_GOAL_BOTTOM_TILE + 1) * TILE_SIZE - PUCK_H;
+    WORD minY = TILE_SIZE;
+    WORD maxY = (MAP_H - 1) * TILE_SIZE - PUCK_H;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PUCK) return;
+
+    if (puckGoalPauseTicks > 0) {
+        puckGoalPauseTicks--;
+        if (puckGoalPauseTicks <= 0) puckScoringTeam = -1;
+        return;
+    }
+    if (puckHitCooldownTicks > 0) puckHitCooldownTicks--;
+
+    puckPx += puckVx;
+    puckPy += puckVy;
+    x = FP_TO_INT(puckPx);
+    y = FP_TO_INT(puckPy);
+
+    if (y < minY) {
+        puckPy = TO_FP(minY);
+        puckVy = -puckVy;
+    } else if (y > maxY) {
+        puckPy = TO_FP(maxY);
+        puckVy = -puckVy;
+    }
+
+    x = FP_TO_INT(puckPx);
+    y = FP_TO_INT(puckPy);
+    if (y >= goalTop && y <= goalBottom) {
+        if (x <= 0) {
+            ScorePuckGoal(1);
+            return;
+        }
+        if (x >= SCREEN_W - PUCK_W) {
+            ScorePuckGoal(0);
+            return;
+        }
+    } else {
+        WORD minX = TILE_SIZE;
+        WORD maxX = SCREEN_W - TILE_SIZE - PUCK_W;
+        if (x < minX) {
+            puckPx = TO_FP(minX);
+            puckVx = -puckVx;
+        } else if (x > maxX) {
+            puckPx = TO_FP(maxX);
+            puckVx = -puckVx;
+        }
+    }
+
+    if (puckHitCooldownTicks <= 0) {
+        x = FP_TO_INT(puckPx);
+        y = FP_TO_INT(puckPy);
+        for (i = 0; i < robotCount; i++) {
+            WORD rx = FP_TO_INT(robots[i].px);
+            WORD ry = FP_TO_INT(robots[i].py);
+            WORD dirX = 0;
+            WORD dirY = 0;
+            WORD puckCenterX;
+            WORD puckCenterY;
+            WORD robotCenterX;
+            WORD robotCenterY;
+
+            if (!RectsOverlap(x, y, PUCK_W, PUCK_H, rx, ry, ROBOT_W, ROBOT_H)) continue;
+            switch (robots[i].spriteIndex) {
+                case SPR_LEFT:  dirX = -1; break;
+                case SPR_RIGHT: dirX = 1; break;
+                case SPR_UP:    dirY = -1; break;
+                case SPR_DOWN:  dirY = 1; break;
+                default: dirX = (PuckTeamForRobot(i) == 0) ? 1 : -1; break;
+            }
+
+            puckCenterX = x + PUCK_W / 2;
+            puckCenterY = y + PUCK_H / 2;
+            robotCenterX = rx + ROBOT_W / 2;
+            robotCenterY = ry + ROBOT_H / 2;
+            puckVx = dirX * PUCK_KICK_SPEED;
+            puckVy = dirY * PUCK_KICK_SPEED;
+            if (dirX != 0) puckVy += (puckCenterY - robotCenterY) * (FP_ONE / 3);
+            if (dirY != 0) puckVx += (puckCenterX - robotCenterX) * (FP_ONE / 3);
+            LimitPuckVelocity();
+            puckPx += dirX * TO_FP(3);
+            puckPy += dirY * TO_FP(3);
+            puckHitCooldownTicks = PUCK_HIT_COOLDOWN_TICKS;
+            puckLastTouch = i;
+            break;
+        }
+    }
+
+    /* Gentle rolling resistance lets a loose puck settle without making a
+     * clean shot die before it reaches the far goal. */
+    puckVx = (puckVx * 250L) / 256L;
+    puckVy = (puckVy * 250L) / 256L;
+    if (puckVx > -16 && puckVx < 16) puckVx = 0;
+    if (puckVy > -16 && puckVy < 16) puckVy = 0;
+}
+
+static void FinishRoboPuck(void)
+{
+    WORD winningTeam;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PUCK) return;
+    winningTeam = (puckTeamScore[1] > puckTeamScore[0]) ? 1 : 0;
+    miniGameWinner = -1;
+    for (i = 0; i < robotCount; i++) {
+        WORD points = (PuckTeamForRobot(i) == winningTeam) ? 3 : 1;
+        miniGamePoints[i] = points;
+        totalScores[i] += points;
+        if (miniGameWinner < 0 && PuckTeamForRobot(i) == winningTeam) miniGameWinner = i;
+    }
+    if (miniGameWinner < 0) miniGameWinner = 0;
+
+    ClearMovementKeys();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    gameState = GAME_MINIGAME_END;
+    ForceGameplayFullPresent();
+}
+
+static void StepRoboPuck(void)
+{
+    WORD i;
+    WORD countdownNumber;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PUCK) return;
+
+    if (pauseMenuOpen) {
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    BeginGameplayDirtyRects();
+    StepRoundStartSamples();
+    if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+        roundCountdownTicks--;
+        ForceGameplayFullPresent();
+        if (roundCountdownTicks > 0) {
+            FinishGameplayDirtyRects();
+            return;
+        }
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
+        }
+        StartMainGameMusic();
+    }
+    if (roundGoTicks > 0) roundGoTicks--;
+
+    if (puckGoalPauseTicks <= 0 && puckTicksRemaining > 0) puckTicksRemaining--;
+    StepPuckPhysics();
+    if (gameState != GAME_MINIGAME_PLAYING) {
+        FinishGameplayDirtyRects();
+        return;
+    }
+    if (puckTicksRemaining <= 0 && puckTeamScore[0] != puckTeamScore[1]) {
+        FinishRoboPuck();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        StepRobotMovement(i);
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
+    }
+    for (i = 0; i < humanPlayers; i++) ChoosePlayerMove(i);
+    for (i = humanPlayers; i < robotCount; i++) ChoosePuckAiMove(i);
+
+    ServiceHooverMoveSample();
+    FinishGameplayDirtyRects();
+}
+
+static void RestartCurrentMiniGame(void)
+{
+    if (miniGameType == MINIGAME_PUCK) StartRoboPuck();
+    else StartRoboRace();
+}
+
 static void StepRoboRace(void)
 {
     WORD i;
     WORD countdownNumber;
 
-    if (gameState != GAME_MINIGAME_PLAYING) return;
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_RACE) return;
 
     if (pauseMenuOpen) {
         BeginGameplayDirtyRects();
@@ -7137,13 +7693,14 @@ static void StepGame(void)
     if (gameState == GAME_MINIGAME_INTRO) {
         if (miniGameIntroTicks > 0) miniGameIntroTicks--;
         if (miniGameIntroTicks <= 0) {
-            if (miniGameType == MINIGAME_RACE) StartRoboRace();
+            RestartCurrentMiniGame();
         }
         return;
     }
 
     if (gameState == GAME_MINIGAME_PLAYING) {
-        StepRoboRace();
+        if (miniGameType == MINIGAME_PUCK) StepRoboPuck();
+        else StepRoboRace();
         return;
     }
 
@@ -7211,6 +7768,11 @@ static void StepGame(void)
         }
     }
 
+    /* Dirt Storm is a display-rate effect.  Advancing its fixed-point BOB
+     * before the optional gameplay-speed skip keeps the fly-by smooth at
+     * PAL 50 Hz even when normal movement runs at the default 33 Hz. */
+    if (gameState == GAME_PLAYING) StepDirtStorm();
+
     if (!ShouldAdvanceGameplayFrame()) {
         ServiceHooverMoveSample();
         FinishGameplayDirtyRects();
@@ -7264,7 +7826,6 @@ static void StepGame(void)
     }
     StepBonusAiFire();
     StepMainGameAiFire();
-    StepDirtStorm();
     StepPlayerBolts();
     StepBossBolts();
     if (bonusBossExplosionTicks > 0) bonusBossExplosionTicks--;
@@ -7707,7 +8268,7 @@ static void DrawRobotHealthStrip(void)
         } else if (robots[i].cleanStreak > 0) {
             char streakText[8];
             snprintf(streakText, sizeof(streakText), "%d/%d", robots[i].cleanStreak, robots[i].powerCleanTarget);
-            MiniText(&renderRP, x + 2, 26, streakText, 7);
+            MiniText(&renderRP, x + 2, 26, streakText, 14);
         }
 
         SetAPen(&renderRP, 1);
@@ -7881,10 +8442,17 @@ static void DrawMiniGameIntroScreen(void)
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
     MiniTextCentered(&renderRP, 24, "ROBO PARTY", 14, 4);
-    MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
-    MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
-    MiniTextCentered(&renderRP, 112, "BUMP RIVALS  PASS EVERY GATE", 13, 1);
-    MiniTextCentered(&renderRP, 126, "BONUS POINTS  3  2  1", 14, 1);
+    if (miniGameType == MINIGAME_PUCK) {
+        MiniTextCentered(&renderRP, 66, "ROBOPUCK", 10, 3);
+        MiniTextCentered(&renderRP, 96, "2D ROCKET LEAGUE", 7, 2);
+        MiniTextCentered(&renderRP, 112, "BUMP THE PUCK INTO THEIR GOAL", 13, 1);
+        MiniTextCentered(&renderRP, 126, "FIRST TO 3  OR LEAD AT TIME", 14, 1);
+    } else {
+        MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
+        MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
+        MiniTextCentered(&renderRP, 112, "BUMP RIVALS  PASS EVERY GATE", 13, 1);
+        MiniTextCentered(&renderRP, 126, "BONUS POINTS  3  2  1", 14, 1);
+    }
 
     for (i = 0; i < shown; i++) {
         DrawRobotLarge(i, spacing * (i + 1) - ROBOT_W, 150, 2,
@@ -7901,22 +8469,36 @@ static void DrawMiniGameEndScreen(void)
 
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
-    MiniTextCentered(&renderRP, 12, "ROBORACE RESULT", 14, 3);
+    MiniTextCentered(&renderRP, 12,
+                     miniGameType == MINIGAME_PUCK ? "ROBOPUCK RESULT" : "ROBORACE RESULT",
+                     14, 3);
 
     if (miniGameWinner >= 0) {
         DrawRobotLarge(miniGameWinner, (SCREEN_W - ROBOT_W * 3) / 2, 58, 3, titleSpinPhase);
-        snprintf(b, sizeof(b), "%s %s WINS", RobotControlLabel(miniGameWinner), RobotTag(miniGameWinner));
+        if (miniGameType == MINIGAME_PUCK) {
+            snprintf(b, sizeof(b), "TEAM %d WINS  %d-%d",
+                     PuckTeamForRobot(miniGameWinner) + 1,
+                     puckTeamScore[PuckTeamForRobot(miniGameWinner)],
+                     puckTeamScore[1 - PuckTeamForRobot(miniGameWinner)]);
+        } else {
+            snprintf(b, sizeof(b), "%s %s WINS", RobotControlLabel(miniGameWinner), RobotTag(miniGameWinner));
+        }
         MiniTextCentered(&renderRP, 112, b, 10, 2);
     }
 
-    for (points = 3; points >= 1; points--) {
-        WORD i;
-        for (i = 0; i < robotCount; i++) {
-            if (miniGamePoints[i] != points) continue;
-            snprintf(b, sizeof(b), "%s %s  +%d", RobotControlLabel(i), RobotTag(i), points);
-            MiniTextCentered(&renderRP, 142 + row * 18, b, row == 0 ? 14 : 7, 1);
-            row++;
-            break;
+    if (miniGameType == MINIGAME_PUCK) {
+        MiniTextCentered(&renderRP, 148, "WINNING TEAM +3", 14, 2);
+        MiniTextCentered(&renderRP, 174, "OTHER TEAM +1", 7, 2);
+    } else {
+        for (points = 3; points >= 1; points--) {
+            WORD i;
+            for (i = 0; i < robotCount; i++) {
+                if (miniGamePoints[i] != points) continue;
+                snprintf(b, sizeof(b), "%s %s  +%d", RobotControlLabel(i), RobotTag(i), points);
+                MiniTextCentered(&renderRP, 142 + row * 18, b, row == 0 ? 14 : 7, 1);
+                row++;
+                break;
+            }
         }
     }
 
@@ -8008,6 +8590,30 @@ static void DrawRaceHud(void)
     }
 }
 
+static void DrawPuckHud(void)
+{
+    WORD seconds = (puckTicksRemaining + 49) / 50;
+    char b[64];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
+    if (puckTicksRemaining <= 0) {
+        snprintf(b, sizeof(b), "ROBOPUCK  TEAM1 %d-%d TEAM2  OT",
+                 puckTeamScore[0], puckTeamScore[1]);
+    } else {
+        snprintf(b, sizeof(b), "ROBOPUCK  TEAM1 %d-%d TEAM2  0:%02d",
+                 puckTeamScore[0], puckTeamScore[1], seconds);
+    }
+    MiniText(&renderRP, 4, 3, b, 14);
+    if (puckScoringTeam >= 0) {
+        snprintf(b, sizeof(b), "TEAM %d GOAL", puckScoringTeam + 1);
+        MiniTextCentered(&renderRP, 18, b, puckScoringTeam == 0 ? 13 : 10, 2);
+    } else {
+        MiniTextCentered(&renderRP, 18, "FIRST TO 3", 7, 1);
+    }
+    DrawJoystickIcons();
+}
+
 static void DrawHud(void)
 {
     char b[160];
@@ -8018,7 +8624,8 @@ static void DrawHud(void)
     DrawJoystickIcons();
 
     if (gameState == GAME_MINIGAME_PLAYING) {
-        DrawRaceHud();
+        if (miniGameType == MINIGAME_PUCK) DrawPuckHud();
+        else DrawRaceHud();
         return;
     }
 
@@ -8287,6 +8894,17 @@ static void DrawRobotsIntersectingRect(struct DirtyRect *rect)
     }
 }
 
+static void DrawPuckIntersectingRect(struct DirtyRect *rect)
+{
+    WORD x;
+    WORD y;
+
+    if (!rect || gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PUCK) return;
+    x = MAP_X + FP_TO_INT(puckPx);
+    y = MAP_Y + FP_TO_INT(puckPy);
+    if (RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, PUCK_W, PUCK_H)) DrawPuck();
+}
+
 static BOOL BoltIntersectsRect(struct Bolt *bolt, struct DirtyRect *rect)
 {
     WORD x;
@@ -8397,6 +9015,7 @@ static void DrawGameplayDirtyRects(void)
 
         RestoreDirtyRectFromRoom(&rect);
         DrawHudIfDirty(&rect);
+        DrawPuckIntersectingRect(&rect);
         DrawRobotsIntersectingRect(&rect);
         DrawBoltsIntersectingRect(&rect);
         if (BonusBossExplosionIntersectsRect(&rect)) DrawBossExplosion();
@@ -8485,6 +9104,8 @@ static void DrawFrame(void)
     }
 
     DrawHud();
+
+    DrawPuck();
 
     for (i = humanPlayers; i < robotCount; i++) {
         DrawRobotBob(i);
@@ -8820,7 +9441,7 @@ static BOOL HandleAiSelectMenuRawKey(UWORD code, BOOL keyUpEvent)
 static void ActivatePauseMenuSelection(void)
 {
     if (pauseMenuSelection == 0) {
-        if (gameState == GAME_MINIGAME_PLAYING) StartRoboRace();
+        if (gameState == GAME_MINIGAME_PLAYING) RestartCurrentMiniGame();
         else if (gameState == GAME_BONUS_PLAYING) StartBonusRound();
         else ResetLevel();
     } else {
@@ -9305,7 +9926,7 @@ static BOOL ActivateSpaceOrFireAction(void)
         else { roundIndex++; MarkHudStatusTextDirty(); ResetLevel(); }
         return TRUE;
     }
-    if (gameState == GAME_MINIGAME_INTRO) { StartRoboRace(); return TRUE; }
+    if (gameState == GAME_MINIGAME_INTRO) { RestartCurrentMiniGame(); return TRUE; }
     if (gameState == GAME_MINIGAME_END) { roundIndex++; MarkHudStatusTextDirty(); ResetLevel(); return TRUE; }
     if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); return TRUE; }
     if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
@@ -9402,7 +10023,7 @@ static void HandleRawKey(UWORD rawCode)
     if (!keyUpEvent && code == RAW_R) {
         if (gameState == GAME_PLAYING) { ResetLevel(); return; }
         if (gameState == GAME_BONUS_PLAYING) { StartBonusRound(); return; }
-        if (gameState == GAME_MINIGAME_PLAYING) { StartRoboRace(); return; }
+        if (gameState == GAME_MINIGAME_PLAYING) { RestartCurrentMiniGame(); return; }
     }
 
     if (!keyUpEvent && (code == RAW_SPACE || code == RAW_RETURN)) {
@@ -9990,6 +10611,7 @@ static void CloseGameScreen(void)
     FreeBoltCache();
     FreeRobotScaledCache();
     FreeSpeedTrailCache();
+    FreePuckCache();
 
     if (robotCacheBM) {
         FreeBitMap(robotCacheBM);

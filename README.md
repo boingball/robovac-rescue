@@ -26,9 +26,9 @@ Detailed actions:
 - Start / advance menus:
   - On the title screen, start the match (or lock Player 2 if Player 2 is selecting) with `Space`/`Enter`, the joystick **blue (second) button**, RMB, or by holding fire for about two seconds. This opens the "how many AI rivals?" prompt (`0`-`3`, joystick up/down + fire/blue to choose) whether you're solo or in locked two-player mode - a joystick-only player is never stuck defaulting to 1 AI. Choosing at least one AI then opens the Easy / Normal / Hard difficulty prompt.
   - At the end of a round, continue to the next round with `Space`/`Enter`, joystick fire, or RMB.
-  - At the end of a RoboRace, continue to the next cleaning round with `Space`/`Enter`, joystick fire, or RMB.
+  - At the end of a Robo Party mini-game, continue to the next cleaning round with `Space`/`Enter`, joystick fire, or RMB.
   - At the end of a match, return to the title screen with `Space`/`Enter`, joystick fire, or RMB.
-- Pause: `Q` pauses during a cleaning round, RoboRace, or bonus battle. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
+- Pause: `Q` pauses during a cleaning round, RoboRace, RoboPuck, or bonus battle. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
 - `R`:
   - During a match: reset the current cleaning round, race, or bonus battle.
 - `1` / `2` / `3`: keyboard shortcut that skips the "how many rivals" prompt and jumps straight to the Easy / Normal / Hard difficulty prompt with that many AI rivals, from either the one-player title screen or the two-player AI prompt (where `0` is also available, and starts immediately with no AI).
@@ -54,20 +54,20 @@ Every robot tracks a clean streak toward the super power tied to that robot vari
 
 The Dust Viper's speed effect leaves a short cached blitter motion trail behind the hoover. EMP also dims the room lighting, leaving the robot colours readable. Tables can be pushed one square when a hoover walks into them, provided the square behind them is clear; the winner screen records table shoves alongside score and round wins.
 
-The HUD shows each robot's current clean-streak count, flashes `P` while a timed power is active, and announces each triggered power.
+The HUD shows each robot's current clean-streak count in a bright accent colour, flashes `P` while a timed power is active, and announces each triggered power.
 
 ## Dirt Storm
 
-Once per round, as the room is about to be fully cleaned, there's a chance a runaway broken hoover zips in from the left wall and sweeps across a row, scattering fresh dirt behind it (ignoring walls, tables, and docks - it just flies straight through). It does this three times, on three different random rows, each with a short pause in between, giving a round extra life instead of ending it early. It flickers with the same warning-coloured sparks as a stunned hoover so it reads as visibly broken next to whichever of the seven normal hoover skins it happens to borrow. Hit it with an energy bolt at any point and the whole event stops dead, worth 2 bonus points.
+Once per round, as the room is about to be fully cleaned, there's a chance a runaway broken hoover spins and glides smoothly in from the left wall, sweeping across a row and scattering fresh dirt behind it (ignoring walls, tables, and docks - it just flies straight through). It does this three times, on three different random rows, each with a short pause in between, giving a round extra life instead of ending it early. It flickers with the same warning-coloured sparks as a stunned hoover so it reads as visibly broken next to whichever of the seven normal hoover skins it happens to borrow, and its final off-screen frame is erased immediately. Hit it with an energy bolt at any point and the whole event stops dead, worth 5 bonus points.
 
 ## Big Head Mode
 
-Press `G` at any time during play to toggle every robot to double size, purely for laughs - it's the same visual effect as the Neon Nibbler's quad-ghost power, just switched on permanently for everyone until you press `G` again. It has no effect on collisions, cleaning radius, or anything else gameplay-related.
+Press `G` at any time during play to toggle every robot to double size, purely for laughs - it is a clean 2x version of the original BOB with no added baseline/shadow. It stays on for everyone until you press `G` again and has no effect on collisions, cleaning radius, or anything else gameplay-related.
 
 ## Match Structure
 
 - A solo match (no AI rivals) is 5 rounds. Every robot on the field beyond a 2-robot match adds 2 more rounds: 2 robots (e.g. 2 players, or 1 player + 1 AI rival) play 6 rounds, 3 play 8, 4 play 10, and so on.
-- Robo Party interrupts the match after cleaning rounds 2 and 4, without adding another full cleaning round.
+- Robo Party interrupts the match after cleaning rounds 2 and 4, without adding another full cleaning round. RoboRace and RoboPuck alternate without an immediate repeat.
 - Each round picks a random room type.
 - Dirt cleaned is scored as points.
 - Hitting another robot with an energy bolt is worth 2 points. A bolted robot cannot be bolted again while stunned, and gets 2 seconds of bolt immunity after the stun ends so it can escape.
@@ -87,6 +87,17 @@ After cleaning rounds 2 and 4, the match switches to a short Robo Party intermis
 - AI racers pathfind toward the next checkpoint gate and choose another lane if the pack blocks their preferred tile.
 - The race has a 40-second limit. Once the first hoover finishes, the others get five more seconds to cross the line.
 - First, second, and third earn 3, 2, and 1 bonus points respectively. These affect the match total but do not count as cleaning-round wins.
+- Cornering now holds the old heading briefly, rotates through the diagonal, and carries a short visual drift into the new direction.
+
+## Robo Party: RoboPuck
+
+RoboPuck is a 2D Rocket League-style team game in a clean arena:
+
+- Odd and even robot slots form two mirrored teams, so it naturally supports 1v1, 2v2, and mixed human/AI teams.
+- Robots remain on the familiar grid while the puck is a masked BOB with smooth fixed-point movement, wall bounces, rolling resistance, and angled rebounds.
+- AI robots approach from behind the puck and drive it toward the opposing goal.
+- The first team to 3 goals wins. Otherwise the team leading after 35 seconds wins; a tie goes to sudden-death overtime.
+- Every winning-team robot earns 3 match points and every other robot earns 1 point.
 
 The intro, active mini-game, and result screen use separate game states so more Robo Party games can be added without changing the normal cleaning-round flow.
 
@@ -124,7 +135,7 @@ Dirt only spawns on valid floor tiles (not walls, furniture, docks, or robot spa
 
 - Supports one or two human players plus configurable AI rivals.
 - Every robot has its own battery.
-- Player battery is managed manually by movement.
+- Player battery is managed manually by movement, and every dirt tile sucked up costs one extra battery point.
 - AI robots monitor their own battery and return to their own dock when low (<= 25), then resume cleaning after recharge.
 - Recharging only occurs on each robot's own dock.
 - Dock positions:
