@@ -26,10 +26,11 @@ Detailed actions:
 - Start / advance menus:
   - On the title screen, start the match (or lock Player 2 if Player 2 is selecting) with `Space`/`Enter`, the joystick **blue (second) button**, RMB, or by holding fire for about two seconds. This opens the "how many AI rivals?" prompt (`0`-`3`, joystick up/down + fire/blue to choose) whether you're solo or in locked two-player mode - a joystick-only player is never stuck defaulting to 1 AI. Choosing at least one AI then opens the Easy / Normal / Hard difficulty prompt.
   - At the end of a round, continue to the next round with `Space`/`Enter`, joystick fire, or RMB.
-  - At the end of a match, start a new best-of-5 with `Space`/`Enter`, joystick fire, or RMB.
-- Pause: `Q` pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
+  - At the end of a RoboRace, continue to the next cleaning round with `Space`/`Enter`, joystick fire, or RMB.
+  - At the end of a match, return to the title screen with `Space`/`Enter`, joystick fire, or RMB.
+- Pause: `Q` pauses during a cleaning round, RoboRace, or bonus battle. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
 - `R`:
-  - During match: reset current round
+  - During a match: reset the current cleaning round, race, or bonus battle.
 - `1` / `2` / `3`: keyboard shortcut that skips the "how many rivals" prompt and jumps straight to the Easy / Normal / Hard difficulty prompt with that many AI rivals, from either the one-player title screen or the two-player AI prompt (where `0` is also available, and starts immediately with no AI).
 - AI difficulty: Easy AI does not fire back, Normal AI fires only at close range, and Hard AI fires from longer range.
 - `D`: hidden Hoover Mode: four AI hoovers clean the room using fresh random hoover variants and headings. They keep straight cleaning lines where possible, then use dirt/open-space/recent-path look-ahead to turn around walls, tables, and other hoovers. Any input returns to the title screen.
@@ -66,6 +67,7 @@ Press `G` at any time during play to toggle every robot to double size, purely f
 ## Match Structure
 
 - A solo match (no AI rivals) is 5 rounds. Every robot on the field beyond a 2-robot match adds 2 more rounds: 2 robots (e.g. 2 players, or 1 player + 1 AI rival) play 6 rounds, 3 play 8, 4 play 10, and so on.
+- Robo Party interrupts the match after cleaning rounds 2 and 4, without adding another full cleaning round.
 - Each round picks a random room type.
 - Dirt cleaned is scored as points.
 - Hitting another robot with an energy bolt is worth 2 points. A bolted robot cannot be bolted again while stunned, and gets 2 seconds of bolt immunity after the stun ends so it can escape.
@@ -73,6 +75,20 @@ Press `G` at any time during play to toggle every robot to double size, purely f
 - Round winner = robot with the most points that round.
 - After the last round, the final winner is the robot with the highest total points.
 - The match-end screen zoom-pulses the winner with a large rotating robot image and shows score, round wins, and tables shoved before 2nd place, 3rd place, and the full leaderboard.
+
+## Robo Party: RoboRace
+
+After cleaning rounds 2 and 4, the match switches to a short Robo Party intermission. The first mini-game is RoboRace:
+
+- Race two clockwise laps around a purpose-built kitchen circuit.
+- All four coloured checkpoint gates must be crossed in order, so the central island cannot be shortcut.
+- Dock/battery tiles are boost pads and give eight moves of turbo speed, using the cached blitter motion trail.
+- Driving into a stationary rival shoves it one tile when the space behind it is clear, with a very short recovery stun.
+- AI racers pathfind toward the next checkpoint gate and choose another lane if the pack blocks their preferred tile.
+- The race has a 40-second limit. Once the first hoover finishes, the others get five more seconds to cross the line.
+- First, second, and third earn 3, 2, and 1 bonus points respectively. These affect the match total but do not count as cleaning-round wins.
+
+The intro, active mini-game, and result screen use separate game states so more Robo Party games can be added without changing the normal cleaning-round flow.
 
 ## Bonus Round
 
