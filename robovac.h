@@ -240,7 +240,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define MINIGAME_BUMPER          3
 
-#define MINIGAME_COUNT           3
+#define MINIGAME_AIRHOCKEY       4
+
+#define MINIGAME_COUNT           4
 
 #define MINIGAME_INTRO_TICKS     100
 
@@ -293,6 +295,50 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define PUCK_GOAL_BOTTOM_TILE     9
 
 #define DIRT_CLEAN_BATTERY_COST   1
+
+
+/* RoboHockey: a narrow Shufflepuck-style table, goals on the top and
+ * bottom walls instead of RoboPuck's left/right. Team 0 defends the top
+ * goal and is confined to the top half of the table, team 1 mirrors it on
+ * the bottom - RobotCanPassTile refuses any move that would cross the
+ * halfway row, so unlike RoboPuck a paddle can never leave its own side.
+ * The fire button doubles as an EMP-charged power shot: standing next to
+ * the puck with the move off cooldown sends it rocketing away far faster
+ * than an ordinary touch. */
+
+#define AIRHOCKEY_W                    PUCK_W
+
+#define AIRHOCKEY_H                    PUCK_H
+
+#define AIRHOCKEY_TIME_TICKS           (120 * 50)
+
+#define AIRHOCKEY_GOALS_TO_WIN         5
+
+#define AIRHOCKEY_ROBOT_MOVE_SPEED     (3 * FP_ONE)
+
+#define AIRHOCKEY_KICK_SPEED           (6 * FP_ONE)
+
+#define AIRHOCKEY_MAX_SPEED            (8 * FP_ONE)
+
+#define AIRHOCKEY_HIT_COOLDOWN_TICKS   4
+
+#define AIRHOCKEY_GOAL_PAUSE_TICKS     40
+
+#define AIRHOCKEY_GOAL_LEFT_TILE       7
+
+#define AIRHOCKEY_GOAL_RIGHT_TILE      12
+
+#define AIRHOCKEY_HALF_Y               7
+
+#define AIRHOCKEY_BOOST_SPEED          (11 * FP_ONE)
+
+#define AIRHOCKEY_BOOST_COOLDOWN_TICKS (5 * 50)
+
+#define AIRHOCKEY_BOOST_RANGE          2
+
+#define AIRHOCKEY_BOOST_FLASH_TICKS    20
+
+#define AIRHOCKEY_BOOST_STUN_TICKS     15
 
 
 /* Bumper Bots: a tiny floor "rug" island sits on the same TILE_WALL border
@@ -1187,6 +1233,32 @@ static WORD puckScoringTeam = -1;
 
 static WORD puckScoringRobot = -1;
 
+static LONG airhockeyPuckPx = 0;
+
+static LONG airhockeyPuckPy = 0;
+
+static LONG airhockeyPuckVx = 0;
+
+static LONG airhockeyPuckVy = 0;
+
+static WORD airhockeyTicksRemaining = 0;
+
+static WORD airhockeyTeamScore[2] = {0, 0};
+
+static WORD airhockeyGoalPauseTicks = 0;
+
+static WORD airhockeyHitCooldownTicks = 0;
+
+static WORD airhockeyLastTouch = -1;
+
+static WORD airhockeyScoringTeam = -1;
+
+static WORD airhockeyScoringRobot = -1;
+
+static WORD airhockeyBoostCooldown[MAX_ROBOTS];
+
+static WORD airhockeyBoostFlashTicks = 0;
+
 static WORD bumperTicksRemaining = 0;
 
 static WORD bumperAliveCount = 0;
@@ -1432,6 +1504,12 @@ static BOOL dirtyPrevPuckValid = FALSE;
 static WORD dirtyPrevPuckSecond = -1;
 static WORD dirtyPrevPuckScore[2] = {-1, -1};
 static WORD dirtyPrevPuckScoringTeam = -2;
+static LONG dirtyPrevAirhockeyPuckPx = 0;
+static LONG dirtyPrevAirhockeyPuckPy = 0;
+static BOOL dirtyPrevAirhockeyPuckValid = FALSE;
+static WORD dirtyPrevAirhockeySecond = -1;
+static WORD dirtyPrevAirhockeyScore[2] = {-1, -1};
+static WORD dirtyPrevAirhockeyScoringTeam = -2;
 static WORD dirtyPrevBumperSecond = -1;
 static WORD dirtyPrevBumperAlive = -1;
 static WORD dirtyPrevBumperFlashTicks = -1;
@@ -1665,6 +1743,18 @@ static void ChoosePuckAiMove(WORD id);
 
 static WORD PuckTeamForRobot(WORD id);
 
+static void StartAirHockey(void);
+
+static void StepAirHockey(void);
+
+static void FinishAirHockey(void);
+
+static void ChooseAirHockeyAiMove(WORD id);
+
+static WORD AirHockeyTeamForRobot(WORD id);
+
+static BOOL TryAirHockeyBoost(WORD id);
+
 static void StartBumperBots(void);
 
 static void StepBumperBots(void);
@@ -1826,6 +1916,8 @@ static void FreePuckCache(void);
 
 static void DrawPuck(void);
 
+static void DrawAirHockeyPuck(void);
+
 
 static const char *roomLayouts[5][MAP_H] = {
     {
@@ -1982,6 +2074,7 @@ static void CoalesceDirtyRects(WORD pad);
 static BOOL BuildDirtyHorizontalStrips(void);
 static BOOL RobotDirtyBoundsUseQuad(WORD id);
 static void AddDirtyPuckAt(LONG px, LONG py);
+static void AddDirtyAirHockeyPuckAt(LONG px, LONG py);
 static void AddDirtyDirtStormAt(LONG px, WORD tileY);
 static void MarkDirtyHudIfChanged(void);
 static void MarkDirtyRoundGoOverlay(void);
@@ -2123,6 +2216,10 @@ static void StepIntro(void);
 static void LimitPuckVelocity(void);
 static void ScorePuckGoal(WORD team);
 static void StepPuckPhysics(void);
+static void ResetAirHockeyPuckPosition(void);
+static void LimitAirHockeyVelocity(void);
+static void ScoreAirHockeyGoal(WORD team);
+static void StepAirHockeyPhysics(void);
 static void StepGame(void);
 static const UBYTE *MiniGlyph(char ch);
 static void MiniCharScaled(struct RastPort *rp, WORD x, WORD y, char ch, UBYTE pen, WORD scale);
@@ -2147,6 +2244,7 @@ static void DrawBossExplosion(void);
 static void DrawBonusBoss(void);
 static void DrawRaceHud(void);
 static void DrawPuckHud(void);
+static void DrawAirHockeyHud(void);
 static void DrawBumperHud(void);
 static void DrawIntroTitleImage(void);
 static void DrawRoundStartOverlay(void);
@@ -2155,6 +2253,7 @@ static void DrawAiSelectMenu(void);
 static void DrawAiDifficultyMenu(void);
 static BOOL RobotIntersectsRect(WORD id, struct DirtyRect *rect);
 static void DrawPuckIntersectingRect(struct DirtyRect *rect);
+static void DrawAirHockeyPuckIntersectingRect(struct DirtyRect *rect);
 static void DrawDirtStormIntersectingRect(struct DirtyRect *rect);
 static BOOL BoltIntersectsRect(struct Bolt *bolt, struct DirtyRect *rect);
 static BOOL BonusBossIntersectsRect(struct DirtyRect *rect);

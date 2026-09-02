@@ -132,6 +132,12 @@ static WORD PuckTeamForRobot(WORD id)
 }
 
 
+static WORD AirHockeyTeamForRobot(WORD id)
+{
+    return id & 1;
+}
+
+
 static void ResetPuckPosition(void)
 {
     puckPx = TO_FP((SCREEN_W - PUCK_W) / 2);
@@ -223,6 +229,395 @@ static void StartRoboPuck(void)
     BuildRoomBuffer();
     ForceGameplayFullPresent();
     StartRoundCountdownAudio();
+}
+
+
+static void ResetAirHockeyPuckPosition(void)
+{
+    airhockeyPuckPx = TO_FP((SCREEN_W - AIRHOCKEY_W) / 2);
+    airhockeyPuckPy = TO_FP(((MAP_H * TILE_SIZE) - AIRHOCKEY_H) / 2);
+    airhockeyPuckVx = 0;
+    airhockeyPuckVy = 0;
+    airhockeyHitCooldownTicks = 0;
+    airhockeyLastTouch = -1;
+}
+
+
+static void StartAirHockey(void)
+{
+    WORD x;
+    WORD y;
+    WORD i;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClearMovementKeys();
+    ClosePauseMenu();
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            if (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) {
+                map[y][x] = TILE_WALL;
+            } else {
+                map[y][x] = TILE_FLOOR;
+            }
+        }
+    }
+
+    /* The marker tiles are open goal mouths, not obstacles.  Team 0 defends
+     * the top goal and attacks downward; Team 1 mirrors it from the bottom. */
+    for (x = AIRHOCKEY_GOAL_LEFT_TILE; x <= AIRHOCKEY_GOAL_RIGHT_TILE; x++) {
+        map[0][x] = TILE_MARKER;
+        map[MAP_H - 1][x] = TILE_MARKER;
+    }
+
+    ClearDirtList();
+    for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
+    dirtStormActive = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+
+    gameState = GAME_MINIGAME_PLAYING;
+    InitRobots();
+    for (i = 0; i < robotCount; i++) {
+        UBYTE variant = robots[i].spriteVariant;
+        WORD team = AirHockeyTeamForRobot(i);
+        WORD slot = i >> 1;
+        WORD startX = 3 + ((slot * 2) % 13);
+
+        SetRobotTile(i, startX, team == 0 ? 3 : MAP_H - 4);
+        robots[i].spriteVariant = variant;
+        robots[i].battery = maxBattery;
+        robots[i].powerType = POWER_NONE;
+        robots[i].powerMovesLeft = 0;
+        robots[i].stunTicks = 0;
+        robots[i].spriteIndex = team == 0 ? SPR_DOWN : SPR_UP;
+        robots[i].prevSpriteIndex = robots[i].spriteIndex;
+        robots[i].turnTicks = 0;
+        raceBoostMoves[i] = 0;
+        speedFlashTicks[i] = 0;
+        airhockeyBoostCooldown[i] = 0;
+        aiPrevTileX[i] = robots[i].tileX;
+        aiPrevTileY[i] = robots[i].tileY;
+    }
+
+    airhockeyTeamScore[0] = 0;
+    airhockeyTeamScore[1] = 0;
+    airhockeyTicksRemaining = AIRHOCKEY_TIME_TICKS;
+    airhockeyGoalPauseTicks = 0;
+    airhockeyScoringTeam = -1;
+    airhockeyScoringRobot = -1;
+    airhockeyBoostFlashTicks = 0;
+    ResetAirHockeyPuckPosition();
+#if USE_DIRTY_RECTS
+    dirtyPrevAirhockeyPuckValid = FALSE;
+#endif
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
+    roundGoTicks = 0;
+    roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
+    MarkHudStatusTextDirty();
+    BuildRoomBuffer();
+    ForceGameplayFullPresent();
+    StartRoundCountdownAudio();
+}
+
+
+static void LimitAirHockeyVelocity(void)
+{
+    if (airhockeyPuckVx > AIRHOCKEY_MAX_SPEED) airhockeyPuckVx = AIRHOCKEY_MAX_SPEED;
+    if (airhockeyPuckVx < -AIRHOCKEY_MAX_SPEED) airhockeyPuckVx = -AIRHOCKEY_MAX_SPEED;
+    if (airhockeyPuckVy > AIRHOCKEY_MAX_SPEED) airhockeyPuckVy = AIRHOCKEY_MAX_SPEED;
+    if (airhockeyPuckVy < -AIRHOCKEY_MAX_SPEED) airhockeyPuckVy = -AIRHOCKEY_MAX_SPEED;
+}
+
+
+static void ScoreAirHockeyGoal(WORD team)
+{
+    if (team < 0 || team > 1) return;
+    airhockeyTeamScore[team]++;
+    airhockeyScoringTeam = team;
+    /* ResetAirHockeyPuckPosition() clears airhockeyLastTouch, so grab the
+     * scorer first. */
+    airhockeyScoringRobot = airhockeyLastTouch;
+    airhockeyGoalPauseTicks = AIRHOCKEY_GOAL_PAUSE_TICKS;
+    ResetAirHockeyPuckPosition();
+
+    if (airhockeyTeamScore[team] >= AIRHOCKEY_GOALS_TO_WIN) FinishAirHockey();
+}
+
+
+static void StepAirHockeyPhysics(void)
+{
+    WORD x;
+    WORD y;
+    WORD goalLeft = AIRHOCKEY_GOAL_LEFT_TILE * TILE_SIZE;
+    WORD goalRight = (AIRHOCKEY_GOAL_RIGHT_TILE + 1) * TILE_SIZE - AIRHOCKEY_W;
+    WORD minX = TILE_SIZE;
+    WORD maxX = (MAP_W - 1) * TILE_SIZE - AIRHOCKEY_W;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_AIRHOCKEY) return;
+
+    if (airhockeyGoalPauseTicks > 0) {
+        airhockeyGoalPauseTicks--;
+        if (airhockeyGoalPauseTicks <= 0) {
+            airhockeyScoringTeam = -1;
+            airhockeyScoringRobot = -1;
+        }
+        return;
+    }
+    if (airhockeyHitCooldownTicks > 0) airhockeyHitCooldownTicks--;
+
+    airhockeyPuckPx += airhockeyPuckVx;
+    airhockeyPuckPy += airhockeyPuckVy;
+    x = FP_TO_INT(airhockeyPuckPx);
+    y = FP_TO_INT(airhockeyPuckPy);
+
+    if (x < minX) {
+        airhockeyPuckPx = TO_FP(minX);
+        airhockeyPuckVx = -airhockeyPuckVx;
+    } else if (x > maxX) {
+        airhockeyPuckPx = TO_FP(maxX);
+        airhockeyPuckVx = -airhockeyPuckVx;
+    }
+
+    x = FP_TO_INT(airhockeyPuckPx);
+    y = FP_TO_INT(airhockeyPuckPy);
+    if (x >= goalLeft && x <= goalRight) {
+        if (y <= 0) {
+            ScoreAirHockeyGoal(1);
+            return;
+        }
+        if (y >= (MAP_H * TILE_SIZE) - AIRHOCKEY_H) {
+            ScoreAirHockeyGoal(0);
+            return;
+        }
+    } else {
+        WORD minY = TILE_SIZE;
+        WORD maxY = (MAP_H - 1) * TILE_SIZE - AIRHOCKEY_H;
+        if (y < minY) {
+            airhockeyPuckPy = TO_FP(minY);
+            airhockeyPuckVy = -airhockeyPuckVy;
+        } else if (y > maxY) {
+            airhockeyPuckPy = TO_FP(maxY);
+            airhockeyPuckVy = -airhockeyPuckVy;
+        }
+    }
+
+    if (airhockeyHitCooldownTicks <= 0) {
+        x = FP_TO_INT(airhockeyPuckPx);
+        y = FP_TO_INT(airhockeyPuckPy);
+        for (i = 0; i < robotCount; i++) {
+            WORD rx = FP_TO_INT(robots[i].px);
+            WORD ry = FP_TO_INT(robots[i].py);
+            WORD dirX = 0;
+            WORD dirY = 0;
+            WORD puckCenterX;
+            WORD puckCenterY;
+            WORD robotCenterX;
+            WORD robotCenterY;
+
+            if (!RectsOverlap(x, y, AIRHOCKEY_W, AIRHOCKEY_H, rx, ry, ROBOT_W, ROBOT_H)) continue;
+            switch (robots[i].spriteIndex) {
+                case SPR_LEFT:  dirX = -1; break;
+                case SPR_RIGHT: dirX = 1; break;
+                case SPR_UP:    dirY = -1; break;
+                case SPR_DOWN:  dirY = 1; break;
+                default: dirY = (AirHockeyTeamForRobot(i) == 0) ? 1 : -1; break;
+            }
+
+            puckCenterX = x + AIRHOCKEY_W / 2;
+            puckCenterY = y + AIRHOCKEY_H / 2;
+            robotCenterX = rx + ROBOT_W / 2;
+            robotCenterY = ry + ROBOT_H / 2;
+            airhockeyPuckVx = dirX * AIRHOCKEY_KICK_SPEED;
+            airhockeyPuckVy = dirY * AIRHOCKEY_KICK_SPEED;
+            if (dirX != 0) airhockeyPuckVy += (puckCenterY - robotCenterY) * (FP_ONE / 3);
+            if (dirY != 0) airhockeyPuckVx += (puckCenterX - robotCenterX) * (FP_ONE / 3);
+            LimitAirHockeyVelocity();
+            airhockeyPuckPx += dirX * TO_FP(3);
+            airhockeyPuckPy += dirY * TO_FP(3);
+            airhockeyHitCooldownTicks = AIRHOCKEY_HIT_COOLDOWN_TICKS;
+            airhockeyLastTouch = i;
+            break;
+        }
+    }
+
+    /* Gentle rolling resistance lets a loose puck settle without making a
+     * clean shot die before it reaches the far goal. */
+    airhockeyPuckVx = (airhockeyPuckVx * 250L) / 256L;
+    airhockeyPuckVy = (airhockeyPuckVy * 250L) / 256L;
+    if (airhockeyPuckVx > -16 && airhockeyPuckVx < 16) airhockeyPuckVx = 0;
+    if (airhockeyPuckVy > -16 && airhockeyPuckVy < 16) airhockeyPuckVy = 0;
+}
+
+
+static BOOL TryAirHockeyBoost(WORD id)
+{
+    WORD team;
+    WORD dirX = 0;
+    WORD dirY = 0;
+    WORD puckCenterX;
+    WORD puckCenterY;
+    WORD robotCenterX;
+    WORD robotCenterY;
+    WORD dtx;
+    WORD dty;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_AIRHOCKEY) return FALSE;
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (airhockeyGoalPauseTicks > 0) return FALSE;
+    if (airhockeyBoostCooldown[id] > 0) return FALSE;
+
+    dtx = AbsW(robots[id].tileX - (FP_TO_INT(airhockeyPuckPx + TO_FP(AIRHOCKEY_W / 2)) / TILE_SIZE));
+    dty = AbsW(robots[id].tileY - (FP_TO_INT(airhockeyPuckPy + TO_FP(AIRHOCKEY_H / 2)) / TILE_SIZE));
+    if (dtx > AIRHOCKEY_BOOST_RANGE || dty > AIRHOCKEY_BOOST_RANGE) return FALSE;
+
+    team = AirHockeyTeamForRobot(id);
+    switch (robots[id].spriteIndex) {
+        case SPR_LEFT:  dirX = -1; break;
+        case SPR_RIGHT: dirX = 1; break;
+        case SPR_UP:    dirY = -1; break;
+        case SPR_DOWN:  dirY = 1; break;
+        default: dirY = (team == 0) ? 1 : -1; break;
+    }
+
+    puckCenterX = FP_TO_INT(airhockeyPuckPx) + AIRHOCKEY_W / 2;
+    puckCenterY = FP_TO_INT(airhockeyPuckPy) + AIRHOCKEY_H / 2;
+    robotCenterX = FP_TO_INT(robots[id].px) + ROBOT_W / 2;
+    robotCenterY = FP_TO_INT(robots[id].py) + ROBOT_H / 2;
+
+    airhockeyPuckVx = dirX * AIRHOCKEY_BOOST_SPEED;
+    airhockeyPuckVy = dirY * AIRHOCKEY_BOOST_SPEED;
+    if (dirX != 0) airhockeyPuckVy += (puckCenterY - robotCenterY) * (FP_ONE / 3);
+    if (dirY != 0) airhockeyPuckVx += (puckCenterX - robotCenterX) * (FP_ONE / 3);
+    LimitAirHockeyVelocity();
+    airhockeyHitCooldownTicks = AIRHOCKEY_HIT_COOLDOWN_TICKS;
+    airhockeyLastTouch = id;
+    airhockeyBoostCooldown[id] = AIRHOCKEY_BOOST_COOLDOWN_TICKS;
+    airhockeyBoostFlashTicks = AIRHOCKEY_BOOST_FLASH_TICKS;
+
+    /* The power shot doubles as a short-range EMP jolt: any rival caught
+     * next to the boosting robot is stunned rather than left free to just
+     * shove the puck straight back. */
+    for (i = 0; i < robotCount; i++) {
+        WORD orx;
+        WORD ory;
+        if (i == id || AirHockeyTeamForRobot(i) == team) continue;
+        orx = AbsW(robots[i].tileX - robots[id].tileX);
+        ory = AbsW(robots[i].tileY - robots[id].tileY);
+        if (orx <= AIRHOCKEY_BOOST_RANGE && ory <= AIRHOCKEY_BOOST_RANGE &&
+            robots[i].stunTicks < AIRHOCKEY_BOOST_STUN_TICKS) {
+            robots[i].stunTicks = AIRHOCKEY_BOOST_STUN_TICKS;
+        }
+    }
+
+    return TRUE;
+}
+
+
+static void FinishAirHockey(void)
+{
+    WORD winningTeam;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_AIRHOCKEY) return;
+    winningTeam = (airhockeyTeamScore[1] > airhockeyTeamScore[0]) ? 1 : 0;
+    miniGameWinner = -1;
+    for (i = 0; i < robotCount; i++) {
+        WORD points = (AirHockeyTeamForRobot(i) == winningTeam) ? 3 : 1;
+        miniGamePoints[i] = points;
+        totalScores[i] += points;
+        if (miniGameWinner < 0 && AirHockeyTeamForRobot(i) == winningTeam) miniGameWinner = i;
+    }
+    if (miniGameWinner < 0) miniGameWinner = 0;
+
+    ClearMovementKeys();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    gameState = GAME_MINIGAME_END;
+    ForceGameplayFullPresent();
+}
+
+
+static void StepAirHockey(void)
+{
+    WORD i;
+    WORD countdownNumber;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_AIRHOCKEY) return;
+
+    if (pauseMenuOpen) {
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    BeginGameplayDirtyRects();
+    StepRoundStartSamples();
+    if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+        roundCountdownTicks--;
+        ForceGameplayFullPresent();
+        if (roundCountdownTicks > 0) {
+            FinishGameplayDirtyRects();
+            return;
+        }
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
+        }
+        StartMainGameMusic();
+    }
+    if (roundGoTicks > 0) roundGoTicks--;
+
+    if (airhockeyGoalPauseTicks <= 0 && airhockeyTicksRemaining > 0) airhockeyTicksRemaining--;
+    if (airhockeyBoostFlashTicks > 0) airhockeyBoostFlashTicks--;
+    for (i = 0; i < robotCount; i++) {
+        if (airhockeyBoostCooldown[i] > 0) airhockeyBoostCooldown[i]--;
+    }
+
+    StepAirHockeyPhysics();
+    if (gameState != GAME_MINIGAME_PLAYING) {
+        FinishGameplayDirtyRects();
+        return;
+    }
+    if (airhockeyTicksRemaining <= 0 && airhockeyTeamScore[0] != airhockeyTeamScore[1]) {
+        FinishAirHockey();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        StepRobotMovement(i);
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
+        if (robots[i].stunTicks > 0) robots[i].stunTicks--;
+    }
+    for (i = 0; i < humanPlayers; i++) ChoosePlayerMove(i);
+    for (i = humanPlayers; i < robotCount; i++) ChooseAirHockeyAiMove(i);
+
+    ServiceHooverMoveSample();
+    FinishGameplayDirtyRects();
 }
 
 
@@ -930,6 +1325,7 @@ static void RestartCurrentMiniGame(void)
 {
     if (miniGameType == MINIGAME_PUCK) StartRoboPuck();
     else if (miniGameType == MINIGAME_BUMPER) StartBumperBots();
+    else if (miniGameType == MINIGAME_AIRHOCKEY) StartAirHockey();
     else StartRoboRace();
 }
 

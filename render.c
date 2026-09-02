@@ -512,6 +512,12 @@ static void AddDirtyPuckAt(LONG px, LONG py)
                  PUCK_W + 4, PUCK_H + 4);
 }
 
+static void AddDirtyAirHockeyPuckAt(LONG px, LONG py)
+{
+    AddDirtyRect(MAP_X + FP_TO_INT(px) - 2, MAP_Y + FP_TO_INT(py) - 2,
+                 AIRHOCKEY_W + 4, AIRHOCKEY_H + 4);
+}
+
 static void AddDirtyDirtStormAt(LONG px, WORD tileY)
 {
     AddDirtyRect(MAP_X + FP_TO_INT(px) - 2, MAP_Y + (tileY * TILE_SIZE) - 2,
@@ -618,6 +624,11 @@ static void MarkDirtyHudIfChanged(void)
             (dirtyPrevBumperSecond != (bumperTicksRemaining / 50) ||
              dirtyPrevBumperAlive != bumperAliveCount ||
              dirtyPrevBumperFlashTicks != bumperEliminatedFlashTicks)) changed = TRUE;
+        if (miniGameType == MINIGAME_AIRHOCKEY &&
+            (dirtyPrevAirhockeySecond != (airhockeyTicksRemaining / 50) ||
+             dirtyPrevAirhockeyScore[0] != airhockeyTeamScore[0] ||
+             dirtyPrevAirhockeyScore[1] != airhockeyTeamScore[1] ||
+             dirtyPrevAirhockeyScoringTeam != airhockeyScoringTeam)) changed = TRUE;
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -657,6 +668,10 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevBumperSecond = bumperTicksRemaining / 50;
     dirtyPrevBumperAlive = bumperAliveCount;
     dirtyPrevBumperFlashTicks = bumperEliminatedFlashTicks;
+    dirtyPrevAirhockeySecond = airhockeyTicksRemaining / 50;
+    dirtyPrevAirhockeyScore[0] = airhockeyTeamScore[0];
+    dirtyPrevAirhockeyScore[1] = airhockeyTeamScore[1];
+    dirtyPrevAirhockeyScoringTeam = airhockeyScoringTeam;
     for (i = 0; i < robotCount; i++) {
         dirtyPrevBattery[i] = robots[i].battery;
         dirtyPrevScore[i] = robots[i].score;
@@ -719,6 +734,11 @@ static void BeginGameplayDirtyRects(void)
         AddDirtyPuckAt(dirtyPrevPuckPx, dirtyPrevPuckPy);
     }
 
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY &&
+        dirtyPrevAirhockeyPuckValid) {
+        AddDirtyAirHockeyPuckAt(dirtyPrevAirhockeyPuckPx, dirtyPrevAirhockeyPuckPy);
+    }
+
     if (dirtyPrevDirtStormValid) {
         AddDirtyDirtStormAt(dirtyPrevDirtStormPx, dirtyPrevDirtStormTileY);
     }
@@ -757,6 +777,15 @@ static void FinishGameplayDirtyRects(void)
         dirtyPrevPuckValid = TRUE;
     } else {
         dirtyPrevPuckValid = FALSE;
+    }
+
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY) {
+        AddDirtyAirHockeyPuckAt(airhockeyPuckPx, airhockeyPuckPy);
+        dirtyPrevAirhockeyPuckPx = airhockeyPuckPx;
+        dirtyPrevAirhockeyPuckPy = airhockeyPuckPy;
+        dirtyPrevAirhockeyPuckValid = TRUE;
+    } else {
+        dirtyPrevAirhockeyPuckValid = FALSE;
     }
 
     if (dirtStormActive) {
@@ -2697,14 +2726,16 @@ static void DrawRobotBob(WORD id)
      * bottom of the enlarged sprite in either mode, so omit it whenever
      * the robot is drawn scaled up. */
     if (!bigHeadMode && !(robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
-        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_PUCK) {
+        if (gameState == GAME_MINIGAME_PLAYING &&
+            (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY)) {
             /* The seven hoover variants share one palette with no pen free
              * to safely recolour the cached sprite art itself (see the Dirt
              * Storm note below), so a team "skin" is a solid colour tile
              * behind the BOB instead - same pens DrawPuckHud already uses
              * for TEAM 1/TEAM 2, showing through the sprite's transparent
              * mask as a coloured aura around each hoover. */
-            SetAPen(&renderRP, (PuckTeamForRobot(id) == 0) ? 13 : 10);
+            WORD team = (miniGameType == MINIGAME_PUCK) ? PuckTeamForRobot(id) : AirHockeyTeamForRobot(id);
+            SetAPen(&renderRP, (team == 0) ? 13 : 10);
             RectFill(&renderRP, sx, sy, sx + ROBOT_W - 1, sy + ROBOT_H - 1);
         } else {
             SetAPen(&renderRP, 6);
@@ -2976,6 +3007,41 @@ static void DrawPuck(void)
     RectFill(&renderRP, sx, sy + 3, sx + 11, sy + 8);
     SetAPen(&renderRP, 14);
     RectFill(&renderRP, sx + 3, sy + 2, sx + 5, sy + 3);
+}
+
+
+static void DrawAirHockeyPuck(void)
+{
+    WORD sx;
+    WORD sy;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_AIRHOCKEY) return;
+    sx = MAP_X + FP_TO_INT(airhockeyPuckPx);
+    sy = MAP_Y + FP_TO_INT(airhockeyPuckPy);
+
+    if (puckBM && puckMaskBM && puckMaskBM->Planes[0]) {
+        BltMaskBitMapRastPort(puckBM, 0, 0,
+                              &renderRP, sx, sy,
+                              AIRHOCKEY_W, AIRHOCKEY_H,
+                              (ABC | ABNC | ANBC),
+                              puckMaskBM->Planes[0]);
+    } else {
+        SetAPen(&renderRP, 13);
+        RectFill(&renderRP, sx + 2, sy, sx + 9, sy + 11);
+        RectFill(&renderRP, sx, sy + 3, sx + 11, sy + 8);
+        SetAPen(&renderRP, 14);
+        RectFill(&renderRP, sx + 3, sy + 2, sx + 5, sy + 3);
+    }
+
+    /* EMP power shot: flash a bright ring around the puck for a moment so a
+     * boosted shot reads as something more than an ordinary touch. */
+    if (airhockeyBoostFlashTicks > 0 && (airhockeyBoostFlashTicks & 2)) {
+        SetAPen(&renderRP, 7);
+        RectFill(&renderRP, sx - 2, sy - 2, sx + AIRHOCKEY_W + 1, sy - 1);
+        RectFill(&renderRP, sx - 2, sy + AIRHOCKEY_H, sx + AIRHOCKEY_W + 1, sy + AIRHOCKEY_H + 1);
+        RectFill(&renderRP, sx - 2, sy - 2, sx - 1, sy + AIRHOCKEY_H + 1);
+        RectFill(&renderRP, sx + AIRHOCKEY_W, sy - 2, sx + AIRHOCKEY_W + 1, sy + AIRHOCKEY_H + 1);
+    }
 }
 
 
@@ -3651,6 +3717,11 @@ static void DrawMiniGameIntroScreen(void)
         MiniTextCentered(&renderRP, 96, "TINY ARENA  1 MINUTE", 7, 2);
         MiniTextCentered(&renderRP, 112, "BUMP OR BOLT RIVALS OFF THE RUG", 13, 1);
         MiniTextCentered(&renderRP, 126, "LAST BOT STANDING WINS", 14, 1);
+    } else if (miniGameType == MINIGAME_AIRHOCKEY) {
+        MiniTextCentered(&renderRP, 66, "ROBOHOCKEY", 10, 3);
+        MiniTextCentered(&renderRP, 96, "2 MINUTE MATCH", 7, 2);
+        MiniTextCentered(&renderRP, 112, "STAY ON YOUR SIDE  FIRE = EMP BOOST", 13, 1);
+        MiniTextCentered(&renderRP, 126, "FIRST TO 5  OR LEAD AT TIME", 14, 1);
     } else {
         MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
         MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
@@ -3676,7 +3747,8 @@ static void DrawMiniGameEndScreen(void)
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
     MiniTextCentered(&renderRP, 12,
                      miniGameType == MINIGAME_PUCK ? "ROBOPUCK RESULT" :
-                     miniGameType == MINIGAME_BUMPER ? "BUMPER BOTS RESULT" : "ROBORACE RESULT",
+                     miniGameType == MINIGAME_BUMPER ? "BUMPER BOTS RESULT" :
+                     miniGameType == MINIGAME_AIRHOCKEY ? "ROBOHOCKEY RESULT" : "ROBORACE RESULT",
                      14, 3);
 
     if (miniGameWinner >= 0) {
@@ -3686,13 +3758,18 @@ static void DrawMiniGameEndScreen(void)
                      PuckTeamForRobot(miniGameWinner) + 1,
                      puckTeamScore[PuckTeamForRobot(miniGameWinner)],
                      puckTeamScore[1 - PuckTeamForRobot(miniGameWinner)]);
+        } else if (miniGameType == MINIGAME_AIRHOCKEY) {
+            snprintf(b, sizeof(b), "TEAM %d WINS  %d-%d",
+                     AirHockeyTeamForRobot(miniGameWinner) + 1,
+                     airhockeyTeamScore[AirHockeyTeamForRobot(miniGameWinner)],
+                     airhockeyTeamScore[1 - AirHockeyTeamForRobot(miniGameWinner)]);
         } else {
             snprintf(b, sizeof(b), "%s %s WINS", RobotControlLabel(miniGameWinner), RobotTag(miniGameWinner));
         }
         MiniTextCentered(&renderRP, 112, b, 10, 2);
     }
 
-    if (miniGameType == MINIGAME_PUCK) {
+    if (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY) {
         MiniTextCentered(&renderRP, 148, "WINNING TEAM +3", 14, 2);
         MiniTextCentered(&renderRP, 174, "OTHER TEAM +1", 7, 2);
     } else {
@@ -3831,6 +3908,37 @@ static void DrawPuckHud(void)
 }
 
 
+static void DrawAirHockeyHud(void)
+{
+    WORD totalSeconds = (airhockeyTicksRemaining + 49) / 50;
+    WORD minutes = totalSeconds / 60;
+    WORD seconds = totalSeconds % 60;
+    char b[64];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
+    if (airhockeyTicksRemaining <= 0) {
+        snprintf(b, sizeof(b), "ROBOHOCKEY  TEAM1 %d-%d TEAM2  OT",
+                 airhockeyTeamScore[0], airhockeyTeamScore[1]);
+    } else {
+        snprintf(b, sizeof(b), "ROBOHOCKEY  TEAM1 %d-%d TEAM2  %d:%02d",
+                 airhockeyTeamScore[0], airhockeyTeamScore[1], minutes, seconds);
+    }
+    MiniText(&renderRP, 4, 3, b, 14);
+    if (airhockeyScoringTeam >= 0) {
+        if (airhockeyScoringRobot >= 0 && airhockeyScoringRobot < robotCount) {
+            snprintf(b, sizeof(b), "%s GOAL! TEAM %d", RobotTag(airhockeyScoringRobot), airhockeyScoringTeam + 1);
+        } else {
+            snprintf(b, sizeof(b), "TEAM %d GOAL", airhockeyScoringTeam + 1);
+        }
+        MiniTextCentered(&renderRP, 18, b, airhockeyScoringTeam == 0 ? 13 : 10, 2);
+    } else {
+        MiniTextCentered(&renderRP, 18, "FIRST TO 5  FIRE = EMP BOOST", 7, 1);
+    }
+    DrawJoystickIcons();
+}
+
+
 static void DrawBumperHud(void)
 {
     WORD totalSeconds = (bumperTicksRemaining + 49) / 50;
@@ -3870,6 +3978,7 @@ static void DrawHud(void)
     if (gameState == GAME_MINIGAME_PLAYING) {
         if (miniGameType == MINIGAME_PUCK) DrawPuckHud();
         else if (miniGameType == MINIGAME_BUMPER) DrawBumperHud();
+        else if (miniGameType == MINIGAME_AIRHOCKEY) DrawAirHockeyHud();
         else DrawRaceHud();
         return;
     }
@@ -4157,6 +4266,17 @@ static void DrawPuckIntersectingRect(struct DirtyRect *rect)
     if (RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, PUCK_W, PUCK_H)) DrawPuck();
 }
 
+static void DrawAirHockeyPuckIntersectingRect(struct DirtyRect *rect)
+{
+    WORD x;
+    WORD y;
+
+    if (!rect || gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_AIRHOCKEY) return;
+    x = MAP_X + FP_TO_INT(airhockeyPuckPx) - 2;
+    y = MAP_Y + FP_TO_INT(airhockeyPuckPy) - 2;
+    if (RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, AIRHOCKEY_W + 4, AIRHOCKEY_H + 4)) DrawAirHockeyPuck();
+}
+
 static void DrawDirtStormIntersectingRect(struct DirtyRect *rect)
 {
     WORD x;
@@ -4279,6 +4399,7 @@ static void DrawGameplayDirtyRects(void)
         RestoreDirtyRectFromRoom(&rect);
         DrawHudIfDirty(&rect);
         DrawPuckIntersectingRect(&rect);
+        DrawAirHockeyPuckIntersectingRect(&rect);
         DrawDirtStormIntersectingRect(&rect);
         DrawRobotsIntersectingRect(&rect);
         DrawBoltsIntersectingRect(&rect);
@@ -4371,6 +4492,7 @@ static void DrawFrame(void)
     DrawHud();
 
     DrawPuck();
+    DrawAirHockeyPuck();
 
     for (i = humanPlayers; i < robotCount; i++) {
         DrawRobotBob(i);

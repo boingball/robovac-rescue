@@ -266,6 +266,14 @@ static BOOL IsBlocked(WORD tx, WORD ty)
 static BOOL RobotCanPassTile(WORD id, WORD tx, WORD ty)
 {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
+    /* RoboHockey confines each team to its own half of the table - a paddle
+     * can never cross the halfway row, home side or away. */
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY &&
+        id >= 0 && id < robotCount) {
+        WORD team = AirHockeyTeamForRobot(id);
+        if (team == 0 && ty >= AIRHOCKEY_HALF_Y) return FALSE;
+        if (team == 1 && ty < AIRHOCKEY_HALF_Y) return FALSE;
+    }
     if (id >= 0 && id < robotCount && robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
         return TRUE;
     }
@@ -1731,6 +1739,7 @@ static void StepGame(void)
     if (gameState == GAME_MINIGAME_PLAYING) {
         if (miniGameType == MINIGAME_PUCK) StepRoboPuck();
         else if (miniGameType == MINIGAME_BUMPER) StepBumperBots();
+        else if (miniGameType == MINIGAME_AIRHOCKEY) StepAirHockey();
         else StepRoboRace();
         return;
     }
@@ -2249,10 +2258,20 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
 static void FirePlayerBolt(WORD id)
 {
     WORD dirX = 0, dirY = 0;
+    BOOL bumperPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER);
+    BOOL airHockeyPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY);
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying && !airHockeyPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
+
+    /* RoboHockey's fire button is an EMP-charged power shot on the puck
+     * rather than a directional bolt - route it there instead of falling
+     * through to the normal aim-and-fire logic below. */
+    if (airHockeyPlaying) {
+        TryAirHockeyBoost(id);
+        return;
+    }
 
     /* Check currently-held input first, on both axes independently, so
      * holding two perpendicular directions at once (e.g. continuing left

@@ -355,6 +355,58 @@ static void ChoosePuckAiMove(WORD id)
 }
 
 
+static void ChooseAirHockeyAiMove(WORD id)
+{
+    WORD targetX;
+    WORD targetY;
+    WORD dx = 0;
+    WORD dy = 0;
+    WORD team;
+    WORD dtx;
+    WORD dty;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_AIRHOCKEY) return;
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0 || airhockeyGoalPauseTicks > 0) return;
+
+    team = AirHockeyTeamForRobot(id);
+    targetX = FP_TO_INT(airhockeyPuckPx + TO_FP(AIRHOCKEY_W / 2)) / TILE_SIZE;
+    targetY = FP_TO_INT(airhockeyPuckPy + TO_FP(AIRHOCKEY_H / 2)) / TILE_SIZE;
+
+    dtx = AbsW(robots[id].tileX - targetX);
+    dty = AbsW(robots[id].tileY - targetY);
+    if (dtx <= AIRHOCKEY_BOOST_RANGE && dty <= AIRHOCKEY_BOOST_RANGE &&
+        airhockeyBoostCooldown[id] <= 0 && TryAirHockeyBoost(id)) return;
+
+    /* Approach from behind so the next tile step knocks the puck toward the
+     * opponent's goal instead of merely orbiting it. */
+    targetY += (team == 0) ? -1 : 1;
+    if (targetX < 1) targetX = 1;
+    if (targetX > MAP_W - 2) targetX = MAP_W - 2;
+
+    /* Never target a tile across the half-line - RobotCanPassTile already
+     * refuses to move there, so clamp the goal itself rather than let
+     * AiFindPathStep fail to find any path at all. */
+    if (team == 0) {
+        if (targetY < 1) targetY = 1;
+        if (targetY >= AIRHOCKEY_HALF_Y) targetY = AIRHOCKEY_HALF_Y - 1;
+    } else {
+        if (targetY < AIRHOCKEY_HALF_Y) targetY = AIRHOCKEY_HALF_Y;
+        if (targetY > MAP_H - 2) targetY = MAP_H - 2;
+    }
+
+    if (AiFindPathStep(id, targetX, targetY, &dx, &dy, NULL) &&
+        (dx != 0 || dy != 0) && StartRobotMove(id, dx, dy)) return;
+
+    /* If already behind the puck, drive straight through it. */
+    dy = (team == 0) ? 1 : -1;
+    if (StartRobotMove(id, 0, dy)) return;
+
+    if (robots[id].tileX < targetX) StartRobotMove(id, 1, 0);
+    else if (robots[id].tileX > targetX) StartRobotMove(id, -1, 0);
+}
+
+
 static void ChooseBumperAiMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
@@ -539,6 +591,7 @@ static void ChooseAiMove(WORD id)
         if (miniGameType == MINIGAME_RACE) ChooseRaceAiMove(id);
         else if (miniGameType == MINIGAME_PUCK) ChoosePuckAiMove(id);
         else if (miniGameType == MINIGAME_BUMPER) ChooseBumperAiMove(id);
+        else if (miniGameType == MINIGAME_AIRHOCKEY) ChooseAirHockeyAiMove(id);
         return;
     }
 
