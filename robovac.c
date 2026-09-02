@@ -120,6 +120,18 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define SPEED_TRAIL_H           24
 #define HOOVER_RANDOM_TURN_CHANCE 8
 #define BONUS_SCORE_THRESHOLD    50
+
+/* Dirt Storm: a runaway "broken" hoover that zips across a row, ignoring
+ * walls/tables, scattering fresh dirt as it goes. Fires once per round,
+ * just as the room is about to be fully cleaned, to stretch play out a
+ * little - shooting it with a bolt cancels the whole event. */
+#define DIRT_STORM_SPEED             (8 * FP_ONE)
+#define DIRT_STORM_PASSES            3
+#define DIRT_STORM_GAP_TICKS         30
+#define DIRT_STORM_TRIGGER_DIRT_LEFT 5
+#define DIRT_STORM_TRIGGER_CHANCE_PCT 50
+#define DIRT_STORM_DROP_CHANCE_PCT   65
+#define DIRT_STORM_STOP_POINTS       5
 #define BONUS_BOSS_MAX_HEALTH    50
 #define BONUS_BOSS_HIT_POINTS    2
 #define BONUS_BOSS_SCALE         3
@@ -186,7 +198,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define TILE_MARKER    7
 #define TILE_COUNT     8
 #define WALL_ROTATION_COUNT 4
-#define TILE_CACHE_COUNT (TILE_COUNT + WALL_ROTATION_COUNT)
+#define FLOOR_ROTATION_COUNT 4
+#define TILE_CACHE_COUNT (TILE_COUNT + WALL_ROTATION_COUNT + FLOOR_ROTATION_COUNT)
 
 #define GAME_INTRO      0
 #define GAME_TITLE      1
@@ -221,6 +234,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_C       0x33
 #define RAW_V       0x34
 #define RAW_D       0x22
+#define RAW_G       0x24
 
 /* Attract/demo mode: idles on the title screen this long with no input
  * before it kicks in on its own (D also starts it immediately). */
@@ -481,6 +495,11 @@ static BOOL titleTwoPlayerArmed = FALSE;
 static BOOL titlePlayer2Locked = FALSE;
 static WORD titleSpinPhase = 0;
 static BOOL hooverModeActive = FALSE;
+/* Hidden Big Head mode (toggle with G): purely a visual gag, drawn via the
+ * same 2x scaled sprite/dirty-rect path already used for the Quad powerup.
+ * It must never touch the POWER_QUAD gameplay checks (wall-phasing, area
+ * cleaning) - only where a robot's sprite is drawn or dirty-rect-sized. */
+static BOOL bigHeadMode = FALSE;
 static WORD hooverModeDir[MAX_ROBOTS];
 static WORD speedFlashTicks[MAX_ROBOTS];
 static UWORD *audioSilenceWord = NULL;
@@ -590,6 +609,14 @@ static struct DirtPos dirtList[MAP_W * MAP_H];
 static WORD dirtListCount = 0;
 static BOOL dirtListValid = FALSE;
 static WORD dirtLeft = 0;
+static BOOL dirtStormActive = FALSE;
+static BOOL dirtStormTriggeredThisRound = FALSE;
+static LONG dirtStormPx = 0;
+static WORD dirtStormTileY = 0;
+static WORD dirtStormLastDropTileX = 0;
+static WORD dirtStormPassesLeft = 0;
+static WORD dirtStormGapTicks = 0;
+static UBYTE dirtStormVariant = 0;
 static WORD moves = 0;
 static WORD maxBattery = 110;
 static WORD batteryCostPerMove = 1;
@@ -709,6 +736,8 @@ static BOOL joyFirePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD joyFireHoldTicks[MAX_HUMAN_PLAYERS] = {0, 0};
 static BOOL joyFireHoldTriggered[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static BOOL joyBluePrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL pauseJoyUpPrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
+static BOOL pauseJoyDownPrev[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 static WORD playerFacingX[MAX_HUMAN_PLAYERS] = {0, 0};
 static WORD playerFacingY[MAX_HUMAN_PLAYERS] = {-1, -1};
 static char lastPowerText[80] = "";
@@ -971,6 +1000,10 @@ static WORD RoundDirtTarget(WORD round)
 }
 static void StepPlayerBolts(void);
 static void StepBossBolts(void);
+static void MaybeStartDirtStorm(void);
+static void StepDirtStorm(void);
+static void StopDirtStorm(WORD stopperId);
+static void DrawDirtStorm(void);
 static void StepBonusAiFire(void);
 static void StepMainGameAiFire(void);
 static BOOL ActivateSpaceOrFireAction(void);
@@ -1307,7 +1340,7 @@ static BOOL RobotNeedsCurrentDirtyRect(WORD id)
     if (!dirtyPrevRobotValid[id]) return TRUE;
     if (robots[id].px != dirtyPrevRobotPx[id] || robots[id].py != dirtyPrevRobotPy[id]) return TRUE;
 
-    quadActive = (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) ? 1 : 0;
+    quadActive = (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) ? 1 : 0;
     if (robots[id].spriteIndex != dirtyPrevRobotSpriteIndex[id]) return TRUE;
     if (robots[id].prevSpriteIndex != dirtyPrevRobotPrevSpriteIndex[id]) return TRUE;
     if (robots[id].powerType != dirtyPrevRobotPowerType[id]) return TRUE;
@@ -1339,7 +1372,7 @@ static void StoreDirtyRobotVisualState(WORD id)
     dirtyPrevRobotBattery[id] = robots[id].battery;
     dirtyPrevRobotTurnTicks[id] = robots[id].turnTicks;
     dirtyPrevRobotTurnDirection[id] = robots[id].turnDirection;
-    dirtyPrevRobotQuadActive[id] = (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) ? 1 : 0;
+    dirtyPrevRobotQuadActive[id] = (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) ? 1 : 0;
     dirtyPrevRobotTileUnder[id] = DirtyRobotTileUnder(id);
     dirtyPrevRobotSpeedFlashTicks[id] = speedFlashTicks[id];
 }
@@ -1517,6 +1550,7 @@ static BOOL RobotDirtyBoundsUseQuad(WORD id)
 {
     if (id < 0 || id >= robotCount) return FALSE;
 
+    if (bigHeadMode) return TRUE;
     if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) return TRUE;
 
     if (dirtyPrevRobotValid[id] &&
@@ -2998,6 +3032,54 @@ static void BuildWallRotationsInCache(void)
     }
 }
 
+/* The floor art is a single repeating texture, which looks visibly tiled
+ * across a whole room. Pre-rotate it into the same four orientations used
+ * for walls above, then BlitTileTo picks a rotation per tile from its map
+ * position so the floor reads as a varied pattern instead of one texture
+ * stamped identically everywhere. */
+static void BuildFloorRotationsInCache(void)
+{
+    WORD srcBaseX = TILE_FLOOR * TILE_SIZE;
+    UBYTE rot;
+
+    for (rot = 0; rot < FLOOR_ROTATION_COUNT; rot++) {
+        WORD dstBaseX = (TILE_COUNT + WALL_ROTATION_COUNT + rot) * TILE_SIZE;
+        WORD x;
+        WORD y;
+
+        if (rot == 0) {
+            BltBitMap(tileCacheBM, srcBaseX, 0,
+                      tileCacheBM, dstBaseX, 0,
+                      TILE_SIZE, TILE_SIZE,
+                      0xC0, 0xFF, NULL);
+            continue;
+        }
+
+        for (y = 0; y < TILE_SIZE; y++) {
+            for (x = 0; x < TILE_SIZE; x++) {
+                WORD sx;
+                WORD sy;
+                LONG pen;
+
+                if (rot == 1) {
+                    sx = y;
+                    sy = TILE_SIZE - 1 - x;
+                } else if (rot == 2) {
+                    sx = TILE_SIZE - 1 - x;
+                    sy = TILE_SIZE - 1 - y;
+                } else {
+                    sx = TILE_SIZE - 1 - y;
+                    sy = x;
+                }
+
+                pen = ReadPixel(&tileRP, srcBaseX + sx, sy);
+                SetAPen(&tileRP, (UBYTE)pen);
+                WritePixel(&tileRP, dstBaseX + x, y);
+            }
+        }
+    }
+}
+
 static BOOL InitTileCache(void)
 {
     UBYTE i;
@@ -3018,6 +3100,7 @@ static BOOL InitTileCache(void)
     }
 
     BuildWallRotationsInCache();
+    BuildFloorRotationsInCache();
 
     return TRUE;
 }
@@ -3031,7 +3114,16 @@ static void BlitTileTo(struct RastPort *rp, UBYTE tileType, WORD tx, WORD ty)
     if (!tileCacheBM) return;
     if (tileType >= TILE_COUNT) tileType = TILE_FLOOR;
 
-    srcX = tileType * TILE_SIZE;
+    if (tileType == TILE_FLOOR) {
+        /* Deterministic per-tile pick (not per-frame random) so a cleaned
+         * tile's texture doesn't flicker between orientations on redraw -
+         * a simple checkerboard-ish mix of the coordinates spreads the four
+         * rotations out so no obvious repeating grid remains. */
+        UBYTE rot = (UBYTE)(((tx * 3) + (ty * 7)) & (FLOOR_ROTATION_COUNT - 1));
+        srcX = (TILE_COUNT + WALL_ROTATION_COUNT + rot) * TILE_SIZE;
+    } else {
+        srcX = tileType * TILE_SIZE;
+    }
     dstX = MAP_X + tx * TILE_SIZE;
     dstY = MAP_Y + ty * TILE_SIZE;
 
@@ -4496,14 +4588,14 @@ static void DrawRobotBob(WORD id)
     DrawSpeedMotionBlur(id, sx, sy);
 
     SetAPen(&renderRP, 6);
-    if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+    if (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
         RectFill(&renderRP, sx, sy + 21, sx + 23, sy + 24);
     } else {
         RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
     }
 
     if (robotCacheBM && robotMaskBM && robotMaskBM->Planes[0]) {
-        if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
+        if (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
             DrawRobotBobScaled2(srcX, sx, sy);
         } else if (robots[id].turnTicks > 0 && robots[id].prevSpriteIndex != robots[id].spriteIndex) {
             WORD turnSrcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].prevSpriteIndex) * ROBOT_W;
@@ -4846,6 +4938,7 @@ static WORD CleanTileForRobot(WORD id, WORD tx, WORD ty)
     RemoveDirtListTile(tx, ty);
     robots[id].score++;
     UpdateRoomTile(tx, ty);
+    MaybeStartDirtStorm();
     return 1;
 }
 
@@ -5032,6 +5125,133 @@ static void SpawnRoundDirt(WORD count)
     }
 }
 
+static void DirtStormBeginPass(void)
+{
+    dirtStormTileY = 1 + RandRange(MAP_H - 2);
+    /* Start a tile width off the left wall so it visibly flies in rather
+     * than popping into existence. */
+    dirtStormPx = -(LONG)(TILE_SIZE * FP_ONE);
+    dirtStormLastDropTileX = -999;
+    dirtStormVariant = (UBYTE)RandRange(ROBOT_VARIANTS);
+    dirtStormActive = TRUE;
+}
+
+static void MaybeStartDirtStorm(void)
+{
+    if (gameState != GAME_PLAYING) return;
+    if (demoModeActive || hooverModeActive) return;
+    if (dirtStormTriggeredThisRound) return;
+    if (dirtStormActive || dirtStormPassesLeft > 0) return;
+    /* Fire while there's still a healthy few tiles left, not right on the
+     * final one - the storm's first dirt only lands a couple of frames
+     * after this, so triggering here keeps CheckEndState from ending the
+     * round on dirtLeft hitting 0 before the storm can refill it. */
+    if (dirtLeft <= 0 || dirtLeft > DIRT_STORM_TRIGGER_DIRT_LEFT) return;
+
+    /* Only roll once per round either way, so a round that doesn't get the
+     * storm this time won't keep re-rolling on every tile cleaned after. */
+    dirtStormTriggeredThisRound = TRUE;
+    if ((WORD)RandRange(100) >= DIRT_STORM_TRIGGER_CHANCE_PCT) return;
+
+    dirtStormPassesLeft = DIRT_STORM_PASSES;
+    dirtStormGapTicks = 0;
+    DirtStormBeginPass();
+}
+
+static void StepDirtStorm(void)
+{
+    WORD tx;
+
+    if (gameState != GAME_PLAYING) return;
+
+    if (!dirtStormActive) {
+        if (dirtStormGapTicks > 0) {
+            dirtStormGapTicks--;
+            if (dirtStormGapTicks <= 0 && dirtStormPassesLeft > 0) DirtStormBeginPass();
+        }
+        return;
+    }
+
+    dirtStormPx += DIRT_STORM_SPEED;
+    tx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
+
+    if (tx != dirtStormLastDropTileX) {
+        dirtStormLastDropTileX = tx;
+        if (tx >= 0 && tx < MAP_W &&
+            ValidDirtTile(tx, dirtStormTileY) &&
+            !RobotAtTile(tx, dirtStormTileY, -1) &&
+            (WORD)RandRange(100) < DIRT_STORM_DROP_CHANCE_PCT) {
+            map[dirtStormTileY][tx] = TILE_DIRT;
+            AddDirtListTile(tx, dirtStormTileY);
+            UpdateRoomTile(tx, dirtStormTileY);
+        }
+    }
+
+    if (tx >= MAP_W) {
+        dirtStormActive = FALSE;
+        dirtStormPassesLeft--;
+        if (dirtStormPassesLeft > 0) dirtStormGapTicks = DIRT_STORM_GAP_TICKS;
+        return;
+    }
+
+    /* Hand-rolling dirty rects for a sprite that crosses the whole room
+     * every second or so isn't worth the risk of getting it wrong - force
+     * a full redraw for the storm's brief lifetime instead, the same way
+     * the round countdown does. */
+    ForceGameplayFullPresent();
+}
+
+static void StopDirtStorm(WORD stopperId)
+{
+    if (!dirtStormActive) return;
+    dirtStormActive = FALSE;
+    dirtStormPassesLeft = 0;
+    dirtStormGapTicks = 0;
+    ForceGameplayFullPresent();
+
+    if (stopperId >= 0 && stopperId < robotCount) {
+        robots[stopperId].score += DIRT_STORM_STOP_POINTS;
+        totalScores[stopperId] += DIRT_STORM_STOP_POINTS;
+        snprintf(lastPowerText, sizeof(lastPowerText), "%s STOPPED THE SWEEPER +%d", RobotTag(stopperId), DIRT_STORM_STOP_POINTS);
+        lastPowerTicks = 80;
+    }
+}
+
+static void DrawDirtStorm(void)
+{
+    WORD sx;
+    WORD sy;
+    WORD srcX;
+
+    if (!dirtStormActive) return;
+    if (!robotCacheBM || !robotMaskBM || !robotMaskBM->Planes[0]) return;
+
+    sx = MAP_X + FP_TO_INT(dirtStormPx);
+    sy = MAP_Y + (dirtStormTileY * TILE_SIZE);
+    srcX = (dirtStormVariant * SPR_STATE_COUNT + SPR_LOW_BATTERY) * ROBOT_W;
+
+    BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
+                          &renderRP, sx, sy,
+                          ROBOT_W, ROBOT_H,
+                          (ABC | ABNC | ANBC),
+                          robotMaskBM->Planes[0]);
+
+    /* All seven hoover variants share the same 16-colour sprite sheet
+     * palette, just with different pens painted in their art, so there's
+     * no free pen to permanently recolour just this one sprite without
+     * risking corrupting art we can't preview on real hardware. Flicker
+     * the same warning pens the stun indicator already uses instead, so
+     * the storm reads as visibly damaged/sparking on top of whichever
+     * variant got picked this pass. */
+    {
+        UBYTE sparkPen = EmpWarningPen();
+        SetAPen(&renderRP, sparkPen);
+        RectFill(&renderRP, sx + 2, sy + 2, sx + 3, sy + 3);
+        RectFill(&renderRP, sx + 12, sy + 6, sx + 13, sy + 7);
+        RectFill(&renderRP, sx + 6, sy + 11, sx + 7, sy + 12);
+    }
+}
+
 static void ResetLevel(void)
 {
     WORD x, y;
@@ -5057,10 +5277,18 @@ static void ResetLevel(void)
         }
     }
 
-    map[1][1] = TILE_DOCK;
-    map[1][18] = TILE_DOCK;
-    map[11][1] = TILE_DOCK;
-    map[11][18] = TILE_DOCK;
+    {
+        /* Every robot that will actually spawn needs its own dock tile, not
+         * just the first four - the secret 9-rival mode (O) silently left
+         * robots 5-10 with no reachable TILE_DOCK, so they could never
+         * recharge once InitRobots placed them at RobotStartX/Y below. */
+        WORD dockCount = humanPlayers + aiRivals;
+        WORD di;
+        if (dockCount > MAX_ROBOTS) dockCount = MAX_ROBOTS;
+        for (di = 0; di < dockCount; di++) {
+            map[RobotDockY(di)][RobotDockX(di)] = TILE_DOCK;
+        }
+    }
 
     ClearDirtList();
     SpawnRoundDirt(RoundDirtTarget(roundIndex));
@@ -5076,6 +5304,10 @@ static void ResetLevel(void)
     ResetGameplaySpeedFrameCounter();
     empCountdownTicks = 0;
     empCountdownOwner = -1;
+    dirtStormActive = FALSE;
+    dirtStormTriggeredThisRound = FALSE;
+    dirtStormPassesLeft = 0;
+    dirtStormGapTicks = 0;
     gameState = GAME_PLAYING;
     ClosePauseMenu();
 
@@ -6419,19 +6651,29 @@ static void StepGame(void)
         return;
     }
 
+    if (pauseMenuOpen) {
+        /* Suspend any active EMP/night-mode palette dimming while paused,
+         * rather than letting UpdateNightMode/UpdateEmpPaletteCycle keep
+         * cycling it - the pause menu text shares low pens (7/14) with the
+         * dimmed room colours, so an EMP blackout mid-pause otherwise left
+         * the menu unreadable. Neither effect's own countdown ticks down
+         * below, so resuming picks the dim back up exactly where it left
+         * off. */
+        StopEmpPaletteCycle();
+        StopNightMode();
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
     UpdateNightMode();
     /* Apply EMP after any night-mode transition so the EMP room dimming is
      * the final palette state for the frame. */
     UpdateEmpPaletteCycle();
 
     BeginGameplayDirtyRects();
-
-    if (pauseMenuOpen) {
-        ServiceHooverMoveSample();
-        ForceGameplayFullPresent();
-        FinishGameplayDirtyRects();
-        return;
-    }
 
     StepRoundStartSamples();
 
@@ -6520,6 +6762,7 @@ static void StepGame(void)
     }
     StepBonusAiFire();
     StepMainGameAiFire();
+    StepDirtStorm();
     StepPlayerBolts();
     StepBossBolts();
     if (bonusBossExplosionTicks > 0) bonusBossExplosionTicks--;
@@ -6912,12 +7155,18 @@ static void DrawTitleCarousel(void)
         while (variant >= ROBOT_VARIANTS) variant -= ROBOT_VARIANTS;
 
         if (joyEnabled[0]) {
-            /* Once the physical stick is enabled, leave the neighbouring
-             * hoovers in the already-cached static panel and animate only
-             * the selected one. This keeps J1 selection responsive on an
-             * 68020/030 while retaining the full phase rate. */
-            if (slot != centreSlot) continue;
-            DrawCachedTitleRobotSpinFrame(variant, baseFrame, x, y);
+            /* Once the physical stick is enabled, keep the neighbouring
+             * hoovers visible but stop animating them and spin only the
+             * selected one. The static panel cache only holds the empty
+             * slot frames, not the robot sprites, so the neighbours must
+             * still be drawn here (as a static pose) or they simply vanish.
+             * This keeps J1 selection responsive on an 68020/030 while
+             * retaining the full phase rate for the selected hoover. */
+            if (slot == centreSlot) {
+                DrawCachedTitleRobotSpinFrame(variant, baseFrame, x, y);
+            } else {
+                DrawTitleRobotStatic(variant, SPR_READY, x, y);
+            }
         } else if (effectQuality == EFFECT_LOW) {
             if (slot < centreSlot - 1 || slot > centreSlot + 1) continue;
             if (slot == centreSlot) {
@@ -7196,7 +7445,10 @@ static void DrawHud(void)
         snprintf(b, sizeof(b), "ROUND WINNER: %s", RobotName(roundWinner));
         PutText(&renderRP, 14, 10, b, 13);
         DrawRobotHealthStrip();
-        PutText(&renderRP, 62, 30, "Press Space/Fire for next round", 7);
+        /* The health strip's boxes run down to y=29; a baseline of just 30
+         * put this text's ascent right through the bottom row of scores.
+         * Push it down a line so it sits clear underneath. */
+        PutText(&renderRP, 62, 42, "Press Space/Fire for next round", 7);
         return;
     }
 
@@ -7204,7 +7456,7 @@ static void DrawHud(void)
         snprintf(b, sizeof(b), "MATCH WINNER: %s", RobotName(finalWinner));
         PutText(&renderRP, 42, 10, b, 12);
         DrawRobotHealthStrip();
-        PutText(&renderRP, 72, 30, bonusAvailable ? "Space/Fire bonus" : "Space/Fire", 7);
+        PutText(&renderRP, 72, 42, bonusAvailable ? "Space/Fire bonus" : "Space/Fire", 7);
         return;
     }
 
@@ -7351,7 +7603,7 @@ static void DrawAiSelectMenu(void)
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, left, top, right, bottom);
 
-    MiniTextCentered(&renderRP, top + 10, "TWO PLAYER AI", 7, 2);
+    MiniTextCentered(&renderRP, top + 10, (humanPlayers >= 2) ? "TWO PLAYER AI" : "AI RIVALS", 7, 2);
     MiniTextCentered(&renderRP, top + 28, "HOW MANY RIVALS?", 8, 1);
 
     for (i = 0; i < 4; i++) {
@@ -7648,6 +7900,7 @@ static void DrawFrame(void)
     DrawBossBolts();
     DrawBossExplosion();
     DrawBonusBoss();
+    DrawDirtStorm();
     DrawRoundStartOverlay();
     DrawEmpRobotVisuals();
 
@@ -7803,11 +8056,20 @@ static void ClearMovementKeys(void)
 
 static void OpenPauseMenu(void)
 {
+    WORD i;
+
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
     pauseMenuOpen = TRUE;
     pauseMenuSelection = 0;
     ForceGameplayFullPresent();
     ClearMovementKeys();
+    /* Treat whatever direction a stick already happens to be held in as
+     * already consumed, so opening the pause menu with the stick pushed
+     * (e.g. mid-move) can't immediately toggle the selection by itself. */
+    for (i = 0; i < MAX_HUMAN_PLAYERS; i++) {
+        pauseJoyUpPrev[i] = TRUE;
+        pauseJoyDownPrev[i] = TRUE;
+    }
 }
 
 static void ClosePauseMenu(void)
@@ -7823,9 +8085,11 @@ static void OpenAiSelectMenu(WORD initialSelection)
     if (gameState != GAME_TITLE) return;
     if (initialSelection < 0) initialSelection = 0;
     if (initialSelection > 3) initialSelection = 3;
-    humanPlayers = 2;
-    titleTwoPlayerArmed = TRUE;
-    titlePlayer2Locked = TRUE;
+    /* Both solo and two-player flows use this same "how many AI" popup;
+     * the two-player call sites (TitleLockPlayer2/StartWithRivals) already
+     * arm humanPlayers/titleTwoPlayerArmed/titlePlayer2Locked before they
+     * get here, so this must not force them - doing so used to hijack a
+     * solo game into two-player mode the moment this opened. */
     titleSelectPlayer = 0;
     aiSelectMenuOpen = TRUE;
     aiSelectMenuSelection = initialSelection;
@@ -7881,7 +8145,7 @@ static void ActivateAiSelectMenu(void)
 {
     WORD rivals = aiSelectMenuSelection;
     CloseAiSelectMenu();
-    OpenAiDifficultyMenu(2, rivals);
+    OpenAiDifficultyMenu(humanPlayers, rivals);
 }
 
 static BOOL HandleAiDifficultyMenuRawKey(UWORD code, BOOL keyUpEvent)
@@ -8247,6 +8511,15 @@ static void StepPlayerBolt(WORD ownerId)
 
     if (gameState == GAME_BONUS_PLAYING) return;
 
+    if (dirtStormActive) {
+        WORD stormTx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
+        if (AbsW(stormTx - tx) + AbsW(dirtStormTileY - ty) <= 1) {
+            StopDirtStorm(ownerId);
+            bolt->active = FALSE;
+            return;
+        }
+    }
+
     for (i = 0; i < robotCount; i++) {
         if (i == ownerId) continue;
         if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
@@ -8431,8 +8704,13 @@ static BOOL ActivateSpaceOrFireAction(void)
     if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); return TRUE; }
     if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
-    if (gameState == GAME_TITLE && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(aiRivals); return TRUE; }
-    if (gameState == GAME_TITLE) { OpenAiDifficultyMenu(humanPlayers, aiRivals); return TRUE; }
+    /* Solo confirms land here too, not just the two-player flow: previously
+     * this skipped straight to the difficulty popup using whatever aiRivals
+     * happened to be left over (default 1), so a joystick-only player who
+     * had no way to type "1"/"2"/"3"/"O" first could never actually choose
+     * a rival count - they always got 1 AI. Show the same "how many rivals"
+     * popup two-player mode gets instead. */
+    if (gameState == GAME_TITLE) { OpenAiSelectMenu(aiRivals); return TRUE; }
     return FALSE;
 }
 
@@ -8473,6 +8751,18 @@ static void HandleRawKey(UWORD rawCode)
         return;
     }
 
+    /* Hidden Big Head mode: a purely cosmetic toggle, works any time during
+     * play. `B` was already taken by Player 1's fire, so this rides `G`. */
+    if (!keyUpEvent && code == RAW_G) {
+        bigHeadMode = !bigHeadMode;
+        if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+            ForceGameplayFullPresent();
+            snprintf(lastPowerText, sizeof(lastPowerText), "BIG MODE %s", bigHeadMode ? "ON" : "OFF");
+            lastPowerTicks = 80;
+        }
+        return;
+    }
+
     if (!keyUpEvent && gameState == GAME_INTRO) {
         EnterTitleScreen();
         return;
@@ -8508,7 +8798,7 @@ static void HandleRawKey(UWORD rawCode)
         if (gameState == GAME_BONUS_PLAYING) { StartBonusRound(); return; }
     }
 
-    if (!keyUpEvent && code == RAW_SPACE) {
+    if (!keyUpEvent && (code == RAW_SPACE || code == RAW_RETURN)) {
         if (ActivateSpaceOrFireAction()) return;
     }
 
@@ -8807,6 +9097,37 @@ static void PollJoysticks(void)
         bluePressed = (blue && !joyBluePrev[i]) ? TRUE : FALSE;
 
         if (gameState == GAME_TITLE && (directionActive || fire || blue)) titleIdleTicks = 0;
+
+        if (gameState == GAME_INTRO) {
+            if (fire || blue) {
+                joyFirePrev[i] = fire;
+                joyBluePrev[i] = blue;
+                EnterTitleScreen();
+                return;
+            }
+            joyFirePrev[i] = fire;
+            joyBluePrev[i] = blue;
+            continue;
+        }
+
+        if (pauseMenuOpen) {
+            BOOL upEdge = up && !pauseJoyUpPrev[i];
+            BOOL downEdge = down && !pauseJoyDownPrev[i];
+            BOOL fireEdge = fire && !joyFirePrev[i];
+
+            pauseJoyUpPrev[i] = up;
+            pauseJoyDownPrev[i] = down;
+            joyFirePrev[i] = fire;
+            joyBluePrev[i] = blue;
+
+            if (upEdge || downEdge) {
+                pauseMenuSelection = 1 - pauseMenuSelection;
+            }
+            if (fireEdge || bluePressed) {
+                ActivatePauseMenuSelection();
+            }
+            continue;
+        }
 
         if (demoModeActive) {
             BOOL newDemoInput;

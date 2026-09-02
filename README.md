@@ -24,14 +24,13 @@ Detailed actions:
   - Player 2 chooses with joystick 2 left/right or `Z`/`C`, then presses joystick 2 fire or `V` again to lock Player 2 and open the two-player AI rival prompt.
   - In the two-player AI prompt, choose `0`, `1`, `2`, or `3` AI rivals directly, or use Up/Down plus `Space` / Enter / the joystick blue (second) button / RMB. If you choose at least one AI rival, the next prompt asks for Easy / Normal / Hard AI difficulty.
 - Start / advance menus:
-  - On the title screen, start the match (or lock Player 2 if Player 2 is selecting; locked two-player mode opens the AI rival prompt) with `Space`, the joystick **blue (second) button**, RMB, or by holding fire for about two seconds.
-  - At the end of a round, continue to the next round with `Space`, joystick fire, or RMB.
-  - At the end of a match, start a new best-of-5 with `Space`, joystick fire, or RMB.
-- Pause: `Q` pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys and `Enter`; `Q` or `Esc` resumes.
+  - On the title screen, start the match (or lock Player 2 if Player 2 is selecting) with `Space`/`Enter`, the joystick **blue (second) button**, RMB, or by holding fire for about two seconds. This opens the "how many AI rivals?" prompt (`0`-`3`, joystick up/down + fire/blue to choose) whether you're solo or in locked two-player mode - a joystick-only player is never stuck defaulting to 1 AI. Choosing at least one AI then opens the Easy / Normal / Hard difficulty prompt.
+  - At the end of a round, continue to the next round with `Space`/`Enter`, joystick fire, or RMB.
+  - At the end of a match, start a new best-of-5 with `Space`/`Enter`, joystick fire, or RMB.
+- Pause: `Q` pauses during a match. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
 - `R`:
   - During match: reset current round
-- `1` / `2` / `3`: choose AI rival count from the one-player title screen; choosing at least one AI opens the Easy / Normal / Hard difficulty prompt.
-- `0` / `1` / `2` / `3`: choose AI rival count from the two-player AI prompt; choosing `0` starts immediately, while `1`-`3` opens the difficulty prompt.
+- `1` / `2` / `3`: keyboard shortcut that skips the "how many rivals" prompt and jumps straight to the Easy / Normal / Hard difficulty prompt with that many AI rivals, from either the one-player title screen or the two-player AI prompt (where `0` is also available, and starts immediately with no AI).
 - AI difficulty: Easy AI does not fire back, Normal AI fires only at close range, and Hard AI fires from longer range.
 - `D`: hidden Hoover Mode: four AI hoovers clean the room using fresh random hoover variants and headings. They keep straight cleaning lines where possible, then use dirt/open-space/recent-path look-ahead to turn around walls, tables, and other hoovers. Any input returns to the title screen.
 - `Esc`: quit
@@ -55,6 +54,14 @@ Every robot tracks a clean streak toward the super power tied to that robot vari
 The Dust Viper's speed effect leaves a short cached blitter motion trail behind the hoover. EMP also dims the room lighting, leaving the robot colours readable. Tables can be pushed one square when a hoover walks into them, provided the square behind them is clear; the winner screen records table shoves alongside score and round wins.
 
 The HUD shows each robot's current clean-streak count, flashes `P` while a timed power is active, and announces each triggered power.
+
+## Dirt Storm
+
+Once per round, as the room is about to be fully cleaned, there's a chance a runaway broken hoover zips in from the left wall and sweeps across a row, scattering fresh dirt behind it (ignoring walls, tables, and docks - it just flies straight through). It does this three times, on three different random rows, each with a short pause in between, giving a round extra life instead of ending it early. It flickers with the same warning-coloured sparks as a stunned hoover so it reads as visibly broken next to whichever of the seven normal hoover skins it happens to borrow. Hit it with an energy bolt at any point and the whole event stops dead, worth 2 bonus points.
+
+## Big Head Mode
+
+Press `G` at any time during play to toggle every robot to double size, purely for laughs - it's the same visual effect as the Neon Nibbler's quad-ghost power, just switched on permanently for everyone until you press `G` again. It has no effect on collisions, cleaning radius, or anything else gameplay-related.
 
 ## Match Structure
 
