@@ -327,6 +327,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BUMPER_AI_FIRE_RANGE     8
 
 #define BUMPER_FALL_TICKS        20
+#define BUMPER_SLIDE_SPEED       (5 * FP_ONE)
 
 
 /* Dirt Storm: a runaway "broken" hoover that zips across a row, ignoring
@@ -1203,6 +1204,18 @@ static WORD bumperEliminatedBy = -1;
 static WORD bumperEliminatedFlashTicks = 0;
 
 static WORD bumperFallTicks[MAX_ROBOTS];
+
+/* A bump/bolt push relocates a robot's logical tile instantly (so the
+ * pusher's own move into the vacated tile stays correctly timed, exactly
+ * like the existing table/race-bump shoves), but the on-screen sprite
+ * eases from the old position to the new one at BUMPER_SLIDE_SPEED
+ * instead of snapping there, so a push reads as a shove rather than a
+ * teleport. bumperVisualPx/Py hold the in-flight drawn position while
+ * bumperSliding[id] is set; DrawRobotBob uses them instead of the
+ * (already-updated) logical robots[id].px/py for that robot meanwhile. */
+static LONG bumperVisualPx[MAX_ROBOTS];
+static LONG bumperVisualPy[MAX_ROBOTS];
+static BOOL bumperSliding[MAX_ROBOTS];
 
 static BOOL bonusAvailable = FALSE;
 

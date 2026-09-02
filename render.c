@@ -2667,8 +2667,13 @@ static void DrawRobotBob(WORD id)
         return;
     }
 
-    sx = MAP_X + FP_TO_INT(robots[id].px);
-    sy = MAP_Y + FP_TO_INT(robots[id].py);
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER && bumperSliding[id]) {
+        sx = MAP_X + FP_TO_INT(bumperVisualPx[id]);
+        sy = MAP_Y + FP_TO_INT(bumperVisualPy[id]);
+    } else {
+        sx = MAP_X + FP_TO_INT(robots[id].px);
+        sy = MAP_Y + FP_TO_INT(robots[id].py);
+    }
     srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].spriteIndex) * ROBOT_W;
     raceTurning = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_RACE &&
                    robots[id].turnTicks > 0 &&

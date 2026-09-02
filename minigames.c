@@ -277,6 +277,7 @@ static void StartBumperBots(void)
         bumperEliminated[i] = FALSE;
         bumperEliminatedSeq[i] = -1;
         bumperFallTicks[i] = 0;
+        bumperSliding[i] = FALSE;
         aiPrevTileX[i] = robots[i].tileX;
         aiPrevTileY[i] = robots[i].tileY;
     }
@@ -484,6 +485,7 @@ static void BumperEliminateRobot(WORD id, WORD attackerId)
     robots[id].moving = FALSE;
     robots[id].stunTicks = 0;
     bumperFallTicks[id] = BUMPER_FALL_TICKS;
+    bumperSliding[id] = FALSE;
 
     bumperEliminatedRobot = id;
     bumperEliminatedBy = (attackerId >= 0 && attackerId < robotCount && attackerId != id) ? attackerId : -1;
@@ -507,17 +509,29 @@ static void BumperEliminateRobot(WORD id, WORD attackerId)
  * for a shoulder bump, several for a bolt hit. Sliding stops early if
  * another robot is in the way; running off the rug eliminates the target
  * instead of relocating it. Returns FALSE only when the very first step is
- * impossible, matching TryRaceBumpRobot's contract with StartRobotMove. */
+ * impossible, matching TryRaceBumpRobot's contract with StartRobotMove.
+ *
+ * The logical tile/px/py relocate instantly, same as the pre-existing
+ * table/race-bump shoves - the mover's own StartRobotMove call advances
+ * into the vacated tile in the same frame, so that tile must already read
+ * as empty. Only the on-screen sprite eases into place afterward (see
+ * bumperVisualPx/Py, stepped in StepBumperBots and drawn in DrawRobotBob)
+ * so a push reads as a shove rather than a teleport. */
 static BOOL BumperPushRobot(WORD blockedId, WORD dx, WORD dy, WORD tiles, WORD attackerId)
 {
     WORD step;
     WORD pushX;
     WORD pushY;
+    LONG fromPx;
+    LONG fromPy;
 
     if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BUMPER) return FALSE;
     if (blockedId < 0 || blockedId >= robotCount || bumperEliminated[blockedId]) return FALSE;
-    if (robots[blockedId].moving) return FALSE;
+    if (robots[blockedId].moving || robots[blockedId].stunTicks > 0) return FALSE;
     if (dx == 0 && dy == 0) return FALSE;
+
+    fromPx = robots[blockedId].px;
+    fromPy = robots[blockedId].py;
 
     pushX = robots[blockedId].tileX + dx;
     pushY = robots[blockedId].tileY + dy;
@@ -537,8 +551,11 @@ static BOOL BumperPushRobot(WORD blockedId, WORD dx, WORD dy, WORD tiles, WORD a
     robots[blockedId].targetPx = robots[blockedId].px;
     robots[blockedId].targetPy = robots[blockedId].py;
     robots[blockedId].moving = FALSE;
-    robots[blockedId].stunTicks = BUMPER_BUMP_STUN_TICKS;
     robots[blockedId].boltStunned = FALSE;
+    if (dx < 0) SetRobotMoveSprite(blockedId, SPR_LEFT);
+    else if (dx > 0) SetRobotMoveSprite(blockedId, SPR_RIGHT);
+    else if (dy < 0) SetRobotMoveSprite(blockedId, SPR_UP);
+    else if (dy > 0) SetRobotMoveSprite(blockedId, SPR_DOWN);
 
     for (step = 1; step < tiles; step++) {
         WORD nx = robots[blockedId].tileX + dx;
@@ -559,6 +576,17 @@ static BOOL BumperPushRobot(WORD blockedId, WORD dx, WORD dy, WORD tiles, WORD a
         robots[blockedId].targetPx = robots[blockedId].px;
         robots[blockedId].targetPy = robots[blockedId].py;
     }
+
+    /* Stun lasts at least as long as the visual slide takes to cover the
+     * distance actually travelled (step tiles at BUMPER_SLIDE_SPEED each),
+     * so a robot can't dart off under its own control while still sliding
+     * from the last hit - a straight recovery beat rather than moves
+     * overlapping mid-slide. */
+    robots[blockedId].stunTicks = BUMPER_BUMP_STUN_TICKS * step;
+
+    bumperVisualPx[blockedId] = fromPx;
+    bumperVisualPy[blockedId] = fromPy;
+    bumperSliding[blockedId] = TRUE;
 
     return TRUE;
 }
@@ -834,6 +862,30 @@ static void StepBumperBots(void)
          * (<0.5s) lifetime is far cheaper than teaching the dirty-rect
          * tracker about a sinking/spinning sprite, the way Dirt Storm
          * would have needed before it got its own dirty-rect tracking. */
+        ForceGameplayFullPresent();
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        LONG dxp;
+        LONG dyp;
+
+        if (!bumperSliding[i]) continue;
+
+        dxp = robots[i].px - bumperVisualPx[i];
+        dyp = robots[i].py - bumperVisualPy[i];
+        if (dxp > BUMPER_SLIDE_SPEED) dxp = BUMPER_SLIDE_SPEED;
+        else if (dxp < -BUMPER_SLIDE_SPEED) dxp = -BUMPER_SLIDE_SPEED;
+        if (dyp > BUMPER_SLIDE_SPEED) dyp = BUMPER_SLIDE_SPEED;
+        else if (dyp < -BUMPER_SLIDE_SPEED) dyp = -BUMPER_SLIDE_SPEED;
+        bumperVisualPx[i] += dxp;
+        bumperVisualPy[i] += dyp;
+        if (bumperVisualPx[i] == robots[i].px && bumperVisualPy[i] == robots[i].py) {
+            bumperSliding[i] = FALSE;
+        }
+        /* Same reasoning as the fall animation above: a shove is brief and
+         * infrequent enough that forcing a full present is simpler and
+         * cheaper than dirty-rect-tracking a sprite that moves independently
+         * of robots[i].px/py. */
         ForceGameplayFullPresent();
     }
 
