@@ -167,8 +167,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
  * out of bounds, at which point it is eliminated instead of relocated. */
 #define BUMPER_ARENA_MIN_X       6
 #define BUMPER_ARENA_MAX_X       13
-#define BUMPER_ARENA_MIN_Y       4
-#define BUMPER_ARENA_MAX_Y       9
+#define BUMPER_ARENA_MIN_Y       3
+#define BUMPER_ARENA_MAX_Y       10
 #define BUMPER_TIME_TICKS        (60 * 50)
 #define BUMPER_BUMP_PUSH_TILES   1
 #define BUMPER_BOLT_PUSH_TILES   3
@@ -177,6 +177,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BUMPER_ELIM_FLASH_TICKS  80
 #define BUMPER_AI_FIRE_CHANCE    20
 #define BUMPER_AI_FIRE_RANGE     8
+#define BUMPER_FALL_TICKS        20
 
 /* Dirt Storm: a runaway "broken" hoover that zips across a row, ignoring
  * walls/tables, scattering fresh dirt as it goes. Fires once per round,
@@ -798,6 +799,7 @@ static WORD bumperEliminationSeq = 0;
 static WORD bumperEliminatedRobot = -1;
 static WORD bumperEliminatedBy = -1;
 static WORD bumperEliminatedFlashTicks = 0;
+static WORD bumperFallTicks[MAX_ROBOTS];
 static BOOL bonusAvailable = FALSE;
 static WORD bonusBossHealth = 0;
 static WORD bonusBossX = 0;
@@ -1194,6 +1196,7 @@ static void StartRoboPuck(void);
 static void StepRoboPuck(void);
 static void FinishRoboPuck(void);
 static void ChoosePuckAiMove(WORD id);
+static WORD PuckTeamForRobot(WORD id);
 static void StartBumperBots(void);
 static void StepBumperBots(void);
 static void FinishBumperBots(void);
@@ -3429,7 +3432,17 @@ static void UpdateRoomTile(WORD tx, WORD ty)
 {
     if (!roomBM || tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return;
     if (map[ty][tx] == TILE_WALL) {
-        BlitWallRotatedTo(&roomRP, tx, ty);
+        /* Bumper Bots reuses TILE_WALL for the abyss ring purely for its
+         * blocking behaviour; visually it should read as empty space, not
+         * a room wall, so paint it black instead of the wall art. */
+        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER) {
+            WORD dstX = MAP_X + tx * TILE_SIZE;
+            WORD dstY = MAP_Y + ty * TILE_SIZE;
+            SetAPen(&roomRP, 0);
+            RectFill(&roomRP, dstX, dstY, dstX + TILE_SIZE - 1, dstY + TILE_SIZE - 1);
+        } else {
+            BlitWallRotatedTo(&roomRP, tx, ty);
+        }
     } else {
         BlitTileTo(&roomRP, map[ty][tx], tx, ty);
     }
@@ -4890,6 +4903,35 @@ static void DrawSpeedMotionBlur(WORD id, WORD sx, WORD sy)
                           speedTrailMaskBM->Planes[0]);
 }
 
+/* A short cartoon tumble for a robot just knocked off the rug: it spins
+ * through the four facing frames, sinks lower each tick, and blinks, then
+ * vanishes for good. Reuses the existing cached sprite frames only - no
+ * new art, no scaling. */
+static void DrawBumperFallingRobot(WORD id)
+{
+    static const UBYTE spinStates[4] = {SPR_UP, SPR_RIGHT, SPR_DOWN, SPR_LEFT};
+    WORD sx;
+    WORD sy;
+    WORD srcX;
+    WORD sink;
+    WORD spinFrame;
+
+    if (!robotCacheBM || !robotMaskBM || !robotMaskBM->Planes[0]) return;
+    if ((bumperFallTicks[id] & 2) == 0) return;
+
+    sink = (BUMPER_FALL_TICKS - bumperFallTicks[id]) * 2;
+    sx = MAP_X + FP_TO_INT(robots[id].px);
+    sy = MAP_Y + FP_TO_INT(robots[id].py) + sink;
+    spinFrame = spinStates[(bumperFallTicks[id] >> 1) & 3];
+    srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + spinFrame) * ROBOT_W;
+
+    BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
+                          &renderRP, sx, sy,
+                          ROBOT_W, ROBOT_H,
+                          (ABC | ABNC | ANBC),
+                          robotMaskBM->Planes[0]);
+}
+
 static void DrawRobotBob(WORD id)
 {
     WORD sx;
@@ -4898,7 +4940,10 @@ static void DrawRobotBob(WORD id)
     WORD raceTurning;
 
     if (id < 0 || id >= robotCount) return;
-    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER && bumperEliminated[id]) return;
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER && bumperEliminated[id]) {
+        if (bumperFallTicks[id] > 0) DrawBumperFallingRobot(id);
+        return;
+    }
 
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py);
@@ -4925,8 +4970,19 @@ static void DrawRobotBob(WORD id)
      * bottom of the enlarged sprite in either mode, so omit it whenever
      * the robot is drawn scaled up. */
     if (!bigHeadMode && !(robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
-        SetAPen(&renderRP, 6);
-        RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
+        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_PUCK) {
+            /* The seven hoover variants share one palette with no pen free
+             * to safely recolour the cached sprite art itself (see the Dirt
+             * Storm note below), so a team "skin" is a solid colour tile
+             * behind the BOB instead - same pens DrawPuckHud already uses
+             * for TEAM 1/TEAM 2, showing through the sprite's transparent
+             * mask as a coloured aura around each hoover. */
+            SetAPen(&renderRP, (PuckTeamForRobot(id) == 0) ? 13 : 10);
+            RectFill(&renderRP, sx, sy, sx + ROBOT_W - 1, sy + ROBOT_H - 1);
+        } else {
+            SetAPen(&renderRP, 6);
+            RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
+        }
     }
 
     if (robotCacheBM && robotMaskBM && robotMaskBM->Planes[0]) {
@@ -5980,6 +6036,7 @@ static void StartBumperBots(void)
         robots[i].stunTicks = 0;
         bumperEliminated[i] = FALSE;
         bumperEliminatedSeq[i] = -1;
+        bumperFallTicks[i] = 0;
         aiPrevTileX[i] = robots[i].tileX;
         aiPrevTileY[i] = robots[i].tileY;
     }
@@ -6177,6 +6234,7 @@ static void BumperEliminateRobot(WORD id, WORD attackerId)
     bumperAliveCount--;
     robots[id].moving = FALSE;
     robots[id].stunTicks = 0;
+    bumperFallTicks[id] = BUMPER_FALL_TICKS;
 
     bumperEliminatedRobot = id;
     bumperEliminatedBy = (attackerId >= 0 && attackerId < robotCount && attackerId != id) ? attackerId : -1;
@@ -7126,7 +7184,10 @@ static void ChoosePlayerMove(WORD id)
     if (id < 0 || id >= humanPlayers) return;
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
-    if (gameState == GAME_MINIGAME_PLAYING && racePlace[id] >= 0) return;
+    /* racePlace[] is only ever reset by StartRoboRace, so a stale "already
+     * finished" value from an earlier race must not carry over and block
+     * movement in a later Puck or Bumper Bots round. */
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_RACE && racePlace[id] >= 0) return;
 
     if (keyLeft[id]) {
         StartRobotMove(id, -1, 0);
@@ -7999,6 +8060,17 @@ static void StepBumperBots(void)
 
     if (bumperEliminatedFlashTicks > 0) bumperEliminatedFlashTicks--;
     if (bumperTicksRemaining > 0) bumperTicksRemaining--;
+
+    for (i = 0; i < robotCount; i++) {
+        if (bumperFallTicks[i] <= 0) continue;
+        bumperFallTicks[i]--;
+        /* The fall animation moves and blinks every tick regardless of the
+         * gameplay speed setting; forcing a full present for its short
+         * (<0.5s) lifetime is far cheaper than teaching the dirty-rect
+         * tracker about a sinking/spinning sprite, the way Dirt Storm
+         * would have needed before it got its own dirty-rect tracking. */
+        ForceGameplayFullPresent();
+    }
 
     if (bumperTicksRemaining <= 0 || bumperAliveCount <= 1) {
         FinishBumperBots();
