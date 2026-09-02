@@ -121,6 +121,23 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define HOOVER_RANDOM_TURN_CHANCE 8
 #define BONUS_SCORE_THRESHOLD    50
 
+/* Robo Party intermissions.  The first mini-game deliberately reuses the
+ * normal arena, robot BOBs, fixed-point movement and input loop: only the
+ * rules and map change.  This keeps the feature friendly to classic Amigas
+ * and leaves a small enum/switch seam for Puck and Dirt Dash later. */
+#define MINIGAME_NONE            0
+#define MINIGAME_RACE            1
+#define MINIGAME_COUNT           1
+#define MINIGAME_INTRO_TICKS     100
+#define RACE_LAPS                2
+#define RACE_TIME_TICKS          (40 * 50)
+#define RACE_FINISH_GRACE_TICKS  (5 * 50)
+#define RACE_CHECKPOINT_COUNT    4
+#define RACE_MOVE_SPEED          (3 * FP_ONE)
+#define RACE_BOOST_SPEED         (5 * FP_ONE)
+#define RACE_BOOST_MOVES         8
+#define RACE_BUMP_STUN_TICKS     6
+
 /* Dirt Storm: a runaway "broken" hoover that zips across a row, ignoring
  * walls/tables, scattering fresh dirt as it goes. Fires once per round,
  * just as the room is about to be fully cleaned, to stretch play out a
@@ -208,6 +225,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define GAME_MATCH_END  4
 #define GAME_BONUS_PLAYING 5
 #define GAME_BONUS_END 6
+#define GAME_MINIGAME_INTRO 7
+#define GAME_MINIGAME_PLAYING 8
+#define GAME_MINIGAME_END 9
 
 #define RAW_ESC     0x45
 #define RAW_LEFT    0x4F
@@ -368,6 +388,15 @@ struct Robot {
     WORD turnDirection;
     UBYTE spriteVariant;
     WORD tablesPushed;
+};
+
+struct RaceCheckpoint {
+    UBYTE minX;
+    UBYTE maxX;
+    UBYTE minY;
+    UBYTE maxY;
+    UBYTE targetX;
+    UBYTE targetY;
 };
 
 
@@ -623,6 +652,13 @@ static WORD batteryCostPerMove = 1;
 static BOOL EnableTitleCopperGradient(void);
 static WORD gameState = GAME_TITLE;
 
+static BOOL IsArenaPlaying(void)
+{
+    return (gameState == GAME_PLAYING ||
+            gameState == GAME_BONUS_PLAYING ||
+            gameState == GAME_MINIGAME_PLAYING) ? TRUE : FALSE;
+}
+
 static void MarkTitlePanelDirty(void)
 {
     if (gameState != GAME_TITLE) return;
@@ -687,6 +723,18 @@ static WORD roundScores[MAX_ROBOTS] = {0,0,0,0};
 static WORD totalTablePushes[MAX_ROBOTS] = {0,0,0,0};
 static WORD roundWinner = -1;
 static WORD finalWinner = -1;
+static WORD miniGameType = MINIGAME_NONE;
+static WORD miniGameIntroTicks = 0;
+static WORD miniGameWinner = -1;
+static WORD miniGamePoints[MAX_ROBOTS];
+static WORD lastMiniGame = MINIGAME_NONE;
+static WORD raceTicksRemaining = 0;
+static WORD raceFinishGraceTicks = 0;
+static WORD raceLap[MAX_ROBOTS];
+static WORD raceNextCheckpoint[MAX_ROBOTS];
+static WORD racePlace[MAX_ROBOTS];
+static WORD raceBoostMoves[MAX_ROBOTS];
+static WORD raceFinishCount = 0;
 static BOOL bonusAvailable = FALSE;
 static WORD bonusBossHealth = 0;
 static WORD bonusBossX = 0;
@@ -836,6 +884,9 @@ static WORD dirtyPrevEmpTicks = -1;
 static WORD dirtyPrevRoundGoTicks = -1;
 static WORD dirtyPrevCountdownTicks = -1;
 static WORD dirtyPrevRobotCount = -1;
+static WORD dirtyPrevRaceSecond = -1;
+static WORD dirtyPrevRaceLap[MAX_ROBOTS];
+static WORD dirtyPrevRacePlace[MAX_ROBOTS];
 #endif
 
 static ULONG rng = 0x1234ABCD;
@@ -848,6 +899,17 @@ static const WORD robotStartXTwoPlayer[MAX_ROBOTS] = {1, 18, 18, 1, 17, 2, 1, 18
 static const WORD robotStartYTwoPlayer[MAX_ROBOTS] = {1, 11, 1, 11, 10, 10, 10, 10, 11, 10};
 static const WORD robotDockXTwoPlayer[MAX_ROBOTS]  = {1, 18, 18, 1, 17, 1, 1, 18, 18, 18};
 static const WORD robotDockYTwoPlayer[MAX_ROBOTS]  = {1, 11, 1, 11, 11, 11, 11, 11, 11, 11};
+static const WORD raceStartX[MAX_ROBOTS] = {5, 5, 5, 6, 6, 6, 7, 7, 7, 8};
+static const WORD raceStartY[MAX_ROBOTS] = {9, 10, 11, 9, 10, 11, 9, 10, 11, 10};
+
+/* Clockwise gates around the central island.  Robots start just beyond the
+ * start/finish gate and must visit 1, 2, 3, then 0 to complete a lap. */
+static const struct RaceCheckpoint raceCheckpoints[RACE_CHECKPOINT_COUNT] = {
+    {4, 4, 9, 12, 4, 10},
+    {15, 18, 8, 8, 16, 8},
+    {14, 14, 1, 3, 14, 2},
+    {1, 4, 4, 4, 3, 4}
+};
 
 static WORD RobotStartX(WORD id)
 {
@@ -1035,6 +1097,16 @@ static void OpenAiDifficultyMenu(WORD players, WORD rivals);
 static void StartMatch(WORD players, WORD rivals);
 static void StartDemoMode(void);
 static void StartHooverMode(void);
+static WORD MatchRoundCount(void);
+static void StartMiniGameIntro(void);
+static void StartRoboRace(void);
+static void StepRoboRace(void);
+static void FinishRoboRace(void);
+static void RaceHandleRobotArrival(WORD id);
+static void ChooseRaceAiMove(WORD id);
+static BOOL IsArenaPlaying(void);
+static void DrawMiniGameIntroScreen(void);
+static void DrawMiniGameEndScreen(void);
 static void StartBonusRound(void);
 static void FinishBonusRound(void);
 static BOOL BuildBonusBossCache(void);
@@ -1201,6 +1273,23 @@ static const char *roomLayouts[5][MAP_H] = {
         "#..................#",
         "####################"
     }
+};
+
+static const char *raceLayout[MAP_H] = {
+    "####################",
+    "#..................#",
+    "#..................#",
+    "#..................#",
+    "#....##########....#",
+    "#....##########....#",
+    "#....##########....#",
+    "#....##########....#",
+    "#....##########....#",
+    "#..................#",
+    "#..................#",
+    "#..................#",
+    "#..................#",
+    "####################"
 };
 
 static UWORD RandRange(UWORD n)
@@ -1713,10 +1802,20 @@ static void MarkDirtyHudIfChanged(void)
         changed = TRUE;
     }
 
+    if (gameState == GAME_MINIGAME_PLAYING &&
+        dirtyPrevRaceSecond != (raceTicksRemaining / 50)) {
+        changed = TRUE;
+    }
+
     for (i = 0; i < robotCount; i++) {
         if (dirtyPrevBattery[i] != robots[i].battery || dirtyPrevScore[i] != robots[i].score ||
             dirtyPrevStunTicks[i] != robots[i].stunTicks || dirtyPrevPowerMoves[i] != robots[i].powerMovesLeft ||
             dirtyPrevPowerType[i] != robots[i].powerType) {
+            changed = TRUE;
+            break;
+        }
+        if (gameState == GAME_MINIGAME_PLAYING &&
+            (dirtyPrevRaceLap[i] != raceLap[i] || dirtyPrevRacePlace[i] != racePlace[i])) {
             changed = TRUE;
             break;
         }
@@ -1737,12 +1836,15 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevCountdownTicks = roundCountdownTicks;
     dirtyPrevRobotCount = robotCount;
     dirtyPrevBossHealth = bonusBossHealth;
+    dirtyPrevRaceSecond = raceTicksRemaining / 50;
     for (i = 0; i < robotCount; i++) {
         dirtyPrevBattery[i] = robots[i].battery;
         dirtyPrevScore[i] = robots[i].score;
         dirtyPrevStunTicks[i] = robots[i].stunTicks;
         dirtyPrevPowerMoves[i] = robots[i].powerMovesLeft;
         dirtyPrevPowerType[i] = robots[i].powerType;
+        dirtyPrevRaceLap[i] = raceLap[i];
+        dirtyPrevRacePlace[i] = racePlace[i];
     }
 }
 
@@ -1778,7 +1880,7 @@ static void BeginGameplayDirtyRects(void)
 {
     WORD i;
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
+    if (!IsArenaPlaying()) {
         dirtyRectsBuiltForFrame = FALSE;
         return;
     }
@@ -1805,7 +1907,7 @@ static void FinishGameplayDirtyRects(void)
 {
     WORD i;
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
+    if (!IsArenaPlaying()) {
         ForceGameplayFullPresent();
         return;
     }
@@ -2363,7 +2465,7 @@ static BOOL AnyHooverMoving(void)
 {
     WORD i;
 
-    if ((gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) || roundCountdownTicks > 0 || pauseMenuOpen) return FALSE;
+    if (!IsArenaPlaying() || roundCountdownTicks > 0 || pauseMenuOpen) return FALSE;
     for (i = 0; i < robotCount; i++) {
         if (robots[i].moving) return TRUE;
     }
@@ -2911,7 +3013,7 @@ static ULONG ReadBE32(const UBYTE *p)
 
 static BOOL RoundStartLocked(void)
 {
-    return ((gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) &&
+    return (IsArenaPlaying() &&
             roundCountdownTicks > 0) ? TRUE : FALSE;
 }
 
@@ -5318,6 +5420,254 @@ static void ResetLevel(void)
     StartRoundCountdownAudio();
 }
 
+static BOOL ShouldStartMiniGameAfterRound(WORD completedRound)
+{
+    if (completedRound >= MatchRoundCount() - 1) return FALSE;
+    return (completedRound == 1 || completedRound == 3) ? TRUE : FALSE;
+}
+
+static WORD ChooseNextMiniGame(void)
+{
+    WORD choice;
+
+    if (MINIGAME_COUNT <= 1) return MINIGAME_RACE;
+    do {
+        choice = 1 + (WORD)RandRange(MINIGAME_COUNT);
+    } while (choice == lastMiniGame);
+    return choice;
+}
+
+static void StartMiniGameIntro(void)
+{
+    WORD i;
+
+    StopMenuMusic();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClosePauseMenu();
+    ClearMovementKeys();
+
+    miniGameType = ChooseNextMiniGame();
+    lastMiniGame = miniGameType;
+    miniGameIntroTicks = MINIGAME_INTRO_TICKS;
+    miniGameWinner = -1;
+    for (i = 0; i < MAX_ROBOTS; i++) miniGamePoints[i] = 0;
+
+    gameState = GAME_MINIGAME_INTRO;
+    ForceGameplayFullPresent();
+}
+
+static void StartRoboRace(void)
+{
+    WORD x;
+    WORD y;
+    WORD i;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClearMovementKeys();
+    ClosePauseMenu();
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            map[y][x] = (raceLayout[y][x] == '#') ? TILE_WALL : TILE_FLOOR;
+        }
+    }
+
+    /* Draw the four gates with the spare marker tile. */
+    for (i = 0; i < RACE_CHECKPOINT_COUNT; i++) {
+        WORD gx;
+        WORD gy;
+        for (gy = raceCheckpoints[i].minY; gy <= raceCheckpoints[i].maxY; gy++) {
+            for (gx = raceCheckpoints[i].minX; gx <= raceCheckpoints[i].maxX; gx++) {
+                map[gy][gx] = TILE_MARKER;
+            }
+        }
+    }
+
+    /* Existing dock artwork doubles as four battery boost pads. */
+    map[10][17] = TILE_DOCK;
+    map[2][16] = TILE_DOCK;
+    map[2][2] = TILE_DOCK;
+    map[10][2] = TILE_DOCK;
+
+    ClearDirtList();
+    { WORD bi; for (bi = 0; bi < MAX_ROBOTS; bi++) playerBolts[bi].active = FALSE; }
+    { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
+    dirtStormActive = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+
+    gameState = GAME_MINIGAME_PLAYING;
+    InitRobots();
+    for (i = 0; i < robotCount; i++) {
+        UBYTE variant = robots[i].spriteVariant;
+        WORD h;
+
+        SetRobotTile(i, raceStartX[i], raceStartY[i]);
+        robots[i].spriteVariant = variant;
+        robots[i].battery = maxBattery;
+        robots[i].powerType = POWER_NONE;
+        robots[i].powerMovesLeft = 0;
+        robots[i].stunTicks = 0;
+        raceLap[i] = 0;
+        raceNextCheckpoint[i] = 1;
+        racePlace[i] = -1;
+        raceBoostMoves[i] = 0;
+        speedFlashTicks[i] = 0;
+        aiPrevTileX[i] = raceStartX[i];
+        aiPrevTileY[i] = raceStartY[i];
+        for (h = 0; h < AI_RECENT_TILE_COUNT; h++) {
+            aiRecentTileX[i][h] = raceStartX[i];
+            aiRecentTileY[i][h] = raceStartY[i];
+        }
+    }
+    for (i = robotCount; i < MAX_ROBOTS; i++) {
+        raceLap[i] = 0;
+        raceNextCheckpoint[i] = 1;
+        racePlace[i] = -1;
+        raceBoostMoves[i] = 0;
+    }
+
+    raceFinishCount = 0;
+    raceTicksRemaining = RACE_TIME_TICKS;
+    raceFinishGraceTicks = 0;
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
+    roundGoTicks = 0;
+    roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
+    MarkHudStatusTextDirty();
+    BuildRoomBuffer();
+    ForceGameplayFullPresent();
+    StartRoundCountdownAudio();
+}
+
+static BOOL RaceCheckpointReached(WORD id, WORD checkpoint)
+{
+    const struct RaceCheckpoint *gate;
+    WORD x;
+    WORD y;
+
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (checkpoint < 0 || checkpoint >= RACE_CHECKPOINT_COUNT) return FALSE;
+    gate = &raceCheckpoints[checkpoint];
+    x = robots[id].tileX;
+    y = robots[id].tileY;
+    return (x >= gate->minX && x <= gate->maxX &&
+            y >= gate->minY && y <= gate->maxY) ? TRUE : FALSE;
+}
+
+static void RaceHandleRobotArrival(WORD id)
+{
+    WORD checkpoint;
+
+    if (id < 0 || id >= robotCount) return;
+
+    if (map[robots[id].tileY][robots[id].tileX] == TILE_DOCK) {
+        raceBoostMoves[id] = RACE_BOOST_MOVES;
+        speedFlashTicks[id] = SPEED_FLASH_TICKS;
+    }
+
+    if (racePlace[id] >= 0) return;
+    checkpoint = raceNextCheckpoint[id];
+    if (!RaceCheckpointReached(id, checkpoint)) return;
+
+    if (checkpoint == 0) {
+        raceLap[id]++;
+        if (raceLap[id] >= RACE_LAPS) {
+            racePlace[id] = raceFinishCount++;
+            robots[id].moving = FALSE;
+            if (raceFinishCount == 1) raceFinishGraceTicks = RACE_FINISH_GRACE_TICKS;
+        }
+    }
+    raceNextCheckpoint[id] = (checkpoint + 1) % RACE_CHECKPOINT_COUNT;
+    MarkHudStatusTextDirty();
+}
+
+static LONG RaceProgressScore(WORD id)
+{
+    WORD checkpoint;
+    WORD gatesPassed;
+    WORD distance;
+
+    if (racePlace[id] >= 0) return 20000L - ((LONG)racePlace[id] * 1000L);
+
+    checkpoint = raceNextCheckpoint[id];
+    if (checkpoint == 0) gatesPassed = 3;
+    else gatesPassed = checkpoint - 1;
+    distance = AbsW(robots[id].tileX - raceCheckpoints[checkpoint].targetX) +
+               AbsW(robots[id].tileY - raceCheckpoints[checkpoint].targetY);
+    return ((LONG)(raceLap[id] * RACE_CHECKPOINT_COUNT + gatesPassed) * 100L) - distance;
+}
+
+static void FinishRoboRace(void)
+{
+    WORD order[MAX_ROBOTS];
+    WORD i;
+    WORD pass;
+    static const WORD points[3] = {3, 2, 1};
+
+    if (gameState != GAME_MINIGAME_PLAYING) return;
+
+    for (i = 0; i < robotCount; i++) order[i] = i;
+    for (pass = 0; pass < robotCount - 1; pass++) {
+        for (i = 0; i < robotCount - 1 - pass; i++) {
+            if (RaceProgressScore(order[i + 1]) > RaceProgressScore(order[i])) {
+                WORD t = order[i];
+                order[i] = order[i + 1];
+                order[i + 1] = t;
+            }
+        }
+    }
+
+    miniGameWinner = order[0];
+    for (i = 0; i < robotCount && i < 3; i++) {
+        miniGamePoints[order[i]] = points[i];
+        totalScores[order[i]] += points[i];
+    }
+
+    ClearMovementKeys();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    gameState = GAME_MINIGAME_END;
+    ForceGameplayFullPresent();
+}
+
+static BOOL TryRaceBumpRobot(WORD blockedId, WORD dx, WORD dy)
+{
+    WORD pushX;
+    WORD pushY;
+
+    if (gameState != GAME_MINIGAME_PLAYING) return FALSE;
+    if (blockedId < 0 || blockedId >= robotCount || robots[blockedId].moving) return FALSE;
+    if (racePlace[blockedId] >= 0) return FALSE;
+
+    pushX = robots[blockedId].tileX + dx;
+    pushY = robots[blockedId].tileY + dy;
+    if (!RobotCanPassTile(blockedId, pushX, pushY)) return FALSE;
+    if (RobotAtTile(pushX, pushY, blockedId)) return FALSE;
+
+    robots[blockedId].tileX = pushX;
+    robots[blockedId].tileY = pushY;
+    robots[blockedId].targetX = pushX;
+    robots[blockedId].targetY = pushY;
+    robots[blockedId].px = TO_FP(pushX * TILE_SIZE);
+    robots[blockedId].py = TO_FP(pushY * TILE_SIZE);
+    robots[blockedId].targetPx = robots[blockedId].px;
+    robots[blockedId].targetPy = robots[blockedId].py;
+    robots[blockedId].moving = FALSE;
+    robots[blockedId].stunTicks = RACE_BUMP_STUN_TICKS;
+    robots[blockedId].boltStunned = FALSE;
+    RaceHandleRobotArrival(blockedId);
+    return TRUE;
+}
+
 static BOOL TryPushTable(WORD id, WORD tx, WORD ty, WORD dx, WORD dy)
 {
     WORD pushX = tx + dx;
@@ -5352,7 +5702,7 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
 
     if (id < 0 || id >= robotCount) return FALSE;
     if (robots[id].moving) return FALSE;
-    if (robots[id].battery < batteryCostPerMove) {
+    if (gameState != GAME_MINIGAME_PLAYING && robots[id].battery < batteryCostPerMove) {
         if (robots[id].battery > 0) return FALSE;
         if (robots[id].emergencyMovesLeft <= 0) return FALSE;
     }
@@ -5365,13 +5715,16 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     }
     if (!RobotCanPassTile(id, nx, ny)) return FALSE;
     if (RobotAtTile(nx, ny, id)) {
+        WORD blockedId = RobotIdAtTile(nx, ny, id);
         /* During the bonus boss fight, walking into a teammate who is out of
          * charge shoves them one tile further along instead of just
          * blocking, the same way the boss shoves a grazed robot, so a
          * stranded robot can be nudged back toward a dock instead of
          * getting stuck. */
-        if (gameState != GAME_BONUS_PLAYING ||
-            !TryPushStrandedRobot(RobotIdAtTile(nx, ny, id), dx, dy)) {
+        if (gameState == GAME_MINIGAME_PLAYING) {
+            if (!TryRaceBumpRobot(blockedId, dx, dy)) return FALSE;
+        } else if (gameState != GAME_BONUS_PLAYING ||
+                   !TryPushStrandedRobot(blockedId, dx, dy)) {
             return FALSE;
         }
     }
@@ -5381,7 +5734,7 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         UpdateRoomTile(nx, ny);
     }
 
-    if (robots[id].battery < batteryCostPerMove) {
+    if (gameState != GAME_MINIGAME_PLAYING && robots[id].battery < batteryCostPerMove) {
         dockDistNow = AbsW(robots[id].tileX - RobotDockX(id)) + AbsW(robots[id].tileY - RobotDockY(id));
         dockDistNext = AbsW(nx - RobotDockX(id)) + AbsW(ny - RobotDockY(id));
         if (dockDistNext >= dockDistNow) return FALSE;
@@ -5400,20 +5753,20 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
         playerFacingX[id] = dx;
         playerFacingY[id] = dy;
     }
-    if (robots[id].battery >= batteryCostPerMove) {
-        robots[id].battery -= batteryCostPerMove;
-    } else {
-        robots[id].battery = 0;
-        robots[id].emergencyMovesLeft--;
-    }
+    if (gameState != GAME_MINIGAME_PLAYING) {
+        if (robots[id].battery >= batteryCostPerMove) {
+            robots[id].battery -= batteryCostPerMove;
+        } else {
+            robots[id].battery = 0;
+            robots[id].emergencyMovesLeft--;
+        }
 
-    if (robots[id].powerMovesLeft > 0) {
-        robots[id].powerMovesLeft--;
-        if (robots[id].powerMovesLeft <= 0) robots[id].powerType = POWER_NONE;
-    }
+        if (robots[id].powerMovesLeft > 0) {
+            robots[id].powerMovesLeft--;
+            if (robots[id].powerMovesLeft <= 0) robots[id].powerType = POWER_NONE;
+        }
 
-    if (id >= 0 && id < humanPlayers) {
-        moves++;
+        if (id >= 0 && id < humanPlayers) moves++;
     }
 
     return TRUE;
@@ -5444,6 +5797,12 @@ static void FinishRobotTileMove(WORD id)
     robots[id].px = robots[id].targetPx;
     robots[id].py = robots[id].targetPy;
     robots[id].moving = FALSE;
+
+    if (gameState == GAME_MINIGAME_PLAYING) {
+        if (raceBoostMoves[id] > 0) raceBoostMoves[id]--;
+        RaceHandleRobotArrival(id);
+        return;
+    }
 
     if ((robots[id].powerType != POWER_QUAD || robots[id].powerMovesLeft <= 0) &&
         (map[ty][tx] == TILE_WALL || map[ty][tx] == TILE_TABLE)) {
@@ -5492,8 +5851,15 @@ static void StepRobotMovement(WORD id)
     dy = targetPy - robots[id].py;
 
     {
-        LONG stepSpeed = (robots[id].battery <= 0) ? EMERGENCY_MOVE_SPEED : MOVE_SPEED;
-        if (robots[id].powerType == POWER_DOUBLE_SPEED && robots[id].powerMovesLeft > 0 && robots[id].battery > 0) {
+        LONG stepSpeed;
+        if (gameState == GAME_MINIGAME_PLAYING) {
+            stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
+        } else {
+            stepSpeed = (robots[id].battery <= 0) ? EMERGENCY_MOVE_SPEED : MOVE_SPEED;
+        }
+        if (gameState != GAME_MINIGAME_PLAYING &&
+            robots[id].powerType == POWER_DOUBLE_SPEED &&
+            robots[id].powerMovesLeft > 0 && robots[id].battery > 0) {
             stepSpeed = DOUBLE_SPEED_MOVE_SPEED;
         }
 
@@ -5783,6 +6149,49 @@ static BOOL AiFindPathStep(WORD id, WORD targetX, WORD targetY, WORD *outDx, WOR
     return FALSE;
 }
 
+static void ChooseRaceAiMove(WORD id)
+{
+    const struct RaceCheckpoint *gate;
+    WORD bestDx = 0;
+    WORD bestDy = 0;
+    WORD bestDist = 32767;
+    WORD x;
+    WORD y;
+
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0 || racePlace[id] >= 0) return;
+
+    gate = &raceCheckpoints[raceNextCheckpoint[id]];
+    for (y = gate->minY; y <= gate->maxY; y++) {
+        for (x = gate->minX; x <= gate->maxX; x++) {
+            WORD dx = 0;
+            WORD dy = 0;
+            WORD dist = 32767;
+            if (AiFindPathStep(id, x, y, &dx, &dy, &dist) && dist < bestDist) {
+                bestDx = dx;
+                bestDy = dy;
+                bestDist = dist;
+            }
+        }
+    }
+
+    if ((bestDx != 0 || bestDy != 0) && StartRobotMove(id, bestDx, bestDy)) return;
+
+    /* A gate can be briefly blocked by the pack.  Keep trying legal moves
+     * instead of freezing until the exact preferred lane clears. */
+    {
+        WORD dirs[4];
+        static const WORD dirX[4] = {1, 0, -1, 0};
+        static const WORD dirY[4] = {0, 1, 0, -1};
+        WORD i;
+        ShuffleAiDirs(dirs);
+        for (i = 0; i < 4; i++) {
+            WORD dir = dirs[i];
+            if (StartRobotMove(id, dirX[dir], dirY[dir])) return;
+        }
+    }
+}
+
 static void ChooseHooverModeMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
@@ -5899,6 +6308,11 @@ static void ChooseAiMove(WORD id)
     if (id < humanPlayers || id >= robotCount) return;
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
+
+    if (gameState == GAME_MINIGAME_PLAYING) {
+        ChooseRaceAiMove(id);
+        return;
+    }
 
     if (hooverModeActive) {
         ChooseHooverModeMove(id);
@@ -6018,6 +6432,7 @@ static void ChoosePlayerMove(WORD id)
     if (id < 0 || id >= humanPlayers) return;
     if (robots[id].moving) return;
     if (robots[id].stunTicks > 0) return;
+    if (gameState == GAME_MINIGAME_PLAYING && racePlace[id] >= 0) return;
 
     if (keyLeft[id]) {
         StartRobotMove(id, -1, 0);
@@ -6634,6 +7049,80 @@ static void StepIntro(void)
     introTicks++;
 }
 
+static void StepRoboRace(void)
+{
+    WORD i;
+    WORD countdownNumber;
+
+    if (gameState != GAME_MINIGAME_PLAYING) return;
+
+    if (pauseMenuOpen) {
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    BeginGameplayDirtyRects();
+    StepRoundStartSamples();
+
+    if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+
+        roundCountdownTicks--;
+        ForceGameplayFullPresent();
+        if (roundCountdownTicks > 0) {
+            FinishGameplayDirtyRects();
+            return;
+        }
+
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
+        }
+        StartMainGameMusic();
+    }
+    if (roundGoTicks > 0) roundGoTicks--;
+
+    /* The clock is real PAL time even when the optional slower gameplay
+     * speed skips a movement tick. */
+    if (raceTicksRemaining > 0) raceTicksRemaining--;
+    if (raceFinishGraceTicks > 0) raceFinishGraceTicks--;
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        if (raceTicksRemaining <= 0 ||
+            (raceFinishCount > 0 && raceFinishGraceTicks <= 0)) {
+            FinishRoboRace();
+        }
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        StepRobotMovement(i);
+        if (speedFlashTicks[i] > 0) speedFlashTicks[i]--;
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
+        if (robots[i].stunTicks > 0) robots[i].stunTicks--;
+    }
+
+    for (i = 0; i < humanPlayers; i++) ChoosePlayerMove(i);
+    for (i = humanPlayers; i < robotCount; i++) ChooseRaceAiMove(i);
+
+    ServiceHooverMoveSample();
+    if (raceFinishCount >= robotCount || raceTicksRemaining <= 0 ||
+        (raceFinishCount > 0 && raceFinishGraceTicks <= 0)) {
+        FinishRoboRace();
+    }
+    FinishGameplayDirtyRects();
+}
+
 static void StepGame(void)
 {
     WORD i;
@@ -6642,6 +7131,19 @@ static void StepGame(void)
 
     if (gameState == GAME_INTRO) {
         StepIntro();
+        return;
+    }
+
+    if (gameState == GAME_MINIGAME_INTRO) {
+        if (miniGameIntroTicks > 0) miniGameIntroTicks--;
+        if (miniGameIntroTicks <= 0) {
+            if (miniGameType == MINIGAME_RACE) StartRoboRace();
+        }
+        return;
+    }
+
+    if (gameState == GAME_MINIGAME_PLAYING) {
+        StepRoboRace();
         return;
     }
 
@@ -7370,6 +7872,57 @@ static void DrawLeaderboardScreen(BOOL finalBoard)
     }
 }
 
+static void DrawMiniGameIntroScreen(void)
+{
+    WORD i;
+    WORD shown = robotCount < 4 ? robotCount : 4;
+    WORD spacing = SCREEN_W / (shown + 1);
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
+    MiniTextCentered(&renderRP, 24, "ROBO PARTY", 14, 4);
+    MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
+    MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
+    MiniTextCentered(&renderRP, 112, "BUMP RIVALS  PASS EVERY GATE", 13, 1);
+    MiniTextCentered(&renderRP, 126, "BONUS POINTS  3  2  1", 14, 1);
+
+    for (i = 0; i < shown; i++) {
+        DrawRobotLarge(i, spacing * (i + 1) - ROBOT_W, 150, 2,
+                       (miniGameIntroTicks + i * 4) & (TITLE_SPIN_STEPS - 1));
+    }
+    MiniTextCentered(&renderRP, 224, "GET READY", 7, 2);
+}
+
+static void DrawMiniGameEndScreen(void)
+{
+    WORD points;
+    WORD row = 0;
+    char b[64];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
+    MiniTextCentered(&renderRP, 12, "ROBORACE RESULT", 14, 3);
+
+    if (miniGameWinner >= 0) {
+        DrawRobotLarge(miniGameWinner, (SCREEN_W - ROBOT_W * 3) / 2, 58, 3, titleSpinPhase);
+        snprintf(b, sizeof(b), "%s %s WINS", RobotControlLabel(miniGameWinner), RobotTag(miniGameWinner));
+        MiniTextCentered(&renderRP, 112, b, 10, 2);
+    }
+
+    for (points = 3; points >= 1; points--) {
+        WORD i;
+        for (i = 0; i < robotCount; i++) {
+            if (miniGamePoints[i] != points) continue;
+            snprintf(b, sizeof(b), "%s %s  +%d", RobotControlLabel(i), RobotTag(i), points);
+            MiniTextCentered(&renderRP, 142 + row * 18, b, row == 0 ? 14 : 7, 1);
+            row++;
+            break;
+        }
+    }
+
+    MiniTextCentered(&renderRP, 226, "SPACE FIRE NEXT ROUND", 13, 1);
+}
+
 static void DrawBossExplosion(void)
 {
     static const WORD dirs[8][2] = {
@@ -7424,6 +7977,37 @@ static void DrawBonusBoss(void)
     MiniTextCentered(&renderRP, 40, cachedBossHpText, 14, 1);
 }
 
+static void DrawRaceHud(void)
+{
+    WORD i;
+    WORD slotW = SCREEN_W / MAX_ROBOTS;
+    WORD seconds = (raceTicksRemaining + 49) / 50;
+    char b[32];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
+
+    snprintf(b, sizeof(b), "ROBORACE 0:%02d  %d LAPS", seconds, RACE_LAPS);
+    MiniText(&renderRP, 4, 3, b, 14);
+    DrawJoystickIcons();
+
+    for (i = 0; i < robotCount; i++) {
+        WORD x = i * slotW;
+        WORD shownLap = raceLap[i] + 1;
+        UBYTE pen = (i < humanPlayers) ? 14 : 7;
+
+        if (shownLap > RACE_LAPS) shownLap = RACE_LAPS;
+        SetAPen(&renderRP, (i < humanPlayers) ? 4 : 8);
+        RectFill(&renderRP, x, 12, x + slotW - 2, 29);
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, x + 1, 13, x + slotW - 3, 28);
+        MiniText(&renderRP, x + 2, 15, RobotTag(i), pen);
+        if (racePlace[i] >= 0) snprintf(b, sizeof(b), "F%d", racePlace[i] + 1);
+        else snprintf(b, sizeof(b), "L%d", shownLap);
+        MiniText(&renderRP, x + 19, 23, b, 13);
+    }
+}
+
 static void DrawHud(void)
 {
     char b[160];
@@ -7432,6 +8016,11 @@ static void DrawHud(void)
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
 
     DrawJoystickIcons();
+
+    if (gameState == GAME_MINIGAME_PLAYING) {
+        DrawRaceHud();
+        return;
+    }
 
     if (gameState == GAME_TITLE) {
         MiniTextCentered(&renderRP, 4, "ROBOVAC RESCUE", 7, 2);
@@ -7516,7 +8105,7 @@ static void DrawRoundStartOverlay(void)
 {
     WORD index;
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
+    if (!IsArenaPlaying()) return;
     if (roundCountdownTicks <= 0 && roundGoTicks <= 0) return;
 
     if (roundCountdownTicks <= 0) {
@@ -7837,6 +8426,16 @@ static void DrawFrame(void)
         return;
     }
 
+    if (gameState == GAME_MINIGAME_INTRO) {
+        DrawMiniGameIntroScreen();
+        return;
+    }
+
+    if (gameState == GAME_MINIGAME_END) {
+        DrawMiniGameEndScreen();
+        return;
+    }
+
     if (gameState == GAME_TITLE) {
         BuildTitleStaticCache();
         if (titleStaticBM && titleFullPresentPending) {
@@ -7864,7 +8463,7 @@ static void DrawFrame(void)
     DisableTitleCopperGradient(TRUE);
 
 #if USE_DIRTY_RECTS
-    if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+    if (IsArenaPlaying()) {
         if (DirtyGameplayNoChanges()) {
             return;
         }
@@ -7928,7 +8527,7 @@ static BOOL DirtyGameplayRectsReady(void)
      * StepGame() on the one-tick-per-TOF cadence instead of letting the dirty
      * renderer skip, replay, or add simulation ticks while waiting for rects.
      */
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return FALSE;
+    if (!IsArenaPlaying()) return FALSE;
     if (!dirtyRectsBuiltForFrame) return FALSE;
     if (!dirtyRectsValid) return FALSE;
     if (dirtyRectCount <= 0) return FALSE;
@@ -7940,7 +8539,7 @@ static BOOL DirtyGameplayRectsReady(void)
 
 static BOOL DirtyGameplayNoChanges(void)
 {
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return FALSE;
+    if (!IsArenaPlaying()) return FALSE;
     if (!dirtyRectsBuiltForFrame) return FALSE;
     if (!dirtyRectsValid) return FALSE;
     if (dirtyForceFullFrame) return FALSE;
@@ -8018,7 +8617,7 @@ static void PresentFrame(void)
     }
 
 #if USE_DIRTY_RECTS
-    if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+    if (IsArenaPlaying()) {
         PresentDirtyGameplayFrame();
     } else {
         PresentFullFrame();
@@ -8058,7 +8657,7 @@ static void OpenPauseMenu(void)
 {
     WORD i;
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
+    if (!IsArenaPlaying()) return;
     pauseMenuOpen = TRUE;
     pauseMenuSelection = 0;
     ForceGameplayFullPresent();
@@ -8221,7 +8820,8 @@ static BOOL HandleAiSelectMenuRawKey(UWORD code, BOOL keyUpEvent)
 static void ActivatePauseMenuSelection(void)
 {
     if (pauseMenuSelection == 0) {
-        if (gameState == GAME_BONUS_PLAYING) StartBonusRound();
+        if (gameState == GAME_MINIGAME_PLAYING) StartRoboRace();
+        else if (gameState == GAME_BONUS_PLAYING) StartBonusRound();
         else ResetLevel();
     } else {
         ClosePauseMenu();
@@ -8700,7 +9300,13 @@ static void StepBossBolts(void)
 
 static BOOL ActivateSpaceOrFireAction(void)
 {
-    if (gameState == GAME_ROUND_END) { roundIndex++; MarkHudStatusTextDirty(); ResetLevel(); return TRUE; }
+    if (gameState == GAME_ROUND_END) {
+        if (ShouldStartMiniGameAfterRound(roundIndex)) StartMiniGameIntro();
+        else { roundIndex++; MarkHudStatusTextDirty(); ResetLevel(); }
+        return TRUE;
+    }
+    if (gameState == GAME_MINIGAME_INTRO) { StartRoboRace(); return TRUE; }
+    if (gameState == GAME_MINIGAME_END) { roundIndex++; MarkHudStatusTextDirty(); ResetLevel(); return TRUE; }
     if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); return TRUE; }
     if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
@@ -8746,7 +9352,7 @@ static void HandleRawKey(UWORD rawCode)
         return;
     }
 
-    if (!keyUpEvent && code == RAW_Q && (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING)) {
+    if (!keyUpEvent && code == RAW_Q && IsArenaPlaying()) {
         OpenPauseMenu();
         return;
     }
@@ -8755,7 +9361,7 @@ static void HandleRawKey(UWORD rawCode)
      * play. `B` was already taken by Player 1's fire, so this rides `G`. */
     if (!keyUpEvent && code == RAW_G) {
         bigHeadMode = !bigHeadMode;
-        if (gameState == GAME_PLAYING || gameState == GAME_BONUS_PLAYING) {
+        if (IsArenaPlaying()) {
             ForceGameplayFullPresent();
             snprintf(lastPowerText, sizeof(lastPowerText), "BIG MODE %s", bigHeadMode ? "ON" : "OFF");
             lastPowerTicks = 80;
@@ -8796,6 +9402,7 @@ static void HandleRawKey(UWORD rawCode)
     if (!keyUpEvent && code == RAW_R) {
         if (gameState == GAME_PLAYING) { ResetLevel(); return; }
         if (gameState == GAME_BONUS_PLAYING) { StartBonusRound(); return; }
+        if (gameState == GAME_MINIGAME_PLAYING) { StartRoboRace(); return; }
     }
 
     if (!keyUpEvent && (code == RAW_SPACE || code == RAW_RETURN)) {
@@ -9192,7 +9799,8 @@ static void PollJoysticks(void)
         joyUp[i] = joyEnabled[i] ? up : FALSE;
         joyDown[i] = joyEnabled[i] ? down : FALSE;
 
-        if (stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING) {
+        if (stateBefore == GAME_PLAYING || stateBefore == GAME_BONUS_PLAYING ||
+            stateBefore == GAME_MINIGAME_PLAYING) {
             if (joyEnabled[i] && firePressed) FirePlayerBolt(i);
         } else if (stateBefore != GAME_TITLE && joyEnabled[i] && firePressed) {
             ActivateSpaceOrFireAction();
@@ -9225,7 +9833,7 @@ static void PollWindowMessages(void)
                 continue;
             }
             if (code == SELECTDOWN && gameState == GAME_INTRO) EnterTitleScreen();
-            if (code == MENUDOWN && gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) {
+            if (code == MENUDOWN && !IsArenaPlaying()) {
                 if (aiDifficultyMenuOpen) ActivateAiDifficultyMenu();
                 else if (aiSelectMenuOpen) ActivateAiSelectMenu();
                 else ActivateSpaceOrFireAction();
