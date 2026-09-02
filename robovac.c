@@ -128,7 +128,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define MINIGAME_NONE            0
 #define MINIGAME_RACE            1
 #define MINIGAME_PUCK            2
-#define MINIGAME_COUNT           2
+#define MINIGAME_BUMPER          3
+#define MINIGAME_COUNT           3
 #define MINIGAME_INTRO_TICKS     100
 #define RACE_LAPS                2
 #define RACE_TIME_TICKS          (40 * 50)
@@ -143,11 +144,11 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 /* RoboPuck keeps the robots on the familiar tile grid, but the puck itself
  * uses fixed-point, per-frame movement and a masked BOB.  That gives the
- * little 2D Rocket League intermission smooth motion without adding a
+ * little goal-scoring intermission smooth motion without adding a
  * second general-purpose physics engine. */
 #define PUCK_W                    12
 #define PUCK_H                    12
-#define PUCK_TIME_TICKS           (35 * 50)
+#define PUCK_TIME_TICKS           (180 * 50)
 #define PUCK_GOALS_TO_WIN         3
 #define PUCK_ROBOT_MOVE_SPEED     (3 * FP_ONE)
 #define PUCK_KICK_SPEED           (6 * FP_ONE)
@@ -157,6 +158,25 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define PUCK_GOAL_TOP_TILE        4
 #define PUCK_GOAL_BOTTOM_TILE     9
 #define DIRT_CLEAN_BATTERY_COST   1
+
+/* Bumper Bots: a tiny floor "rug" island sits on the same TILE_WALL border
+ * art used for room walls, but here it reads as the surrounding abyss - the
+ * arena is deliberately small so a shoulder-bump or a bolt hit can shove a
+ * rival clean off the edge. Walking off voluntarily is blocked the normal
+ * way (RobotCanPassTile refuses TILE_WALL); only a push can send a robot
+ * out of bounds, at which point it is eliminated instead of relocated. */
+#define BUMPER_ARENA_MIN_X       6
+#define BUMPER_ARENA_MAX_X       13
+#define BUMPER_ARENA_MIN_Y       4
+#define BUMPER_ARENA_MAX_Y       9
+#define BUMPER_TIME_TICKS        (60 * 50)
+#define BUMPER_BUMP_PUSH_TILES   1
+#define BUMPER_BOLT_PUSH_TILES   3
+#define BUMPER_BUMP_STUN_TICKS   6
+#define BUMPER_ELIMINATION_POINTS 5
+#define BUMPER_ELIM_FLASH_TICKS  80
+#define BUMPER_AI_FIRE_CHANCE    20
+#define BUMPER_AI_FIRE_RANGE     8
 
 /* Dirt Storm: a runaway "broken" hoover that zips across a row, ignoring
  * walls/tables, scattering fresh dirt as it goes. Fires once per round,
@@ -212,7 +232,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define ROBOT_W     16
 #define ROBOT_H     16
-#define BOLT_FRAME_COUNT 4
+#define BOLT_FRAME_COUNT 8
 #define ROBOT_SCALE2_W (ROBOT_W * 2)
 #define ROBOT_SCALE2_H (ROBOT_H * 2)
 #define MAX_ROBOTS  10
@@ -769,6 +789,15 @@ static WORD puckGoalPauseTicks = 0;
 static WORD puckHitCooldownTicks = 0;
 static WORD puckLastTouch = -1;
 static WORD puckScoringTeam = -1;
+static WORD puckScoringRobot = -1;
+static WORD bumperTicksRemaining = 0;
+static WORD bumperAliveCount = 0;
+static BOOL bumperEliminated[MAX_ROBOTS];
+static WORD bumperEliminatedSeq[MAX_ROBOTS];
+static WORD bumperEliminationSeq = 0;
+static WORD bumperEliminatedRobot = -1;
+static WORD bumperEliminatedBy = -1;
+static WORD bumperEliminatedFlashTicks = 0;
 static BOOL bonusAvailable = FALSE;
 static WORD bonusBossHealth = 0;
 static WORD bonusBossX = 0;
@@ -927,6 +956,12 @@ static BOOL dirtyPrevPuckValid = FALSE;
 static WORD dirtyPrevPuckSecond = -1;
 static WORD dirtyPrevPuckScore[2] = {-1, -1};
 static WORD dirtyPrevPuckScoringTeam = -2;
+static WORD dirtyPrevBumperSecond = -1;
+static WORD dirtyPrevBumperAlive = -1;
+static WORD dirtyPrevBumperFlashTicks = -1;
+static LONG dirtyPrevDirtStormPx = 0;
+static WORD dirtyPrevDirtStormTileY = 0;
+static BOOL dirtyPrevDirtStormValid = FALSE;
 #endif
 
 static ULONG rng = 0x1234ABCD;
@@ -941,6 +976,11 @@ static const WORD robotDockXTwoPlayer[MAX_ROBOTS]  = {1, 18, 18, 1, 17, 1, 1, 18
 static const WORD robotDockYTwoPlayer[MAX_ROBOTS]  = {1, 11, 1, 11, 11, 11, 11, 11, 11, 11};
 static const WORD raceStartX[MAX_ROBOTS] = {5, 5, 5, 6, 6, 6, 7, 7, 7, 8};
 static const WORD raceStartY[MAX_ROBOTS] = {9, 10, 11, 9, 10, 11, 9, 10, 11, 10};
+
+/* Spread around the rug with a one-tile buffer from the abyss edge, so
+ * nobody starts a shove away from falling straight off. */
+static const WORD bumperStartX[MAX_ROBOTS] = {7, 9, 11, 7, 12, 7, 12, 7, 9, 11};
+static const WORD bumperStartY[MAX_ROBOTS] = {5, 5, 5, 6, 6, 7, 7, 8, 8, 8};
 
 /* Clockwise gates around the central island.  Robots start just beyond the
  * start/finish gate and must visit 1, 2, 3, then 0 to complete a lap. */
@@ -998,11 +1038,17 @@ enum RobotSpriteState {
     SPR_STATE_COUNT = 8
 };
 
+/* Ordered to match a clockwise 45-degree rotation step (k = frame index),
+ * so BuildBoltCache can bake all eight from the same rotation sampler. */
 enum BoltSpriteFrame {
-    BOLT_FRAME_UP = 0,
-    BOLT_FRAME_DOWN = 1,
-    BOLT_FRAME_LEFT = 2,
-    BOLT_FRAME_RIGHT = 3
+    BOLT_FRAME_RIGHT = 0,
+    BOLT_FRAME_DOWN_RIGHT = 1,
+    BOLT_FRAME_DOWN = 2,
+    BOLT_FRAME_DOWN_LEFT = 3,
+    BOLT_FRAME_LEFT = 4,
+    BOLT_FRAME_UP_LEFT = 5,
+    BOLT_FRAME_UP = 6,
+    BOLT_FRAME_UP_RIGHT = 7
 };
 
 static const char *roomNames[5] = {
@@ -1148,6 +1194,11 @@ static void StartRoboPuck(void);
 static void StepRoboPuck(void);
 static void FinishRoboPuck(void);
 static void ChoosePuckAiMove(WORD id);
+static void StartBumperBots(void);
+static void StepBumperBots(void);
+static void FinishBumperBots(void);
+static void ChooseBumperAiMove(WORD id);
+static void StepBumperAiFire(void);
 static void RestartCurrentMiniGame(void);
 static BOOL IsArenaPlaying(void);
 static void DrawMiniGameIntroScreen(void);
@@ -1768,6 +1819,12 @@ static void AddDirtyPuckAt(LONG px, LONG py)
                  PUCK_W + 4, PUCK_H + 4);
 }
 
+static void AddDirtyDirtStormAt(LONG px, WORD tileY)
+{
+    AddDirtyRect(MAP_X + FP_TO_INT(px) - 2, MAP_Y + (tileY * TILE_SIZE) - 2,
+                 ROBOT_W + 4, ROBOT_H + 4);
+}
+
 static void AddDirtyBolt(struct Bolt *bolt)
 {
     if (!bolt || !bolt->active) return;
@@ -1864,6 +1921,10 @@ static void MarkDirtyHudIfChanged(void)
              dirtyPrevPuckScore[0] != puckTeamScore[0] ||
              dirtyPrevPuckScore[1] != puckTeamScore[1] ||
              dirtyPrevPuckScoringTeam != puckScoringTeam)) changed = TRUE;
+        if (miniGameType == MINIGAME_BUMPER &&
+            (dirtyPrevBumperSecond != (bumperTicksRemaining / 50) ||
+             dirtyPrevBumperAlive != bumperAliveCount ||
+             dirtyPrevBumperFlashTicks != bumperEliminatedFlashTicks)) changed = TRUE;
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -1900,6 +1961,9 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevPuckScore[0] = puckTeamScore[0];
     dirtyPrevPuckScore[1] = puckTeamScore[1];
     dirtyPrevPuckScoringTeam = puckScoringTeam;
+    dirtyPrevBumperSecond = bumperTicksRemaining / 50;
+    dirtyPrevBumperAlive = bumperAliveCount;
+    dirtyPrevBumperFlashTicks = bumperEliminatedFlashTicks;
     for (i = 0; i < robotCount; i++) {
         dirtyPrevBattery[i] = robots[i].battery;
         dirtyPrevScore[i] = robots[i].score;
@@ -1962,6 +2026,10 @@ static void BeginGameplayDirtyRects(void)
         AddDirtyPuckAt(dirtyPrevPuckPx, dirtyPrevPuckPy);
     }
 
+    if (dirtyPrevDirtStormValid) {
+        AddDirtyDirtStormAt(dirtyPrevDirtStormPx, dirtyPrevDirtStormTileY);
+    }
+
     for (i = 0; i < robotCount; i++) {
         if (dirtyPrevPlayerBoltActive[i]) AddDirtyBoltAt(dirtyPrevPlayerBoltPx[i], dirtyPrevPlayerBoltPy[i]);
     }
@@ -1996,6 +2064,15 @@ static void FinishGameplayDirtyRects(void)
         dirtyPrevPuckValid = TRUE;
     } else {
         dirtyPrevPuckValid = FALSE;
+    }
+
+    if (dirtStormActive) {
+        AddDirtyDirtStormAt(dirtStormPx, dirtStormTileY);
+        dirtyPrevDirtStormPx = dirtStormPx;
+        dirtyPrevDirtStormTileY = dirtStormTileY;
+        dirtyPrevDirtStormValid = TRUE;
+    } else {
+        dirtyPrevDirtStormValid = FALSE;
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -2148,6 +2225,11 @@ static BOOL RobotAtTile(WORD tx, WORD ty, WORD ignoreId)
 
     for (i = 0; i < robotCount; i++) {
         if (i == ignoreId) continue;
+        /* An eliminated Bumper Bots robot keeps its last valid tile
+         * coordinates (see BumperEliminateRobot) but is out of play, so it
+         * must not keep blocking the tile it fell from. */
+        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER &&
+            bumperEliminated[i]) continue;
 
         if (robots[i].tileX == tx && robots[i].tileY == ty) return TRUE;
         if (robots[i].targetX == tx && robots[i].targetY == ty) return TRUE;
@@ -2162,6 +2244,8 @@ static WORD RobotIdAtTile(WORD tx, WORD ty, WORD ignoreId)
 
     for (i = 0; i < robotCount; i++) {
         if (i == ignoreId) continue;
+        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER &&
+            bumperEliminated[i]) continue;
 
         if (robots[i].tileX == tx && robots[i].tileY == ty) return i;
         if (robots[i].targetX == tx && robots[i].targetY == ty) return i;
@@ -4206,30 +4290,31 @@ static void CacheBoltPixel(struct RastPort *maskRP, WORD srcBaseX, WORD srcX, WO
     WritePixel(maskRP, dstBaseX + dstX, dstY);
 }
 
-static void BuildBoltCacheFrame(struct RastPort *maskRP, WORD frame, WORD rotation)
+/* Rotates the source bolt glyph by k*45 degrees (nearest-neighbour, same
+ * nine-region sampling style as DrawRobotBobTurn45) so all eight compass
+ * headings - including the four diagonals - get a properly rotated frame
+ * instead of reusing an axis-aligned sprite for a diagonal shot. */
+static void BuildBoltCacheFrame(struct RastPort *maskRP, WORD frame, WORD k)
 {
+    static const WORD cosTable[8] = {256, 181, 0, -181, -256, -181, 0, 181};
+    static const WORD sinTable[8] = {0, 181, 256, 181, 0, -181, -256, -181};
     WORD x;
     WORD y;
     WORD srcBaseX = SPR_ENERGY_BOLT * ROBOT_W;
     WORD dstBaseX = frame * ROBOT_W;
+    WORD cosv = cosTable[k & 7];
+    WORD sinv = sinTable[k & 7];
+    WORD half = ROBOT_W / 2;
 
     for (y = 0; y < ROBOT_H; y++) {
         for (x = 0; x < ROBOT_W; x++) {
-            WORD dx = x;
-            WORD dy = y;
+            WORD dx = x - half;
+            WORD dy = y - half;
+            WORD sampleX = (WORD)((((LONG)dx * cosv + (LONG)dy * sinv) >> 8)) + half;
+            WORD sampleY = (WORD)((((LONG)dy * cosv - (LONG)dx * sinv) >> 8)) + half;
 
-            if (rotation == 90) {
-                dx = ROBOT_W - 1 - y;
-                dy = x;
-            } else if (rotation == 180) {
-                dx = ROBOT_W - 1 - x;
-                dy = ROBOT_H - 1 - y;
-            } else if (rotation == 270) {
-                dx = y;
-                dy = ROBOT_H - 1 - x;
-            }
-
-            CacheBoltPixel(maskRP, srcBaseX, x, y, dstBaseX, dx, dy);
+            if (sampleX < 0 || sampleY < 0 || sampleX >= ROBOT_W || sampleY >= ROBOT_H) continue;
+            CacheBoltPixel(maskRP, srcBaseX, sampleX, sampleY, dstBaseX, x, y);
         }
     }
 }
@@ -4256,11 +4341,12 @@ static BOOL BuildBoltCache(void)
     InitRastPort(&maskRP);
     maskRP.BitMap = boltMaskBM;
 
-    /* Match the old runtime path: vertical bolts used one rotated frame, horizontal bolts used the source frame. */
-    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_UP, 270);
-    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_DOWN, 270);
-    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_LEFT, 0);
-    BuildBoltCacheFrame(&maskRP, BOLT_FRAME_RIGHT, 0);
+    {
+        WORD frame;
+        for (frame = 0; frame < BOLT_FRAME_COUNT; frame++) {
+            BuildBoltCacheFrame(&maskRP, frame, frame);
+        }
+    }
 
     return TRUE;
 }
@@ -4812,6 +4898,7 @@ static void DrawRobotBob(WORD id)
     WORD raceTurning;
 
     if (id < 0 || id >= robotCount) return;
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER && bumperEliminated[id]) return;
 
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py);
@@ -4832,16 +4919,14 @@ static void DrawRobotBob(WORD id)
 
     DrawSpeedMotionBlur(id, sx, sy);
 
-    /* Big Head is intended to be the original BOB at a clean 2x scale.
-     * The normal ground shadow looked like an accidental line glued to the
-     * bottom of the enlarged sprite, so omit it in this visual-only mode. */
-    if (!bigHeadMode) {
+    /* Big Head and the Quad power-up both render the BOB at a clean 2x
+     * scale via DrawRobotBobScaled2. The normal ground shadow, sized for
+     * the unscaled sprite, looked like an accidental line glued to the
+     * bottom of the enlarged sprite in either mode, so omit it whenever
+     * the robot is drawn scaled up. */
+    if (!bigHeadMode && !(robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
         SetAPen(&renderRP, 6);
-        if (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0) {
-            RectFill(&renderRP, sx, sy + 21, sx + 23, sy + 24);
-        } else {
-            RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
-        }
+        RectFill(&renderRP, sx + 4, sy + 13, sx + 12, sy + 14);
     }
 
     if (robotCacheBM && robotMaskBM && robotMaskBM->Planes[0]) {
@@ -4879,10 +4964,17 @@ static void DrawRobotBob(WORD id)
 
 static WORD BoltFrameForDirection(struct Bolt *bolt)
 {
-    if (bolt->dirY < 0) return BOLT_FRAME_UP;
-    if (bolt->dirY > 0) return BOLT_FRAME_DOWN;
-    if (bolt->dirX < 0) return BOLT_FRAME_LEFT;
-    return BOLT_FRAME_RIGHT;
+    /* [sy+1][sx+1], sy/sx each -1/0/1. A stationary (0,0) direction falls
+     * back to RIGHT, matching the old axis-only behaviour. */
+    static const UBYTE table[3][3] = {
+        { BOLT_FRAME_UP_LEFT,   BOLT_FRAME_UP,   BOLT_FRAME_UP_RIGHT   },
+        { BOLT_FRAME_LEFT,      BOLT_FRAME_RIGHT,BOLT_FRAME_RIGHT      },
+        { BOLT_FRAME_DOWN_LEFT, BOLT_FRAME_DOWN, BOLT_FRAME_DOWN_RIGHT }
+    };
+    WORD sx = (bolt->dirX > 0) - (bolt->dirX < 0);
+    WORD sy = (bolt->dirY > 0) - (bolt->dirY < 0);
+
+    return table[sy + 1][sx + 1];
 }
 
 static void DrawBoltSprite(struct Bolt *bolt)
@@ -5452,21 +5544,15 @@ static void StepDirtStorm(void)
     }
 
     if (FP_TO_INT(dirtStormPx) >= SCREEN_W) {
+        /* No forced full present needed here: BeginGameplayDirtyRects erases
+         * the last drawn position from dirtyPrevDirtStorm* every frame, the
+         * same two-generation dirty-rect scheme the RoboPuck ball uses, so
+         * the final off-screen frame is cleaned up automatically. */
         dirtStormActive = FALSE;
         dirtStormPassesLeft--;
         if (dirtStormPassesLeft > 0) dirtStormGapTicks = DIRT_STORM_GAP_TICKS;
-        /* Erase the final off-screen BOB immediately.  Without this forced
-         * present, the last dirty/full frame could remain visible until an
-         * unrelated tile changed and made the hoover appear to hang. */
-        ForceGameplayFullPresent();
         return;
     }
-
-    /* Hand-rolling dirty rects for a sprite that crosses the whole room
-     * every second or so isn't worth the risk of getting it wrong - force
-     * a full redraw for the storm's brief lifetime instead, the same way
-     * the round countdown does. */
-    ForceGameplayFullPresent();
 }
 
 static void StopDirtStorm(WORD stopperId)
@@ -5475,7 +5561,6 @@ static void StopDirtStorm(WORD stopperId)
     dirtStormActive = FALSE;
     dirtStormPassesLeft = 0;
     dirtStormGapTicks = 0;
-    ForceGameplayFullPresent();
 
     if (stopperId >= 0 && stopperId < robotCount) {
         robots[stopperId].score += DIRT_STORM_STOP_POINTS;
@@ -5830,10 +5915,77 @@ static void StartRoboPuck(void)
     puckTicksRemaining = PUCK_TIME_TICKS;
     puckGoalPauseTicks = 0;
     puckScoringTeam = -1;
+    puckScoringRobot = -1;
     ResetPuckPosition();
 #if USE_DIRTY_RECTS
     dirtyPrevPuckValid = FALSE;
 #endif
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
+    roundGoTicks = 0;
+    roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
+    MarkHudStatusTextDirty();
+    BuildRoomBuffer();
+    ForceGameplayFullPresent();
+    StartRoundCountdownAudio();
+}
+
+static void StartBumperBots(void)
+{
+    WORD x;
+    WORD y;
+    WORD i;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClearMovementKeys();
+    ClosePauseMenu();
+
+    /* The whole map is void/abyss (the wall art doubles as "off the rug");
+     * only the small rectangle in the middle is solid floor. */
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            BOOL inArena = (x >= BUMPER_ARENA_MIN_X && x <= BUMPER_ARENA_MAX_X &&
+                            y >= BUMPER_ARENA_MIN_Y && y <= BUMPER_ARENA_MAX_Y);
+            map[y][x] = inArena ? TILE_FLOOR : TILE_WALL;
+        }
+    }
+
+    ClearDirtList();
+    for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
+    dirtStormActive = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+
+    gameState = GAME_MINIGAME_PLAYING;
+    InitRobots();
+    bumperAliveCount = robotCount;
+    bumperEliminationSeq = 0;
+    bumperEliminatedRobot = -1;
+    bumperEliminatedBy = -1;
+    bumperEliminatedFlashTicks = 0;
+    for (i = 0; i < robotCount; i++) {
+        UBYTE variant = robots[i].spriteVariant;
+
+        SetRobotTile(i, bumperStartX[i], bumperStartY[i]);
+        robots[i].spriteVariant = variant;
+        robots[i].battery = maxBattery;
+        robots[i].powerType = POWER_NONE;
+        robots[i].powerMovesLeft = 0;
+        robots[i].stunTicks = 0;
+        bumperEliminated[i] = FALSE;
+        bumperEliminatedSeq[i] = -1;
+        aiPrevTileX[i] = robots[i].tileX;
+        aiPrevTileY[i] = robots[i].tileY;
+    }
+
+    bumperTicksRemaining = BUMPER_TIME_TICKS;
+
     roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
     roundGoTicks = 0;
     roundGoSoundPlayed = FALSE;
@@ -5936,6 +6088,48 @@ static void FinishRoboRace(void)
     ForceGameplayFullPresent();
 }
 
+/* Anyone still standing outranks anyone eliminated; among the eliminated,
+ * whoever lasted longer (a later elimination sequence number) ranks
+ * higher. Score is just a tiebreaker within either group. */
+static LONG BumperRank(WORD id)
+{
+    if (!bumperEliminated[id]) return 1000000L + robots[id].score;
+    return ((LONG)bumperEliminatedSeq[id] * 1000L) + robots[id].score;
+}
+
+static void FinishBumperBots(void)
+{
+    WORD order[MAX_ROBOTS];
+    WORD i;
+    WORD pass;
+    static const WORD points[3] = {3, 2, 1};
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BUMPER) return;
+
+    for (i = 0; i < robotCount; i++) order[i] = i;
+    for (pass = 0; pass < robotCount - 1; pass++) {
+        for (i = 0; i < robotCount - 1 - pass; i++) {
+            if (BumperRank(order[i + 1]) > BumperRank(order[i])) {
+                WORD t = order[i];
+                order[i] = order[i + 1];
+                order[i + 1] = t;
+            }
+        }
+    }
+
+    miniGameWinner = order[0];
+    for (i = 0; i < robotCount && i < 3; i++) {
+        miniGamePoints[order[i]] = points[i];
+        totalScores[order[i]] += points[i];
+    }
+
+    ClearMovementKeys();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    gameState = GAME_MINIGAME_END;
+    ForceGameplayFullPresent();
+}
+
 static BOOL TryRaceBumpRobot(WORD blockedId, WORD dx, WORD dy)
 {
     WORD pushX;
@@ -5962,6 +6156,102 @@ static BOOL TryRaceBumpRobot(WORD blockedId, WORD dx, WORD dy)
     robots[blockedId].stunTicks = RACE_BUMP_STUN_TICKS;
     robots[blockedId].boltStunned = FALSE;
     RaceHandleRobotArrival(blockedId);
+    return TRUE;
+}
+
+static BOOL BumperTileInArena(WORD tx, WORD ty)
+{
+    return (tx >= BUMPER_ARENA_MIN_X && tx <= BUMPER_ARENA_MAX_X &&
+            ty >= BUMPER_ARENA_MIN_Y && ty <= BUMPER_ARENA_MAX_Y) ? TRUE : FALSE;
+}
+
+/* Robot ids stay in bumperEliminated order 0..robotCount-1; a robot keeps
+ * its last valid arena tile after going out (RobotAtTile/RobotIdAtTile
+ * already skip eliminated ids), it just stops being drawn or steerable. */
+static void BumperEliminateRobot(WORD id, WORD attackerId)
+{
+    if (id < 0 || id >= robotCount || bumperEliminated[id]) return;
+
+    bumperEliminated[id] = TRUE;
+    bumperEliminatedSeq[id] = bumperEliminationSeq++;
+    bumperAliveCount--;
+    robots[id].moving = FALSE;
+    robots[id].stunTicks = 0;
+
+    bumperEliminatedRobot = id;
+    bumperEliminatedBy = (attackerId >= 0 && attackerId < robotCount && attackerId != id) ? attackerId : -1;
+    bumperEliminatedFlashTicks = BUMPER_ELIM_FLASH_TICKS;
+
+    if (bumperEliminatedBy >= 0) {
+        robots[bumperEliminatedBy].score += BUMPER_ELIMINATION_POINTS;
+        totalScores[bumperEliminatedBy] += BUMPER_ELIMINATION_POINTS;
+        snprintf(lastPowerText, sizeof(lastPowerText), "%s KO'D %s", RobotTag(bumperEliminatedBy), RobotTag(id));
+    } else {
+        snprintf(lastPowerText, sizeof(lastPowerText), "%s FELL OFF", RobotTag(id));
+    }
+    lastPowerTicks = 80;
+
+    MarkHudStatusTextDirty();
+    ForceGameplayFullPresent();
+}
+
+/* Shoves blockedId up to `tiles` steps in the (dx,dy) direction - one tile
+ * for a shoulder bump, several for a bolt hit. Sliding stops early if
+ * another robot is in the way; running off the rug eliminates the target
+ * instead of relocating it. Returns FALSE only when the very first step is
+ * impossible, matching TryRaceBumpRobot's contract with StartRobotMove. */
+static BOOL BumperPushRobot(WORD blockedId, WORD dx, WORD dy, WORD tiles, WORD attackerId)
+{
+    WORD step;
+    WORD pushX;
+    WORD pushY;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BUMPER) return FALSE;
+    if (blockedId < 0 || blockedId >= robotCount || bumperEliminated[blockedId]) return FALSE;
+    if (robots[blockedId].moving) return FALSE;
+    if (dx == 0 && dy == 0) return FALSE;
+
+    pushX = robots[blockedId].tileX + dx;
+    pushY = robots[blockedId].tileY + dy;
+
+    if (!BumperTileInArena(pushX, pushY)) {
+        BumperEliminateRobot(blockedId, attackerId);
+        return TRUE;
+    }
+    if (RobotAtTile(pushX, pushY, blockedId)) return FALSE;
+
+    robots[blockedId].tileX = pushX;
+    robots[blockedId].tileY = pushY;
+    robots[blockedId].targetX = pushX;
+    robots[blockedId].targetY = pushY;
+    robots[blockedId].px = TO_FP(pushX * TILE_SIZE);
+    robots[blockedId].py = TO_FP(pushY * TILE_SIZE);
+    robots[blockedId].targetPx = robots[blockedId].px;
+    robots[blockedId].targetPy = robots[blockedId].py;
+    robots[blockedId].moving = FALSE;
+    robots[blockedId].stunTicks = BUMPER_BUMP_STUN_TICKS;
+    robots[blockedId].boltStunned = FALSE;
+
+    for (step = 1; step < tiles; step++) {
+        WORD nx = robots[blockedId].tileX + dx;
+        WORD ny = robots[blockedId].tileY + dy;
+
+        if (!BumperTileInArena(nx, ny)) {
+            BumperEliminateRobot(blockedId, attackerId);
+            return TRUE;
+        }
+        if (RobotAtTile(nx, ny, blockedId)) break;
+
+        robots[blockedId].tileX = nx;
+        robots[blockedId].tileY = ny;
+        robots[blockedId].targetX = nx;
+        robots[blockedId].targetY = ny;
+        robots[blockedId].px = TO_FP(nx * TILE_SIZE);
+        robots[blockedId].py = TO_FP(ny * TILE_SIZE);
+        robots[blockedId].targetPx = robots[blockedId].px;
+        robots[blockedId].targetPy = robots[blockedId].py;
+    }
+
     return TRUE;
 }
 
@@ -6020,6 +6310,8 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
          * getting stuck. */
         if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_RACE) {
             if (!TryRaceBumpRobot(blockedId, dx, dy)) return FALSE;
+        } else if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER) {
+            if (!BumperPushRobot(blockedId, dx, dy, BUMPER_BUMP_PUSH_TILES, id)) return FALSE;
         } else if (gameState != GAME_BONUS_PLAYING ||
                    !TryPushStrandedRobot(blockedId, dx, dy)) {
             return FALSE;
@@ -6155,6 +6447,7 @@ static void StepRobotMovement(WORD id)
             if (miniGameType == MINIGAME_RACE) {
                 stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
             } else {
+                /* Puck and Bumper Bots share the same snappier step speed. */
                 stepSpeed = PUCK_ROBOT_MOVE_SPEED;
             }
         } else {
@@ -6530,6 +6823,67 @@ static void ChoosePuckAiMove(WORD id)
     else if (robots[id].tileY > targetY) StartRobotMove(id, 0, -1);
 }
 
+static void ChooseBumperAiMove(WORD id)
+{
+    static const WORD dirX[4] = {1, 0, -1, 0};
+    static const WORD dirY[4] = {0, 1, 0, -1};
+    WORD dirs[4];
+    WORD dir;
+    WORD curX;
+    WORD curY;
+    WORD targetId = -1;
+    WORD bestDist = 32767;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BUMPER) return;
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0 || bumperEliminated[id]) return;
+
+    curX = robots[id].tileX;
+    curY = robots[id].tileY;
+
+    for (i = 0; i < robotCount; i++) {
+        WORD dist;
+        if (i == id || bumperEliminated[i]) continue;
+        dist = AbsW(robots[i].tileX - curX) + AbsW(robots[i].tileY - curY);
+        if (dist < bestDist) {
+            bestDist = dist;
+            targetId = i;
+        }
+    }
+
+    if (targetId >= 0) {
+        WORD tdx = robots[targetId].tileX - curX;
+        WORD tdy = robots[targetId].tileY - curY;
+        WORD stepDx = (tdx > 0) - (tdx < 0);
+        WORD stepDy = (tdy > 0) - (tdy < 0);
+
+        /* Adjacent to a rival: shove straight into them rather than
+         * sidestepping around, so the chase actually lands a bump. */
+        if (bestDist <= 1) {
+            if (StartRobotMove(id, stepDx, stepDy)) return;
+        }
+
+        /* Otherwise close the gap, working the axis with more distance
+         * left first so the chase doesn't hug a single edge of the rug. */
+        if (AbsW(tdx) >= AbsW(tdy) && stepDx != 0) {
+            if (StartRobotMove(id, stepDx, 0)) return;
+        }
+        if (stepDy != 0) {
+            if (StartRobotMove(id, 0, stepDy)) return;
+        }
+        if (stepDx != 0) {
+            if (StartRobotMove(id, stepDx, 0)) return;
+        }
+    }
+
+    ShuffleAiDirs(dirs);
+    for (dir = 0; dir < 4; dir++) {
+        WORD r = dirs[dir];
+        if (StartRobotMove(id, dirX[r], dirY[r])) return;
+    }
+}
+
 static void ChooseHooverModeMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
@@ -6650,6 +7004,7 @@ static void ChooseAiMove(WORD id)
     if (gameState == GAME_MINIGAME_PLAYING) {
         if (miniGameType == MINIGAME_RACE) ChooseRaceAiMove(id);
         else if (miniGameType == MINIGAME_PUCK) ChoosePuckAiMove(id);
+        else if (miniGameType == MINIGAME_BUMPER) ChooseBumperAiMove(id);
         return;
     }
 
@@ -7401,6 +7756,8 @@ static void ScorePuckGoal(WORD team)
     if (team < 0 || team > 1) return;
     puckTeamScore[team]++;
     puckScoringTeam = team;
+    /* ResetPuckPosition() clears puckLastTouch, so grab the scorer first. */
+    puckScoringRobot = puckLastTouch;
     puckGoalPauseTicks = PUCK_GOAL_PAUSE_TICKS;
     ResetPuckPosition();
 
@@ -7421,7 +7778,10 @@ static void StepPuckPhysics(void)
 
     if (puckGoalPauseTicks > 0) {
         puckGoalPauseTicks--;
-        if (puckGoalPauseTicks <= 0) puckScoringTeam = -1;
+        if (puckGoalPauseTicks <= 0) {
+            puckScoringTeam = -1;
+            puckScoringRobot = -1;
+        }
         return;
     }
     if (puckHitCooldownTicks > 0) puckHitCooldownTicks--;
@@ -7599,9 +7959,87 @@ static void StepRoboPuck(void)
     FinishGameplayDirtyRects();
 }
 
+static void StepBumperBots(void)
+{
+    WORD i;
+    WORD countdownNumber;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BUMPER) return;
+
+    if (pauseMenuOpen) {
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    BeginGameplayDirtyRects();
+    StepRoundStartSamples();
+    if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+        roundCountdownTicks--;
+        ForceGameplayFullPresent();
+        if (roundCountdownTicks > 0) {
+            FinishGameplayDirtyRects();
+            return;
+        }
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
+        }
+        StartMainGameMusic();
+    }
+    if (roundGoTicks > 0) roundGoTicks--;
+
+    if (bumperEliminatedFlashTicks > 0) bumperEliminatedFlashTicks--;
+    if (bumperTicksRemaining > 0) bumperTicksRemaining--;
+
+    if (bumperTicksRemaining <= 0 || bumperAliveCount <= 1) {
+        FinishBumperBots();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        if (bumperEliminated[i]) continue;
+        StepRobotMovement(i);
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
+        if (robots[i].stunTicks > 0) robots[i].stunTicks--;
+    }
+
+    StepPlayerBolts();
+    StepBumperAiFire();
+
+    for (i = 0; i < humanPlayers; i++) {
+        if (!bumperEliminated[i]) ChoosePlayerMove(i);
+    }
+    for (i = humanPlayers; i < robotCount; i++) {
+        if (!bumperEliminated[i]) ChooseBumperAiMove(i);
+    }
+
+    ServiceHooverMoveSample();
+    if (bumperAliveCount <= 1) {
+        FinishBumperBots();
+    }
+    FinishGameplayDirtyRects();
+}
+
 static void RestartCurrentMiniGame(void)
 {
     if (miniGameType == MINIGAME_PUCK) StartRoboPuck();
+    else if (miniGameType == MINIGAME_BUMPER) StartBumperBots();
     else StartRoboRace();
 }
 
@@ -7700,6 +8138,7 @@ static void StepGame(void)
 
     if (gameState == GAME_MINIGAME_PLAYING) {
         if (miniGameType == MINIGAME_PUCK) StepRoboPuck();
+        else if (miniGameType == MINIGAME_BUMPER) StepBumperBots();
         else StepRoboRace();
         return;
     }
@@ -8444,9 +8883,14 @@ static void DrawMiniGameIntroScreen(void)
     MiniTextCentered(&renderRP, 24, "ROBO PARTY", 14, 4);
     if (miniGameType == MINIGAME_PUCK) {
         MiniTextCentered(&renderRP, 66, "ROBOPUCK", 10, 3);
-        MiniTextCentered(&renderRP, 96, "2D ROCKET LEAGUE", 7, 2);
+        MiniTextCentered(&renderRP, 96, "3 MINUTE MATCH", 7, 2);
         MiniTextCentered(&renderRP, 112, "BUMP THE PUCK INTO THEIR GOAL", 13, 1);
         MiniTextCentered(&renderRP, 126, "FIRST TO 3  OR LEAD AT TIME", 14, 1);
+    } else if (miniGameType == MINIGAME_BUMPER) {
+        MiniTextCentered(&renderRP, 66, "BUMPER BOTS", 10, 3);
+        MiniTextCentered(&renderRP, 96, "TINY ARENA  1 MINUTE", 7, 2);
+        MiniTextCentered(&renderRP, 112, "BUMP OR BOLT RIVALS OFF THE RUG", 13, 1);
+        MiniTextCentered(&renderRP, 126, "LAST BOT STANDING WINS", 14, 1);
     } else {
         MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
         MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
@@ -8470,7 +8914,8 @@ static void DrawMiniGameEndScreen(void)
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, SCREEN_H - 1);
     MiniTextCentered(&renderRP, 12,
-                     miniGameType == MINIGAME_PUCK ? "ROBOPUCK RESULT" : "ROBORACE RESULT",
+                     miniGameType == MINIGAME_PUCK ? "ROBOPUCK RESULT" :
+                     miniGameType == MINIGAME_BUMPER ? "BUMPER BOTS RESULT" : "ROBORACE RESULT",
                      14, 3);
 
     if (miniGameWinner >= 0) {
@@ -8592,7 +9037,9 @@ static void DrawRaceHud(void)
 
 static void DrawPuckHud(void)
 {
-    WORD seconds = (puckTicksRemaining + 49) / 50;
+    WORD totalSeconds = (puckTicksRemaining + 49) / 50;
+    WORD minutes = totalSeconds / 60;
+    WORD seconds = totalSeconds % 60;
     char b[64];
 
     SetAPen(&renderRP, 0);
@@ -8601,15 +9048,45 @@ static void DrawPuckHud(void)
         snprintf(b, sizeof(b), "ROBOPUCK  TEAM1 %d-%d TEAM2  OT",
                  puckTeamScore[0], puckTeamScore[1]);
     } else {
-        snprintf(b, sizeof(b), "ROBOPUCK  TEAM1 %d-%d TEAM2  0:%02d",
-                 puckTeamScore[0], puckTeamScore[1], seconds);
+        snprintf(b, sizeof(b), "ROBOPUCK  TEAM1 %d-%d TEAM2  %d:%02d",
+                 puckTeamScore[0], puckTeamScore[1], minutes, seconds);
     }
     MiniText(&renderRP, 4, 3, b, 14);
     if (puckScoringTeam >= 0) {
-        snprintf(b, sizeof(b), "TEAM %d GOAL", puckScoringTeam + 1);
+        if (puckScoringRobot >= 0 && puckScoringRobot < robotCount) {
+            snprintf(b, sizeof(b), "%s GOAL! TEAM %d", RobotTag(puckScoringRobot), puckScoringTeam + 1);
+        } else {
+            snprintf(b, sizeof(b), "TEAM %d GOAL", puckScoringTeam + 1);
+        }
         MiniTextCentered(&renderRP, 18, b, puckScoringTeam == 0 ? 13 : 10, 2);
     } else {
         MiniTextCentered(&renderRP, 18, "FIRST TO 3", 7, 1);
+    }
+    DrawJoystickIcons();
+}
+
+static void DrawBumperHud(void)
+{
+    WORD totalSeconds = (bumperTicksRemaining + 49) / 50;
+    WORD minutes = totalSeconds / 60;
+    WORD seconds = totalSeconds % 60;
+    char b[64];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
+
+    snprintf(b, sizeof(b), "BUMPER BOTS  %d LEFT  %d:%02d", bumperAliveCount, minutes, seconds);
+    MiniText(&renderRP, 4, 3, b, 14);
+
+    if (bumperEliminatedFlashTicks > 0 && bumperEliminatedRobot >= 0) {
+        if (bumperEliminatedBy >= 0) {
+            snprintf(b, sizeof(b), "%s KO'D %s", RobotTag(bumperEliminatedBy), RobotTag(bumperEliminatedRobot));
+        } else {
+            snprintf(b, sizeof(b), "%s FELL OFF", RobotTag(bumperEliminatedRobot));
+        }
+        MiniTextCentered(&renderRP, 18, b, 13, 2);
+    } else {
+        MiniTextCentered(&renderRP, 18, "LAST BOT STANDING", 7, 1);
     }
     DrawJoystickIcons();
 }
@@ -8625,6 +9102,7 @@ static void DrawHud(void)
 
     if (gameState == GAME_MINIGAME_PLAYING) {
         if (miniGameType == MINIGAME_PUCK) DrawPuckHud();
+        else if (miniGameType == MINIGAME_BUMPER) DrawBumperHud();
         else DrawRaceHud();
         return;
     }
@@ -8905,6 +9383,17 @@ static void DrawPuckIntersectingRect(struct DirtyRect *rect)
     if (RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, PUCK_W, PUCK_H)) DrawPuck();
 }
 
+static void DrawDirtStormIntersectingRect(struct DirtyRect *rect)
+{
+    WORD x;
+    WORD y;
+
+    if (!rect || !dirtStormActive) return;
+    x = MAP_X + FP_TO_INT(dirtStormPx);
+    y = MAP_Y + (dirtStormTileY * TILE_SIZE);
+    if (RectIntersects(rect->x, rect->y, rect->w, rect->h, x, y, ROBOT_W, ROBOT_H)) DrawDirtStorm();
+}
+
 static BOOL BoltIntersectsRect(struct Bolt *bolt, struct DirtyRect *rect)
 {
     WORD x;
@@ -9016,6 +9505,7 @@ static void DrawGameplayDirtyRects(void)
         RestoreDirtyRectFromRoom(&rect);
         DrawHudIfDirty(&rect);
         DrawPuckIntersectingRect(&rect);
+        DrawDirtStormIntersectingRect(&rect);
         DrawRobotsIntersectingRect(&rect);
         DrawBoltsIntersectingRect(&rect);
         if (BonusBossExplosionIntersectsRect(&rect)) DrawBossExplosion();
@@ -9628,11 +10118,13 @@ static void TitlePlayer2Fire(void)
 static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL playSound)
 {
     struct Bolt *bolt;
+    BOOL bumperPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER);
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= robotCount) return;
     if (robots[id].stunTicks > 0) return;
+    if (bumperPlaying && bumperEliminated[id]) return;
     if (dirX == 0 && dirY == 0) dirY = -1;
 
     bolt = &playerBolts[id];
@@ -9731,6 +10223,18 @@ static void StepPlayerBolt(WORD ownerId)
     }
 
     if (gameState == GAME_BONUS_PLAYING) return;
+
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER) {
+        for (i = 0; i < robotCount; i++) {
+            if (i == ownerId || bumperEliminated[i]) continue;
+            if (AbsW(robots[i].tileX - tx) + AbsW(robots[i].tileY - ty) <= 1) {
+                BumperPushRobot(i, bolt->dirX, bolt->dirY, BUMPER_BOLT_PUSH_TILES, ownerId);
+                bolt->active = FALSE;
+                return;
+            }
+        }
+        return;
+    }
 
     if (dirtStormActive) {
         WORD stormTx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
@@ -9881,6 +10385,54 @@ static void StepMainGameAiFire(void)
             else if (robots[target].tileY < robots[id].tileY) dirY = -1;
             else dirY = 1;
             FireRobotBolt(id, dirX, dirY, TRUE, TRUE);
+            return;
+        }
+    }
+}
+
+static void StepBumperAiFire(void)
+{
+    static WORD nextAiShooter = 0;
+    WORD tries;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BUMPER) return;
+    if (RoundStartLocked()) return;
+    if (humanPlayers >= robotCount) return;
+
+    if (nextAiShooter < humanPlayers || nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
+    for (tries = 0; tries < robotCount; tries++) {
+        WORD id = nextAiShooter;
+        WORD target = -1;
+        WORD bestDist = BUMPER_AI_FIRE_RANGE + 1;
+        WORD j;
+
+        nextAiShooter++;
+        if (nextAiShooter >= robotCount) nextAiShooter = humanPlayers;
+
+        if (id < humanPlayers || id >= robotCount) continue;
+        if (bumperEliminated[id]) continue;
+        if (robots[id].stunTicks > 0 || playerBolts[id].active) continue;
+        if (RandRange(BUMPER_AI_FIRE_CHANCE) != 0) continue;
+
+        for (j = 0; j < robotCount; j++) {
+            WORD dist;
+            if (j == id || bumperEliminated[j]) continue;
+            if (robots[j].tileX != robots[id].tileX && robots[j].tileY != robots[id].tileY) continue;
+            dist = AbsW(robots[j].tileX - robots[id].tileX) + AbsW(robots[j].tileY - robots[id].tileY);
+            if (dist <= 0 || dist > BUMPER_AI_FIRE_RANGE || dist >= bestDist) continue;
+            if (!ClearBoltLane(robots[id].tileX, robots[id].tileY, robots[j].tileX, robots[j].tileY)) continue;
+            target = j;
+            bestDist = dist;
+        }
+
+        if (target >= 0) {
+            WORD dirX = 0;
+            WORD dirY = 0;
+            if (robots[target].tileX < robots[id].tileX) dirX = -1;
+            else if (robots[target].tileX > robots[id].tileX) dirX = 1;
+            else if (robots[target].tileY < robots[id].tileY) dirY = -1;
+            else dirY = 1;
+            FireRobotBolt(id, dirX, dirY, FALSE, TRUE);
             return;
         }
     }
