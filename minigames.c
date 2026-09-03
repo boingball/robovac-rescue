@@ -346,6 +346,7 @@ static void ScoreAirHockeyGoal(WORD team)
      * scorer first. */
     airhockeyScoringRobot = airhockeyLastTouch;
     airhockeyGoalPauseTicks = AIRHOCKEY_GOAL_PAUSE_TICKS;
+    PlayGoalSample();
     ResetAirHockeyPuckPosition();
 
     if (airhockeyTeamScore[team] >= AIRHOCKEY_GOALS_TO_WIN) FinishAirHockey();
@@ -1004,6 +1005,7 @@ static void ScorePuckGoal(WORD team)
     /* ResetPuckPosition() clears puckLastTouch, so grab the scorer first. */
     puckScoringRobot = puckLastTouch;
     puckGoalPauseTicks = PUCK_GOAL_PAUSE_TICKS;
+    PlayGoalSample();
     ResetPuckPosition();
 
     if (puckTeamScore[team] >= PUCK_GOALS_TO_WIN) FinishRoboPuck();

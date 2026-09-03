@@ -2743,7 +2743,7 @@ static void DrawRobotBob(WORD id)
              * for TEAM 1/TEAM 2, showing through the sprite's transparent
              * mask as a coloured aura around each hoover. */
             WORD team = (miniGameType == MINIGAME_PUCK) ? PuckTeamForRobot(id) : AirHockeyTeamForRobot(id);
-            SetAPen(&renderRP, (team == 0) ? 13 : 10);
+            SetAPen(&renderRP, (team == 0) ? 13 : 14);
             RectFill(&renderRP, sx, sy, sx + ROBOT_W - 1, sy + ROBOT_H - 1);
         } else {
             SetAPen(&renderRP, 6);
@@ -3904,7 +3904,7 @@ static void DrawPuckHud(void)
         } else {
             snprintf(b, sizeof(b), "TEAM %d GOAL", puckScoringTeam + 1);
         }
-        MiniTextCentered(&renderRP, 18, b, puckScoringTeam == 0 ? 13 : 10, 2);
+        MiniTextCentered(&renderRP, 18, b, puckScoringTeam == 0 ? 13 : 14, 2);
     } else {
         MiniTextCentered(&renderRP, 18, "FIRST TO 3", 7, 1);
     }
@@ -3935,7 +3935,7 @@ static void DrawAirHockeyHud(void)
         } else {
             snprintf(b, sizeof(b), "TEAM %d GOAL", airhockeyScoringTeam + 1);
         }
-        MiniTextCentered(&renderRP, 18, b, airhockeyScoringTeam == 0 ? 13 : 10, 2);
+        MiniTextCentered(&renderRP, 18, b, airhockeyScoringTeam == 0 ? 13 : 14, 2);
     } else {
         MiniTextCentered(&renderRP, 18, "FIRST TO 5  FIRE = EMP BOOST", 7, 1);
     }

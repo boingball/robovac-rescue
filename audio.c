@@ -63,6 +63,7 @@ static UBYTE SampleAudioOwner(struct OneShotSample *sample)
     if (sample == &mainMusicSample) return AUDIO_OWNER_MAIN_MUSIC;
     if (sample == &hooverMoveSample) return AUDIO_OWNER_HOOVER_LOOP;
     if (sample == &boltFireSample) return AUDIO_OWNER_BOLT_FIRE;
+    if (sample == &goalSample) return AUDIO_OWNER_GOAL;
     return AUDIO_OWNER_NONE;
 }
 
@@ -251,6 +252,7 @@ static void StopGameplaySamples(void)
     StopOneShotSample(&mainMusicSample, MAIN_MUSIC_RIGHT_AUDIO_CHANNEL);
     StopOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
     StopOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
+    StopOneShotSample(&goalSample, GOAL_AUDIO_CHANNEL);
 }
 
 
@@ -270,6 +272,12 @@ static void ServiceHooverMoveSample(void)
 static void PlayBoltFireSample(void)
 {
     PlayOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
+}
+
+
+static void PlayGoalSample(void)
+{
+    PlayOneShotSample(&goalSample, GOAL_AUDIO_CHANNEL);
 }
 
 
@@ -745,6 +753,7 @@ static BOOL LoadGameplaySamples(void)
 
     loaded |= LoadOneShotSample(MAIN_MUSIC_SAMPLE_PATH, &mainMusicSample, "main game music");
     loaded |= LoadOneShotSample(BOLT_FIRE_SAMPLE_PATH, &boltFireSample, "bolt fire effect");
+    loaded |= LoadOneShotSample(GOAL_SAMPLE_PATH, &goalSample, "goal scored effect");
     loaded |= LoadOneShotSample(HOOVER_MOVE_SAMPLE_PATH, &hooverMoveSample, "hoover movement loop");
     if (hooverMoveSample.loaded) {
         hooverMoveSample.lengthWords = (UWORD)((hooverMoveSample.dataSize & ~1L) / 2L);
@@ -765,6 +774,7 @@ static void FreeGameplaySamples(void)
     FreeOneShotSample(&mainMusicSample, MAIN_MUSIC_LEFT_AUDIO_CHANNEL);
     FreeOneShotSample(&hooverMoveSample, HOOVER_MOVE_AUDIO_CHANNEL);
     FreeOneShotSample(&boltFireSample, BOLT_FIRE_AUDIO_CHANNEL);
+    FreeOneShotSample(&goalSample, GOAL_AUDIO_CHANNEL);
 }
 
 

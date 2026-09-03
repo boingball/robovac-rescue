@@ -656,6 +656,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define BOLT_FIRE_SAMPLE_PATH "PROGDIR:samples/boltfire.8svx"
 
+#define GOAL_SAMPLE_PATH "PROGDIR:samples/goal.iff"
+
 #define HOOVER_MOVE_SAMPLE_PATH "PROGDIR:samples/hoover-go-loop-low.8svx"
 
 /*
@@ -683,6 +685,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define GO_AUDIO_CHANNEL 2
 
 #define BOLT_FIRE_AUDIO_CHANNEL 2
+#define GOAL_AUDIO_CHANNEL 2
 
 #define PAULA_CLOCK_HZ 3546895UL
 
@@ -1017,6 +1020,8 @@ static struct OneShotSample mainMusicSample;
 
 static struct OneShotSample boltFireSample;
 
+static struct OneShotSample goalSample;
+
 static struct OneShotSample hooverMoveSample;
 
 
@@ -1125,7 +1130,8 @@ enum AudioOwner {
     AUDIO_OWNER_ROUND_VOICE,
     AUDIO_OWNER_MAIN_MUSIC,
     AUDIO_OWNER_HOOVER_LOOP,
-    AUDIO_OWNER_BOLT_FIRE
+    AUDIO_OWNER_BOLT_FIRE,
+    AUDIO_OWNER_GOAL
 };
 
 
@@ -1885,6 +1891,7 @@ static void StopGameplaySamples(void);
 static void ServiceHooverMoveSample(void);
 
 static void PlayBoltFireSample(void);
+static void PlayGoalSample(void);
 
 static UWORD AudioDmaBit(WORD channel);
 

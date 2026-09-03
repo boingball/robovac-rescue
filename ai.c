@@ -867,6 +867,7 @@ static void StepMainGameAiFire(void)
     for (tries = 0; tries < robotCount; tries++) {
         WORD id = nextAiShooter;
         WORD target = -1;
+        WORD stormTx = -1;
         WORD bestDist = fireRange + 1;
         WORD j;
 
@@ -886,9 +887,28 @@ static void StepMainGameAiFire(void)
             if (dist <= 0 || dist > fireRange || dist >= bestDist) continue;
             if (!ClearBoltLane(robots[id].tileX, robots[id].tileY, robots[j].tileX, robots[j].tileY)) continue;
             target = j;
+            stormTx = -1;
             bestDist = dist;
         }
 
+        /* The runaway broken hoover carries a bonus for whoever stops it -
+         * let AI take the same shot a human already can, whenever it
+         * happens to be lined up on the storm's row. */
+        if (dirtStormActive && robots[id].tileY == dirtStormTileY) {
+            WORD candidateTx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
+            WORD dist = AbsW(candidateTx - robots[id].tileX);
+            if (dist > 0 && dist <= fireRange && dist < bestDist &&
+                ClearBoltLane(robots[id].tileX, robots[id].tileY, candidateTx, dirtStormTileY)) {
+                target = -1;
+                stormTx = candidateTx;
+                bestDist = dist;
+            }
+        }
+
+        if (stormTx >= 0) {
+            FireRobotBolt(id, (stormTx < robots[id].tileX) ? -1 : 1, 0, TRUE, TRUE);
+            return;
+        }
         if (target >= 0) {
             WORD dirX = 0;
             WORD dirY = 0;

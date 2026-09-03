@@ -984,10 +984,14 @@ static void ResetLevel(void)
 }
 
 
+/* Every cleaning round is followed by a Robo Party interlude, except the
+ * match's last round (which ends the match instead - see the GAME_MATCH_END
+ * branch in CheckEndState). A longer match, with more robots and so a
+ * higher MatchRoundCount(), simply gets more of both. */
 static BOOL ShouldStartMiniGameAfterRound(WORD completedRound)
 {
     if (completedRound >= MatchRoundCount() - 1) return FALSE;
-    return (completedRound == 1 || completedRound == 3) ? TRUE : FALSE;
+    return TRUE;
 }
 
 

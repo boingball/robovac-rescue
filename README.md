@@ -67,7 +67,7 @@ Press `G` at any time during play to toggle every robot to double size, purely f
 ## Match Structure
 
 - A solo match (no AI rivals) is 5 rounds. Every robot on the field beyond a 2-robot match adds 2 more rounds: 2 robots (e.g. 2 players, or 1 player + 1 AI rival) play 6 rounds, 3 play 8, 4 play 10, and so on.
-- Robo Party interrupts the match after cleaning rounds 2 and 4, without adding another full cleaning round. RoboRace, RoboPuck, RoboHockey, and Bumper Bots rotate randomly, without an immediate repeat.
+- Robo Party interrupts the match after every cleaning round except the last, alternating cleaning round / party round the whole way through. RoboRace, RoboPuck, RoboHockey, and Bumper Bots rotate randomly, without an immediate repeat.
 - Each round picks a random room type.
 - Dirt cleaned is scored as points.
 - Hitting another robot with an energy bolt is worth 2 points. A bolted robot cannot be bolted again while stunned, and gets 2 seconds of bolt immunity after the stun ends so it can escape.
@@ -182,6 +182,7 @@ Round starts and gameplay also look for optional uncompressed 8SVX samples:
 - `PROGDIR:samples/mainmusic-lo.8svx` starts as soon as GO appears and loops using the 8SVX repeat section until the level ends, using Paula channels 1 and 4.
 - `PROGDIR:samples/boltfire.8svx` plays once whenever a player fires an energy bolt, using Paula channel 3.
 - `PROGDIR:samples/hoover-go-loop-low.8svx` loops while at least one hoover is moving and stops when all hoovers are stationary, using Paula channel 2.
+- `PROGDIR:samples/goal.iff` plays once whenever a team scores in RoboPuck or RoboHockey, using Paula channel 3 (shares it with `boltfire.8svx`, since the two never trigger back to back). Any valid uncompressed IFF 8SVX sample works - the loader only checks the `FORM`/`8SVX` chunk headers, not the file extension.
 
 On startup, the game looks for a 32-colour ILBM title image at:
 
