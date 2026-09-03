@@ -529,6 +529,33 @@ static void ChooseFloodAiMove(WORD id)
 }
 
 
+/* Pictionary's AI guessers never move and never look at the canvas - once
+ * enough of it is painted (see TryPictionaryPaint), each eligible AI rolls
+ * a small per-tick chance to "guess" correctly, which reads as thinking it
+ * over rather than an instant, all-knowing answer. Called once per tick
+ * from StepPictionary, not through the per-robot AI move dispatcher, since
+ * there is no movement involved. */
+static void StepPictionaryAiGuesses(void)
+{
+    WORD totalDrawable;
+    WORD coveragePct;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PICTIONARY) return;
+
+    totalDrawable = (MAP_W - 2) * (MAP_H - 2);
+    coveragePct = (totalDrawable > 0) ? (pictionaryPaintedCount * 100) / totalDrawable : 0;
+    if (coveragePct < PICTIONARY_AI_MIN_COVERAGE_PCT) return;
+
+    for (i = humanPlayers; i < robotCount; i++) {
+        if (i == pictionaryDrawer) continue;
+        if (pictionaryGuessed[i]) continue;
+        if (RandRange(PICTIONARY_AI_GUESS_CHANCE) != 0) continue;
+        TryPictionaryGuess(i);
+    }
+}
+
+
 static void ChooseBumperAiMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};

@@ -2052,6 +2052,322 @@ static void StepFloodHouse(void)
 }
 
 
+/* ---------------------------------------------------------------------
+ * Pictionary - see the PICTIONARY_ comment block in robovac.h for the
+ * overall design (only human players ever draw, turns rotate through
+ * them, drawing is a toggle rather than true hold-to-draw).
+ * --------------------------------------------------------------------- */
+
+static void ClearPictionaryCanvas(void)
+{
+    WORD x;
+    WORD y;
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            if (pictionaryPainted[y][x]) {
+                pictionaryPainted[y][x] = 0;
+                UpdateRoomTile(x, y);
+            }
+        }
+    }
+    pictionaryPaintedCount = 0;
+}
+
+
+/* Sets up the next human's turn as drawer: a fresh word, a blank canvas,
+ * and every robot repositioned (drawer to the middle of the floor,
+ * everyone else lined up out of the way along the bottom so they cannot
+ * be mistaken for part of the drawing). Returns FALSE once every human
+ * player has already had a turn, so the caller can end the round. */
+static BOOL StartPictionaryTurn(void)
+{
+    WORD i;
+
+    if (pictionaryTurnIndex >= humanPlayers) return FALSE;
+
+    pictionaryDrawer = pictionaryTurnIndex;
+    pictionaryWordIndex = (WORD)RandRange(PICTIONARY_WORD_COUNT);
+    pictionaryTurnTicks = PICTIONARY_TURN_TICKS;
+    pictionaryLastGuesser = -1;
+    pictionaryFlashTicks = 0;
+
+    ClearPictionaryCanvas();
+
+    for (i = 0; i < robotCount; i++) {
+        UBYTE variant = robots[i].spriteVariant;
+        WORD tx;
+        WORD ty;
+
+        pictionaryPenDown[i] = FALSE;
+        pictionaryGuessed[i] = (i == pictionaryDrawer) ? TRUE : FALSE;
+
+        if (i == pictionaryDrawer) {
+            tx = MAP_W / 2;
+            ty = MAP_H / 2;
+        } else {
+            WORD spot = i - ((i > pictionaryDrawer) ? 1 : 0);
+            tx = 2 + ((spot * 3) % (MAP_W - 4));
+            ty = MAP_H - 2;
+        }
+        /* SetRobotTile resets spriteVariant to 0 - every other minigame's
+         * Start* function saves and restores it around the call for the
+         * same reason: without this every robot would suddenly look like
+         * the same default colour. */
+        SetRobotTile(i, tx, ty);
+        robots[i].spriteVariant = variant;
+        aiPrevTileX[i] = robots[i].tileX;
+        aiPrevTileY[i] = robots[i].tileY;
+    }
+
+    snprintf(lastPowerText, sizeof(lastPowerText), "%s IS DRAWING", RobotTag(pictionaryDrawer));
+    lastPowerTicks = 80;
+    MarkHudStatusTextDirty();
+    ForceGameplayFullPresent();
+    return TRUE;
+}
+
+
+static void StartPictionary(void)
+{
+    WORD x;
+    WORD y;
+    WORD i;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClearMovementKeys();
+    ClosePauseMenu();
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            map[y][x] = (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) ? TILE_WALL : TILE_FLOOR;
+            pictionaryPainted[y][x] = 0;
+        }
+    }
+    pictionaryPaintedCount = 0;
+
+    ClearDirtList();
+    for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
+    dirtStormActive = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+
+    gameState = GAME_MINIGAME_PLAYING;
+    InitRobots();
+    for (i = 0; i < robotCount; i++) {
+        robots[i].battery = maxBattery;
+        robots[i].powerType = POWER_NONE;
+        robots[i].powerMovesLeft = 0;
+        robots[i].stunTicks = 0;
+        pictionaryScore[i] = 0;
+    }
+
+    pictionaryTurnIndex = 0;
+    StartPictionaryTurn();
+
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
+    roundGoTicks = 0;
+    roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
+    MarkHudStatusTextDirty();
+    BuildRoomBuffer();
+    ForceGameplayFullPresent();
+    StartRoundCountdownAudio();
+}
+
+
+static void TryPictionaryPaint(WORD id)
+{
+    WORD tx;
+    WORD ty;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PICTIONARY) return;
+    if (id != pictionaryDrawer) return;
+    if (!pictionaryPenDown[id]) return;
+
+    tx = robots[id].tileX;
+    ty = robots[id].tileY;
+    if (tx <= 0 || ty <= 0 || tx >= MAP_W - 1 || ty >= MAP_H - 1) return;
+    if (pictionaryPainted[ty][tx]) return;
+
+    pictionaryPainted[ty][tx] = 1;
+    pictionaryPaintedCount++;
+    UpdateRoomTile(tx, ty);
+}
+
+
+/* The fire button toggles the drawer's pen instead of requiring it held -
+ * see the PICTIONARY_ comment in robovac.h for why. */
+static void TryPictionaryToggle(WORD id)
+{
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PICTIONARY) return;
+    if (id != pictionaryDrawer) return;
+
+    pictionaryPenDown[id] = !pictionaryPenDown[id];
+    if (pictionaryPenDown[id]) TryPictionaryPaint(id);
+}
+
+
+static void TryPictionaryGuess(WORD id)
+{
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PICTIONARY) return;
+    if (id < 0 || id >= robotCount) return;
+    if (id == pictionaryDrawer) return;
+    if (pictionaryGuessed[id]) return;
+
+    pictionaryGuessed[id] = TRUE;
+    pictionaryScore[id] += PICTIONARY_GUESS_POINTS;
+    pictionaryLastGuesser = id;
+    pictionaryFlashTicks = PICTIONARY_FLASH_TICKS;
+    MarkHudStatusTextDirty();
+}
+
+
+static void FinishPictionary(void)
+{
+    WORD order[MAX_ROBOTS];
+    WORD i;
+    WORD pass;
+    static const WORD points[3] = {3, 2, 1};
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PICTIONARY) return;
+
+    for (i = 0; i < robotCount; i++) order[i] = i;
+    for (pass = 0; pass < robotCount - 1; pass++) {
+        for (i = 0; i < robotCount - 1 - pass; i++) {
+            if (pictionaryScore[order[i + 1]] > pictionaryScore[order[i]]) {
+                WORD t = order[i];
+                order[i] = order[i + 1];
+                order[i + 1] = t;
+            }
+        }
+    }
+
+    miniGameWinner = order[0];
+    for (i = 0; i < robotCount && i < 3; i++) {
+        miniGamePoints[order[i]] = points[i];
+        totalScores[order[i]] += points[i];
+    }
+
+    ClearMovementKeys();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    gameState = GAME_MINIGAME_END;
+    ForceGameplayFullPresent();
+}
+
+
+/* A turn ends either on the clock or once every guesser has answered (see
+ * StepPictionary) - either way, the drawer earns a bonus if anyone
+ * actually guessed it, then the next human's turn begins, or the round
+ * ends once everyone has drawn once. */
+static void AdvancePictionaryTurn(void)
+{
+    if (pictionaryLastGuesser >= 0 && pictionaryDrawer >= 0 && pictionaryDrawer < robotCount) {
+        pictionaryScore[pictionaryDrawer] += PICTIONARY_DRAW_BONUS_POINTS;
+    }
+
+    pictionaryTurnIndex++;
+    if (!StartPictionaryTurn()) {
+        FinishPictionary();
+    }
+}
+
+
+static void StepPictionary(void)
+{
+    WORD i;
+    WORD countdownNumber;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PICTIONARY) return;
+
+    if (pauseMenuOpen) {
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    BeginGameplayDirtyRects();
+    StepRoundStartSamples();
+    if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+        roundCountdownTicks--;
+        ForceGameplayFullPresent();
+        if (roundCountdownTicks > 0) {
+            FinishGameplayDirtyRects();
+            return;
+        }
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
+        }
+        StartMainGameMusic();
+    }
+    if (roundGoTicks > 0) roundGoTicks--;
+
+    if (pictionaryFlashTicks > 0) pictionaryFlashTicks--;
+    if (pictionaryTurnTicks > 0) pictionaryTurnTicks--;
+
+    if (pictionaryTurnTicks <= 0) {
+        AdvancePictionaryTurn();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    /* Once everyone eligible has guessed there is no reason to sit out the
+     * rest of the clock - gated on a little elapsed time first so a round
+     * with no rivals at all (nobody left to guess) never skips itself
+     * instantly. */
+    if (pictionaryTurnTicks < PICTIONARY_TURN_TICKS - 100) {
+        BOOL allGuessed = TRUE;
+        for (i = 0; i < robotCount; i++) {
+            if (i == pictionaryDrawer) continue;
+            if (!pictionaryGuessed[i]) { allGuessed = FALSE; break; }
+        }
+        if (allGuessed) {
+            AdvancePictionaryTurn();
+            FinishGameplayDirtyRects();
+            return;
+        }
+    }
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        StepRobotMovement(i);
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
+    }
+
+    /* Only the drawer's movement matters (it is what paints the canvas -
+     * see TryPictionaryPaint) but every human can still walk around while
+     * they wait their turn, same as any other minigame. Guessers, human or
+     * AI, never need a movement chooser: guessing is a button press or a
+     * dice roll, not something that requires reaching a tile. */
+    for (i = 0; i < humanPlayers; i++) ChoosePlayerMove(i);
+    StepPictionaryAiGuesses();
+
+    ServiceHooverMoveSample();
+    FinishGameplayDirtyRects();
+}
+
+
 static void RestartCurrentMiniGame(void)
 {
     if (miniGameType == MINIGAME_PUCK) StartRoboPuck();
@@ -2059,6 +2375,7 @@ static void RestartCurrentMiniGame(void)
     else if (miniGameType == MINIGAME_AIRHOCKEY) StartAirHockey();
     else if (miniGameType == MINIGAME_BOWLING) StartRoboBowling();
     else if (miniGameType == MINIGAME_FLOODHOUSE) StartFloodHouse();
+    else if (miniGameType == MINIGAME_PICTIONARY) StartPictionary();
     else StartRoboRace();
 }
 

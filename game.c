@@ -1149,6 +1149,8 @@ static void FinishRobotTileMove(WORD id)
             RaceHandleRobotArrival(id);
         } else if (miniGameType == MINIGAME_FLOODHOUSE) {
             FloodHandleRobotArrival(id);
+        } else if (miniGameType == MINIGAME_PICTIONARY) {
+            TryPictionaryPaint(id);
         }
         return;
     }
@@ -1783,6 +1785,7 @@ static void StepGame(void)
         else if (miniGameType == MINIGAME_AIRHOCKEY) StepAirHockey();
         else if (miniGameType == MINIGAME_BOWLING) StepRoboBowling();
         else if (miniGameType == MINIGAME_FLOODHOUSE) StepFloodHouse();
+        else if (miniGameType == MINIGAME_PICTIONARY) StepPictionary();
         else StepRoboRace();
         return;
     }
@@ -2336,9 +2339,10 @@ static void FirePlayerBolt(WORD id)
     BOOL airHockeyPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY);
     BOOL floodPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE);
     BOOL bowlingPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING);
+    BOOL pictionaryPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_PICTIONARY);
 
     if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING &&
-        !bumperPlaying && !airHockeyPlaying && !floodPlaying && !bowlingPlaying) return;
+        !bumperPlaying && !airHockeyPlaying && !floodPlaying && !bowlingPlaying && !pictionaryPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
 
@@ -2354,6 +2358,15 @@ static void FirePlayerBolt(WORD id)
      * robot is currently facing, instead of firing a bolt. */
     if (floodPlaying) {
         TryFloodBuild(id);
+        return;
+    }
+
+    /* Pictionary's fire button means two different things depending on who
+     * presses it: the current drawer toggles their pen, everyone else is
+     * claiming a correct guess. */
+    if (pictionaryPlaying) {
+        if (id == pictionaryDrawer) TryPictionaryToggle(id);
+        else TryPictionaryGuess(id);
         return;
     }
 

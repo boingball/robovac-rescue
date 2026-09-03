@@ -664,6 +664,15 @@ static void MarkDirtyHudIfChanged(void)
             (dirtyPrevFloodSecond != (floodTicksRemaining / 50) ||
              dirtyPrevFloodLooseRemaining != floodLooseRemaining ||
              dirtyPrevFloodFlashTicks != floodFlashTicks)) changed = TRUE;
+        if (miniGameType == MINIGAME_PICTIONARY) {
+            WORD pictionaryScoreSum = 0;
+            WORD psi;
+            for (psi = 0; psi < robotCount; psi++) pictionaryScoreSum += pictionaryScore[psi];
+            if (dirtyPrevPictionarySecond != (pictionaryTurnTicks / 50) ||
+                dirtyPrevPictionaryScoreSum != pictionaryScoreSum ||
+                dirtyPrevPictionaryDrawer != pictionaryDrawer ||
+                dirtyPrevPictionaryFlashTicks != pictionaryFlashTicks) changed = TRUE;
+        }
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -718,6 +727,15 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevFloodSecond = floodTicksRemaining / 50;
     dirtyPrevFloodLooseRemaining = floodLooseRemaining;
     dirtyPrevFloodFlashTicks = floodFlashTicks;
+    dirtyPrevPictionarySecond = pictionaryTurnTicks / 50;
+    {
+        WORD pictionaryScoreSum = 0;
+        WORD psi;
+        for (psi = 0; psi < robotCount; psi++) pictionaryScoreSum += pictionaryScore[psi];
+        dirtyPrevPictionaryScoreSum = pictionaryScoreSum;
+    }
+    dirtyPrevPictionaryDrawer = pictionaryDrawer;
+    dirtyPrevPictionaryFlashTicks = pictionaryFlashTicks;
     for (i = 0; i < robotCount; i++) {
         dirtyPrevBattery[i] = robots[i].battery;
         dirtyPrevScore[i] = robots[i].score;
@@ -1175,6 +1193,21 @@ static void DrawFloodBlockTile(struct RastPort *rp, WORD tx, WORD ty)
 }
 
 
+/* Pictionary's painted tiles are their own grid (pictionaryPainted), not a
+ * map[][] tile type, baked in as an overlay the same way DrawFloodBlockTile
+ * handles Flood House's block stacks - a plain solid fill is enough since
+ * the canvas is meant to be read at a glance, not admired. */
+static void DrawPictionaryPaintTile(struct RastPort *rp, WORD tx, WORD ty)
+{
+    WORD dstX = MAP_X + tx * TILE_SIZE;
+    WORD dstY = MAP_Y + ty * TILE_SIZE;
+
+    if (!pictionaryPainted[ty][tx]) return;
+    SetAPen(rp, 13);
+    RectFill(rp, dstX + 1, dstY + 1, dstX + TILE_SIZE - 2, dstY + TILE_SIZE - 2);
+}
+
+
 static BOOL IsWallTileAt(WORD tx, WORD ty)
 {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
@@ -1227,6 +1260,9 @@ static void UpdateRoomTile(WORD tx, WORD ty)
     }
     if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE) {
         DrawFloodBlockTile(&roomRP, tx, ty);
+    }
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_PICTIONARY) {
+        DrawPictionaryPaintTile(&roomRP, tx, ty);
     }
     AddDirtyTile(tx, ty);
 }
@@ -3835,6 +3871,11 @@ static void DrawMiniGameIntroScreen(void)
         MiniTextCentered(&renderRP, 96, "30 SECONDS TO BUILD", 7, 2);
         MiniTextCentered(&renderRP, 112, "WALL ALL 4 SIDES OF YOUR HOME", 13, 1);
         MiniTextCentered(&renderRP, 126, "STEAL BLOCKS  STAY DRIEST", 14, 1);
+    } else if (miniGameType == MINIGAME_PICTIONARY) {
+        MiniTextCentered(&renderRP, 66, "PICTIONARY", 10, 3);
+        MiniTextCentered(&renderRP, 96, "EACH PLAYER TAKES A TURN", 7, 2);
+        MiniTextCentered(&renderRP, 112, "DRAWER FIRES TO DRAW", 13, 1);
+        MiniTextCentered(&renderRP, 126, "OTHERS FIRE TO GUESS", 14, 1);
     } else {
         MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
         MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
@@ -3863,7 +3904,8 @@ static void DrawMiniGameEndScreen(void)
                      miniGameType == MINIGAME_BUMPER ? "BUMPER BOTS RESULT" :
                      miniGameType == MINIGAME_AIRHOCKEY ? "ROBOHOCKEY RESULT" :
                      miniGameType == MINIGAME_BOWLING ? "ROBO BOWLING RESULT" :
-                     miniGameType == MINIGAME_FLOODHOUSE ? "FLOOD HOUSE RESULT" : "ROBORACE RESULT",
+                     miniGameType == MINIGAME_FLOODHOUSE ? "FLOOD HOUSE RESULT" :
+                     miniGameType == MINIGAME_PICTIONARY ? "PICTIONARY RESULT" : "ROBORACE RESULT",
                      14, 3);
 
     if (miniGameWinner >= 0) {
@@ -4133,6 +4175,43 @@ static void DrawBowlingHud(void)
 }
 
 
+/* There is no per-player screen in this game - everyone shares the same
+ * HUD - so the drawer's word is shown here in plain sight rather than
+ * genuinely hidden, the same local honesty any shared-screen party game
+ * already depends on (other players just look away). */
+static void DrawPictionaryHud(void)
+{
+    WORD totalSeconds = (pictionaryTurnTicks + 49) / 50;
+    WORD minutes = totalSeconds / 60;
+    WORD seconds = totalSeconds % 60;
+    char b[80];
+    char seg[16];
+    WORD i;
+    const char *word = (pictionaryWordIndex >= 0 && pictionaryWordIndex < PICTIONARY_WORD_COUNT) ?
+                        pictionaryWords[pictionaryWordIndex] : "?";
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
+
+    snprintf(b, sizeof(b), "DRAW: %s  %d:%02d  ", word, minutes, seconds);
+    for (i = 0; i < robotCount; i++) {
+        if (strlen(b) + 10 >= sizeof(b)) break;
+        snprintf(seg, sizeof(seg), "%s:%d ", RobotTag(i), pictionaryScore[i]);
+        strncat(b, seg, sizeof(b) - strlen(b) - 1);
+    }
+    MiniText(&renderRP, 4, 3, b, 14);
+
+    if (pictionaryFlashTicks > 0 && pictionaryLastGuesser >= 0) {
+        snprintf(b, sizeof(b), "%s GUESSED IT!", RobotTag(pictionaryLastGuesser));
+        MiniTextCentered(&renderRP, 18, b, 14, 2);
+    } else if (pictionaryDrawer >= 0) {
+        snprintf(b, sizeof(b), "%s DRAWING  OTHERS FIRE TO GUESS", RobotTag(pictionaryDrawer));
+        MiniTextCentered(&renderRP, 18, b, 7, 1);
+    }
+    DrawJoystickIcons();
+}
+
+
 static void DrawFloodHouseHud(void)
 {
     WORD totalSeconds = (floodTicksRemaining + 49) / 50;
@@ -4185,6 +4264,7 @@ static void DrawHud(void)
         else if (miniGameType == MINIGAME_AIRHOCKEY) DrawAirHockeyHud();
         else if (miniGameType == MINIGAME_BOWLING) DrawBowlingHud();
         else if (miniGameType == MINIGAME_FLOODHOUSE) DrawFloodHouseHud();
+        else if (miniGameType == MINIGAME_PICTIONARY) DrawPictionaryHud();
         else DrawRaceHud();
         return;
     }

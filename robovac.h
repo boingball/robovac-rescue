@@ -246,7 +246,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define MINIGAME_FLOODHOUSE      6
 
-#define MINIGAME_COUNT           6
+#define MINIGAME_PICTIONARY      7
+
+#define MINIGAME_COUNT           7
 
 #define MINIGAME_INTRO_TICKS     100
 
@@ -433,6 +435,48 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define FLOODHOUSE_EVENT_BUILT       2
 
 #define FLOODHOUSE_EVENT_RAIDED      3
+
+
+/* Pictionary: one human player at a time gets a secret word and a blank
+ * floor to draw on - only human players ever draw (there's no meaningful
+ * way for the AI to draw anything, so it only ever guesses), and every
+ * other robot (remaining humans and every AI rival) is a guesser during
+ * that turn. Drawing is deliberately toggle-based rather than true
+ * press-and-hold: this codebase has no existing "is fire currently held"
+ * state for either input method (see TryPictionaryToggle's comment), and
+ * every other action in the game is already a single press, so pressing
+ * fire once starts painting the tile under the drawer as they move over
+ * it, and pressing it again lifts the pen - functionally the same "push
+ * down to draw, let go to stop" request without inventing new held-input
+ * plumbing untestable on real hardware.
+ *
+ * A human guesser presses fire to claim a correct guess outright (the
+ * local honesty a shared-screen party game already runs on - there is no
+ * way to keep the word private from other people in the room anyway). An
+ * AI guesser never looks at the canvas - once enough of it is painted it
+ * starts rolling a per-tick chance to "guess", which reads as thinking it
+ * over rather than an instant answer. Turns rotate through every human
+ * player once; scoring reuses Bumper/Bowling's per-robot rank pattern
+ * (top three get 3/2/1) built from points earned guessing plus a bonus for
+ * the drawer whenever at least one guess lands. */
+#define PICTIONARY_TURN_TICKS         (25 * 50)
+
+#define PICTIONARY_WORD_COUNT         10
+
+#define PICTIONARY_GUESS_POINTS       3
+
+#define PICTIONARY_DRAW_BONUS_POINTS  2
+
+/* AI guessers only start rolling once at least this fraction (percent) of
+ * the drawable floor has been painted - guessing at an almost-blank canvas
+ * would read as the AI cheating rather than "thinking it over". */
+#define PICTIONARY_AI_MIN_COVERAGE_PCT 12
+
+/* Average ~2.4 seconds of "thinking" (at 50 ticks/sec) once an AI guesser
+ * becomes eligible, rather than guessing the instant it can. */
+#define PICTIONARY_AI_GUESS_CHANCE    120
+
+#define PICTIONARY_FLASH_TICKS        60
 
 
 /* Bumper Bots: a tiny floor "rug" island sits on the same TILE_WALL border
@@ -1422,6 +1466,34 @@ static WORD floodLastEventKind = FLOODHOUSE_EVENT_NONE;
 
 static WORD floodPaletteTicks = 0;
 
+/* Which floor tiles the current drawer has painted - reset each turn, baked
+ * into the room buffer as an overlay the same way floodBlockHeight is (see
+ * DrawPictionaryPaintTile), since a tile constant can't hold "painted or
+ * not" alongside its normal floor/wall type. */
+static UBYTE pictionaryPainted[MAP_H][MAP_W];
+
+static WORD pictionaryPaintedCount = 0;
+
+static WORD pictionaryWordIndex = 0;
+
+static WORD pictionaryDrawer = -1;
+
+/* Index into the ordered list of human players taking a turn as drawer this
+ * round - not a robot id, since only humanPlayers-many turns ever happen. */
+static WORD pictionaryTurnIndex = 0;
+
+static WORD pictionaryTurnTicks = 0;
+
+static BOOL pictionaryPenDown[MAX_ROBOTS];
+
+static BOOL pictionaryGuessed[MAX_ROBOTS];
+
+static WORD pictionaryScore[MAX_ROBOTS];
+
+static WORD pictionaryLastGuesser = -1;
+
+static WORD pictionaryFlashTicks = 0;
+
 static WORD bumperTicksRemaining = 0;
 
 static WORD bumperAliveCount = 0;
@@ -1686,6 +1758,10 @@ static WORD dirtyPrevBowlingFlashTicks = -1;
 static WORD dirtyPrevFloodSecond = -1;
 static WORD dirtyPrevFloodLooseRemaining = -1;
 static WORD dirtyPrevFloodFlashTicks = -1;
+static WORD dirtyPrevPictionarySecond = -1;
+static WORD dirtyPrevPictionaryScoreSum = -1;
+static WORD dirtyPrevPictionaryDrawer = -1;
+static WORD dirtyPrevPictionaryFlashTicks = -1;
 static LONG dirtyPrevDirtStormPx = 0;
 static WORD dirtyPrevDirtStormTileY = 0;
 static BOOL dirtyPrevDirtStormValid = FALSE;
@@ -1789,6 +1865,12 @@ enum BoltSpriteFrame {
 
 static const char *roomNames[5] = {
     "Living Room", "Dining Room", "Kitchen", "Bathroom", "Bedroom"
+};
+
+
+static const char *pictionaryWords[PICTIONARY_WORD_COUNT] = {
+    "HOUSE", "ROBOT", "STAR", "TREE", "FISH",
+    "SUN", "HEART", "CAR", "BOAT", "CUP"
 };
 
 
@@ -1988,6 +2070,26 @@ static void TryFloodRaidRobot(WORD blockedId, WORD attackerId);
 static BOOL TryFloodBuild(WORD id);
 
 static WORD FloodHomeWallCount(WORD id);
+
+static void ClearPictionaryCanvas(void);
+
+static BOOL StartPictionaryTurn(void);
+
+static void StartPictionary(void);
+
+static void StepPictionary(void);
+
+static void FinishPictionary(void);
+
+static void AdvancePictionaryTurn(void);
+
+static void TryPictionaryPaint(WORD id);
+
+static void TryPictionaryToggle(WORD id);
+
+static void TryPictionaryGuess(WORD id);
+
+static void StepPictionaryAiGuesses(void);
 
 static WORD FloodBlocksOwned(WORD id);
 
@@ -2344,6 +2446,8 @@ static BOOL IsWallTileAt(WORD tx, WORD ty);
 static UBYTE GetWallRotation(WORD tx, WORD ty);
 static void BlitWallRotatedTo(struct RastPort *rp, WORD tx, WORD ty);
 static void DrawFloodBlockTile(struct RastPort *rp, WORD tx, WORD ty);
+
+static void DrawPictionaryPaintTile(struct RastPort *rp, WORD tx, WORD ty);
 static void UpdateRoomTile(WORD tx, WORD ty);
 static void BuildRoomBuffer(void);
 static void CopyRobotPixel(struct RastPort *srcRP, struct RastPort *dstRP, struct RastPort *maskRP,
@@ -2482,6 +2586,7 @@ static void DrawBumperHud(void);
 static void DrawBowlingHud(void);
 static void DrawFloodHouseHud(void);
 static void DrawFloodWaterOverlay(void);
+static void DrawPictionaryHud(void);
 static void DrawIntroTitleImage(void);
 static void DrawRoundStartOverlay(void);
 static void DrawPauseMenu(void);
