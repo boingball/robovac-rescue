@@ -2032,7 +2032,7 @@ static void CacheBoltPixel(struct RastPort *maskRP, WORD srcBaseX, WORD srcX, WO
 
 
 /* Rotates the source bolt glyph by k*45 degrees (nearest-neighbour, same
- * nine-region sampling style as DrawRobotBobTurn45) so all eight compass
+ * sampling style as DrawRobotBobRotated below) so all eight compass
  * headings - including the four diagonals - get a properly rotated frame
  * instead of reusing an axis-aligned sprite for a diagonal shot. */
 static void BuildBoltCacheFrame(struct RastPort *maskRP, WORD frame, WORD k)
@@ -2468,8 +2468,27 @@ static void DrawRobotBobScaled2(WORD srcX, WORD sx, WORD sy)
 }
 
 
-static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection)
+/* Shared cosmetic sprite-rotation sampler: nearest-neighbour inverse
+ * rotation by angleStep * (360/BOBROT_STEPS) degrees, Q8 fixed point
+ * (256 = 1.0) - same sampling formula as the bolt cache's BuildBoltCacheFrame
+ * above, just driven by a live angle instead of one baked at cache-build
+ * time. Used for any cosmetic spin finer than a fixed 45-degree blend:
+ * RoboRace's cornering blend and Bumper Bots' elimination tumble. angleStep
+ * wraps at BOBROT_STEPS and may be negative (mirrors the rotation). */
+#define BOBROT_STEPS 32
+static const WORD bobRotCosQ8[BOBROT_STEPS] = {
+    256,251,237,213,181,142,98,50,
+    0,-50,-98,-142,-181,-213,-237,-251,
+    -256,-251,-237,-213,-181,-142,-98,-50,
+    0,50,98,142,181,213,237,251
+};
+#define BobRotCos(a) (bobRotCosQ8[(a) & (BOBROT_STEPS - 1)])
+#define BobRotSin(a) (bobRotCosQ8[((a) - (BOBROT_STEPS / 4)) & (BOBROT_STEPS - 1)])
+
+static void DrawRobotBobRotated(WORD srcX, WORD sx, WORD sy, WORD angleStep)
 {
+    WORD cosv = BobRotCos(angleStep);
+    WORD sinv = BobRotSin(angleStep);
     WORD x;
     WORD y;
 
@@ -2477,17 +2496,9 @@ static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection)
         for (x = 0; x < ROBOT_W; x++) {
             WORD dx = x - (ROBOT_W / 2);
             WORD dy = y - (ROBOT_H / 2);
-            WORD sampleX;
-            WORD sampleY;
+            WORD sampleX = (WORD)((((LONG)dx * cosv) + ((LONG)dy * sinv)) >> 8) + (ROBOT_W / 2);
+            WORD sampleY = (WORD)((((LONG)dy * cosv) - ((LONG)dx * sinv)) >> 8) + (ROBOT_H / 2);
             LONG p;
-
-            if (turnDirection >= 0) {
-                sampleX = (WORD)((((LONG)dx + (LONG)dy) * 181L) >> 8) + (ROBOT_W / 2);
-                sampleY = (WORD)((((LONG)dy - (LONG)dx) * 181L) >> 8) + (ROBOT_H / 2);
-            } else {
-                sampleX = (WORD)((((LONG)dx - (LONG)dy) * 181L) >> 8) + (ROBOT_W / 2);
-                sampleY = (WORD)((((LONG)dx + (LONG)dy) * 181L) >> 8) + (ROBOT_H / 2);
-            }
 
             if (sampleX < 0 || sampleY < 0 || sampleX >= ROBOT_W || sampleY >= ROBOT_H) continue;
             p = ReadPixel(&robotRP, srcX + sampleX, sampleY);
@@ -2659,27 +2670,24 @@ static void DrawSpeedMotionBlur(WORD id, WORD sx, WORD sy)
  * new art, no scaling. */
 static void DrawBumperFallingRobot(WORD id)
 {
-    static const UBYTE spinStates[4] = {SPR_UP, SPR_RIGHT, SPR_DOWN, SPR_LEFT};
     WORD sx;
     WORD sy;
     WORD srcX;
     WORD sink;
-    WORD spinFrame;
+    WORD elapsed;
 
     if (!robotCacheBM || !robotMaskBM || !robotMaskBM->Planes[0]) return;
     if ((bumperFallTicks[id] & 2) == 0) return;
 
-    sink = (BUMPER_FALL_TICKS - bumperFallTicks[id]) * 2;
+    elapsed = BUMPER_FALL_TICKS - bumperFallTicks[id];
+    sink = elapsed * 2;
     sx = MAP_X + FP_TO_INT(robots[id].px);
     sy = MAP_Y + FP_TO_INT(robots[id].py) + sink;
-    spinFrame = spinStates[(bumperFallTicks[id] >> 1) & 3];
-    srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + spinFrame) * ROBOT_W;
+    srcX = (robots[id].spriteVariant * SPR_STATE_COUNT + SPR_UP) * ROBOT_W;
 
-    BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
-                          &renderRP, sx, sy,
-                          ROBOT_W, ROBOT_H,
-                          (ABC | ABNC | ANBC),
-                          robotMaskBM->Planes[0]);
+    /* A continuous spin instead of jump-cutting between the four cardinal
+     * sprites reads as an actual tumble as the robot sinks off the rug. */
+    DrawRobotBobRotated(srcX, sx, sy, elapsed * 2);
 }
 
 
@@ -2755,7 +2763,11 @@ static void DrawRobotBob(WORD id)
                                   robotMaskBM->Planes[0]);
         } else if (robots[id].turnTicks > 1 && robots[id].prevSpriteIndex != robots[id].spriteIndex) {
             WORD turnSrcX = (robots[id].spriteVariant * SPR_STATE_COUNT + robots[id].prevSpriteIndex) * ROBOT_W;
-            DrawRobotBobTurn45(turnSrcX, sx, sy, robots[id].turnDirection);
+            /* Sweep continuously through the corner instead of holding one
+             * fixed 45-degree blend for both ticks of the diagonal phase. */
+            WORD angleStep = ((RACE_TURN_TICKS - robots[id].turnTicks) * (BOBROT_STEPS / 4)) / RACE_TURN_TICKS;
+            if (robots[id].turnDirection < 0) angleStep = -angleStep;
+            DrawRobotBobRotated(turnSrcX, sx, sy, angleStep);
         } else {
             BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
                                   &renderRP, sx, sy,
@@ -2945,8 +2957,6 @@ static void DrawDirtStorm(void)
     WORD sy;
     WORD srcX;
     WORD spinStep;
-    UBYTE spinState;
-    static const UBYTE spinStates[4] = {SPR_UP, SPR_RIGHT, SPR_DOWN, SPR_LEFT};
 
     if (!dirtStormActive) return;
     if (!robotCacheBM || !robotMaskBM || !robotMaskBM->Planes[0]) return;
@@ -2954,18 +2964,12 @@ static void DrawDirtStorm(void)
     sx = MAP_X + FP_TO_INT(dirtStormPx);
     sy = MAP_Y + (dirtStormTileY * TILE_SIZE);
     spinStep = (dirtStormSpinPhase >> 1) & 7;
-    spinState = spinStates[(spinStep >> 1) & 3];
-    srcX = (dirtStormVariant * SPR_STATE_COUNT + spinState) * ROBOT_W;
+    srcX = (dirtStormVariant * SPR_STATE_COUNT + SPR_UP) * ROBOT_W;
 
-    if (spinStep & 1) {
-        DrawRobotBobTurn45(srcX, sx, sy, 1);
-    } else {
-        BltMaskBitMapRastPort(robotCacheBM, srcX, 0,
-                              &renderRP, sx, sy,
-                              ROBOT_W, ROBOT_H,
-                              (ABC | ABNC | ANBC),
-                              robotMaskBM->Planes[0]);
-    }
+    /* A full continuous spin of one source frame reads as a proper tumble;
+     * the old version cut between four different hand-drawn cardinal
+     * sprites with only a single 45-degree blend between each. */
+    DrawRobotBobRotated(srcX, sx, sy, spinStep * (BOBROT_STEPS / 8));
 
     /* All seven hoover variants share the same 16-colour sprite sheet
      * palette, just with different pens painted in their art, so there's

@@ -2155,7 +2155,7 @@ static BOOL InitRobotBobs(void);
 static void PlotRobotPixel(WORD x, WORD y, UBYTE pen);
 static void DrawRobotBobScaled2Cpu(WORD srcX, WORD sx, WORD sy);
 static void DrawRobotBobScaled2(WORD srcX, WORD sx, WORD sy);
-static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection);
+static void DrawRobotBobRotated(WORD srcX, WORD sx, WORD sy, WORD angleStep);
 static void BuildSpeedTrailBar(struct RastPort *maskRP, WORD x, WORD y,
                                WORD w, WORD h, UBYTE pen);
 static void DrawSpeedMotionBlur(WORD id, WORD sx, WORD sy);
