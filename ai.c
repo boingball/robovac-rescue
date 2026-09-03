@@ -440,6 +440,96 @@ static void ChooseBowlingAiMove(WORD id)
 }
 
 
+static void ChooseFloodAiMove(WORD id)
+{
+    WORD dx = 0;
+    WORD dy = 0;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_FLOODHOUSE) return;
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0) return;
+
+    if (floodCarried[id] > 0) {
+        static const WORD wallDx[4] = {1, 0, -1, 0};
+        static const WORD wallDy[4] = {0, 1, 0, -1};
+        WORD bestSide = -1;
+        WORD bestDist = 32767;
+        WORD i;
+
+        /* Carrying at least one block: head for whichever of the home's
+         * four wall tiles is nearest and not already maxed out. */
+        for (i = 0; i < 4; i++) {
+            WORD tx = floodHomeX[id] + wallDx[i];
+            WORD ty = floodHomeY[id] + wallDy[i];
+            WORD dist;
+            if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+            if (floodBlockHeight[ty][tx] >= FLOODHOUSE_STACK_MAX) continue;
+            dist = AbsW(tx - robots[id].tileX) + AbsW(ty - robots[id].tileY);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestSide = i;
+            }
+        }
+
+        if (bestSide >= 0) {
+            WORD targetX = floodHomeX[id] + wallDx[bestSide];
+            WORD targetY = floodHomeY[id] + wallDy[bestSide];
+
+            if (bestDist == 1) {
+                /* Already standing next to the wall tile: face it and
+                 * build rather than stepping onto it, which would steal
+                 * the very block being carried there instead of adding
+                 * to it. */
+                WORD faceDx = targetX - robots[id].tileX;
+                WORD faceDy = targetY - robots[id].tileY;
+                if (faceDx < 0) SetRobotMoveSprite(id, SPR_LEFT);
+                else if (faceDx > 0) SetRobotMoveSprite(id, SPR_RIGHT);
+                else if (faceDy < 0) SetRobotMoveSprite(id, SPR_UP);
+                else if (faceDy > 0) SetRobotMoveSprite(id, SPR_DOWN);
+                TryFloodBuild(id);
+                return;
+            }
+
+            if (AiFindPathStep(id, targetX, targetY, &dx, &dy, NULL) && (dx != 0 || dy != 0)) {
+                WORD nx = robots[id].tileX + dx;
+                WORD ny = robots[id].tileY + dy;
+                if (nx == targetX && ny == targetY) return;
+                StartRobotMove(id, dx, dy);
+            }
+            return;
+        }
+    }
+
+    /* Not carrying (or the home is already fully built): go grab the
+     * nearest block still lying around, loose or in anyone's wall. */
+    {
+        WORD bestX = -1;
+        WORD bestY = -1;
+        WORD bestDist = 32767;
+        WORD tx;
+        WORD ty;
+
+        for (ty = 1; ty < MAP_H - 1; ty++) {
+            for (tx = 1; tx < MAP_W - 1; tx++) {
+                WORD dist;
+                if (floodBlockHeight[ty][tx] <= 0) continue;
+                dist = AbsW(tx - robots[id].tileX) + AbsW(ty - robots[id].tileY);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestX = tx;
+                    bestY = ty;
+                }
+            }
+        }
+
+        if (bestX >= 0 && AiFindPathStep(id, bestX, bestY, &dx, &dy, NULL) &&
+            (dx != 0 || dy != 0)) {
+            StartRobotMove(id, dx, dy);
+        }
+    }
+}
+
+
 static void ChooseBumperAiMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
@@ -626,6 +716,7 @@ static void ChooseAiMove(WORD id)
         else if (miniGameType == MINIGAME_BUMPER) ChooseBumperAiMove(id);
         else if (miniGameType == MINIGAME_AIRHOCKEY) ChooseAirHockeyAiMove(id);
         else if (miniGameType == MINIGAME_BOWLING) ChooseBowlingAiMove(id);
+        else if (miniGameType == MINIGAME_FLOODHOUSE) ChooseFloodAiMove(id);
         return;
     }
 

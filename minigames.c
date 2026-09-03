@@ -1529,12 +1529,342 @@ static void StepRoboBowling(void)
 }
 
 
+static void ScatterFloodBlocks(void)
+{
+    WORD placed = 0;
+    WORD attempts = 0;
+    WORD target = robotCount * FLOODHOUSE_LOOSE_PER_ROBOT;
+
+    while (placed < target && attempts < 500) {
+        WORD tx = 1 + (WORD)RandRange(MAP_W - 2);
+        WORD ty = 1 + (WORD)RandRange(MAP_H - 2);
+        WORD i;
+        BOOL nearHome = FALSE;
+
+        attempts++;
+        if (floodBlockHeight[ty][tx] > 0) continue;
+        for (i = 0; i < robotCount; i++) {
+            if (AbsW(tx - floodHomeX[i]) + AbsW(ty - floodHomeY[i]) <= 1) {
+                nearHome = TRUE;
+                break;
+            }
+        }
+        if (nearHome) continue;
+
+        floodBlockHeight[ty][tx] = 1;
+        placed++;
+    }
+    floodLooseRemaining = placed;
+}
+
+
+static void StartFloodHouse(void)
+{
+    WORD x;
+    WORD y;
+    WORD i;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClearMovementKeys();
+    ClosePauseMenu();
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            if (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) {
+                map[y][x] = TILE_WALL;
+            } else {
+                map[y][x] = TILE_FLOOR;
+            }
+            floodBlockHeight[y][x] = 0;
+        }
+    }
+
+    ClearDirtList();
+    for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
+    dirtStormActive = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+
+    gameState = GAME_MINIGAME_PLAYING;
+    InitRobots();
+    for (i = 0; i < robotCount; i++) {
+        UBYTE variant = robots[i].spriteVariant;
+
+        SetRobotTile(i, floodHomeX[i], floodHomeY[i]);
+        robots[i].spriteVariant = variant;
+        robots[i].battery = maxBattery;
+        robots[i].powerType = POWER_NONE;
+        robots[i].powerMovesLeft = 0;
+        robots[i].stunTicks = 0;
+        floodCarried[i] = 0;
+        floodSurrounded[i] = FALSE;
+        aiPrevTileX[i] = robots[i].tileX;
+        aiPrevTileY[i] = robots[i].tileY;
+    }
+
+    ScatterFloodBlocks();
+
+    floodTicksRemaining = FLOODHOUSE_BUILD_TICKS;
+    floodFlashTicks = 0;
+    floodLastEventRobot = -1;
+    floodLastEventKind = FLOODHOUSE_EVENT_NONE;
+    floodPaletteTicks = 0;
+
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
+    roundGoTicks = 0;
+    roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
+    MarkHudStatusTextDirty();
+    BuildRoomBuffer();
+    ForceGameplayFullPresent();
+    StartRoundCountdownAudio();
+}
+
+
+static void FloodHandleRobotArrival(WORD id)
+{
+    WORD tx;
+    WORD ty;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_FLOODHOUSE) return;
+    if (id < 0 || id >= robotCount) return;
+    if (floodCarried[id] >= FLOODHOUSE_CARRY_MAX) return;
+
+    tx = robots[id].tileX;
+    ty = robots[id].tileY;
+    if (floodBlockHeight[ty][tx] <= 0) return;
+
+    floodBlockHeight[ty][tx]--;
+    floodCarried[id]++;
+    UpdateRoomTile(tx, ty);
+    floodFlashTicks = FLOODHOUSE_FLASH_TICKS;
+    floodLastEventRobot = id;
+    floodLastEventKind = FLOODHOUSE_EVENT_STOLE;
+    MarkHudStatusTextDirty();
+}
+
+
+static void TryFloodRaidRobot(WORD blockedId, WORD attackerId)
+{
+    if (blockedId < 0 || blockedId >= robotCount) return;
+    if (attackerId < 0 || attackerId >= robotCount) return;
+    if (floodCarried[blockedId] <= 0) return;
+
+    floodCarried[blockedId]--;
+    if (floodCarried[attackerId] < FLOODHOUSE_CARRY_MAX) floodCarried[attackerId]++;
+    floodFlashTicks = FLOODHOUSE_FLASH_TICKS;
+    floodLastEventRobot = attackerId;
+    floodLastEventKind = FLOODHOUSE_EVENT_RAIDED;
+    MarkHudStatusTextDirty();
+}
+
+
+static BOOL TryFloodBuild(WORD id)
+{
+    WORD dirX = 0;
+    WORD dirY = 0;
+    WORD tx;
+    WORD ty;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_FLOODHOUSE) return FALSE;
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (floodCarried[id] <= 0) return FALSE;
+
+    switch (robots[id].spriteIndex) {
+        case SPR_LEFT:  dirX = -1; break;
+        case SPR_RIGHT: dirX = 1; break;
+        case SPR_UP:    dirY = -1; break;
+        case SPR_DOWN:  dirY = 1; break;
+        default: dirY = 1; break;
+    }
+
+    tx = robots[id].tileX + dirX;
+    ty = robots[id].tileY + dirY;
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
+    if (floodBlockHeight[ty][tx] >= FLOODHOUSE_STACK_MAX) return FALSE;
+    if (RobotAtTile(tx, ty, id)) return FALSE;
+
+    floodBlockHeight[ty][tx]++;
+    floodCarried[id]--;
+    UpdateRoomTile(tx, ty);
+    floodFlashTicks = FLOODHOUSE_FLASH_TICKS;
+    floodLastEventRobot = id;
+    floodLastEventKind = FLOODHOUSE_EVENT_BUILT;
+    MarkHudStatusTextDirty();
+    return TRUE;
+}
+
+
+static WORD FloodHomeWallCount(WORD id)
+{
+    static const WORD dirX[4] = {1, 0, -1, 0};
+    static const WORD dirY[4] = {0, 1, 0, -1};
+    WORD count = 0;
+    WORD i;
+
+    if (id < 0 || id >= robotCount) return 0;
+    for (i = 0; i < 4; i++) {
+        WORD tx = floodHomeX[id] + dirX[i];
+        WORD ty = floodHomeY[id] + dirY[i];
+        if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+        if (floodBlockHeight[ty][tx] > 0) count++;
+    }
+    return count;
+}
+
+
+static WORD FloodBlocksOwned(WORD id)
+{
+    static const WORD dirX[4] = {1, 0, -1, 0};
+    static const WORD dirY[4] = {0, 1, 0, -1};
+    WORD total;
+    WORD i;
+
+    if (id < 0 || id >= robotCount) return 0;
+    total = floodCarried[id];
+    for (i = 0; i < 4; i++) {
+        WORD tx = floodHomeX[id] + dirX[i];
+        WORD ty = floodHomeY[id] + dirY[i];
+        if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+        total += floodBlockHeight[ty][tx];
+    }
+    return total;
+}
+
+
+static LONG FloodRank(WORD id)
+{
+    LONG owned = (LONG)FloodBlocksOwned(id);
+    if (floodSurrounded[id]) return 1000000L + owned;
+    return owned;
+}
+
+
+static void ResolveFloodHouse(void)
+{
+    WORD i;
+
+    for (i = 0; i < robotCount; i++) {
+        floodSurrounded[i] = (FloodHomeWallCount(i) >= 4) ? TRUE : FALSE;
+    }
+    floodPaletteTicks = FLOODHOUSE_PALETTE_TICKS;
+    FinishFloodHouse();
+}
+
+
+static void FinishFloodHouse(void)
+{
+    WORD order[MAX_ROBOTS];
+    WORD i;
+    WORD pass;
+    static const WORD points[3] = {3, 2, 1};
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_FLOODHOUSE) return;
+
+    for (i = 0; i < robotCount; i++) order[i] = i;
+    for (pass = 0; pass < robotCount - 1; pass++) {
+        for (i = 0; i < robotCount - 1 - pass; i++) {
+            if (FloodRank(order[i + 1]) > FloodRank(order[i])) {
+                WORD t = order[i];
+                order[i] = order[i + 1];
+                order[i + 1] = t;
+            }
+        }
+    }
+
+    miniGameWinner = order[0];
+    for (i = 0; i < robotCount && i < 3; i++) {
+        miniGamePoints[order[i]] = points[i];
+        totalScores[order[i]] += points[i];
+    }
+
+    ClearMovementKeys();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    gameState = GAME_MINIGAME_END;
+    ForceGameplayFullPresent();
+}
+
+
+static void StepFloodHouse(void)
+{
+    WORD i;
+    WORD countdownNumber;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_FLOODHOUSE) return;
+
+    if (pauseMenuOpen) {
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    BeginGameplayDirtyRects();
+    StepRoundStartSamples();
+    if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+        roundCountdownTicks--;
+        ForceGameplayFullPresent();
+        if (roundCountdownTicks > 0) {
+            FinishGameplayDirtyRects();
+            return;
+        }
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
+        }
+        StartMainGameMusic();
+    }
+    if (roundGoTicks > 0) roundGoTicks--;
+
+    if (floodFlashTicks > 0) floodFlashTicks--;
+    if (floodTicksRemaining > 0) floodTicksRemaining--;
+
+    if (floodTicksRemaining <= 0) {
+        ResolveFloodHouse();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        StepRobotMovement(i);
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
+    }
+    for (i = 0; i < humanPlayers; i++) ChoosePlayerMove(i);
+    for (i = humanPlayers; i < robotCount; i++) ChooseFloodAiMove(i);
+
+    ServiceHooverMoveSample();
+    FinishGameplayDirtyRects();
+}
+
+
 static void RestartCurrentMiniGame(void)
 {
     if (miniGameType == MINIGAME_PUCK) StartRoboPuck();
     else if (miniGameType == MINIGAME_BUMPER) StartBumperBots();
     else if (miniGameType == MINIGAME_AIRHOCKEY) StartAirHockey();
     else if (miniGameType == MINIGAME_BOWLING) StartRoboBowling();
+    else if (miniGameType == MINIGAME_FLOODHOUSE) StartFloodHouse();
     else StartRoboRace();
 }
 

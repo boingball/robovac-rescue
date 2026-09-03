@@ -231,6 +231,8 @@ static BOOL RobotNeedsCurrentDirtyRect(WORD id)
     if (robots[id].turnTicks != dirtyPrevRobotTurnTicks[id]) return TRUE;
     if (robots[id].turnDirection != dirtyPrevRobotTurnDirection[id]) return TRUE;
     if (speedFlashTicks[id] != dirtyPrevRobotSpeedFlashTicks[id]) return TRUE;
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE &&
+        floodCarried[id] != dirtyPrevRobotFloodCarried[id]) return TRUE;
     if (quadActive != dirtyPrevRobotQuadActive[id]) return TRUE;
     if (DirtyRobotTileUnder(id) != dirtyPrevRobotTileUnder[id]) return TRUE;
     if (DirtyOverlayIntersectsRobot(id)) return TRUE;
@@ -256,6 +258,7 @@ static void StoreDirtyRobotVisualState(WORD id)
     dirtyPrevRobotQuadActive[id] = (bigHeadMode || (robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) ? 1 : 0;
     dirtyPrevRobotTileUnder[id] = DirtyRobotTileUnder(id);
     dirtyPrevRobotSpeedFlashTicks[id] = speedFlashTicks[id];
+    dirtyPrevRobotFloodCarried[id] = floodCarried[id];
 }
 
 static ULONG DirtyRectArea(struct DirtyRect *rect)
@@ -635,6 +638,10 @@ static void MarkDirtyHudIfChanged(void)
              dirtyPrevBowlingScore[0] != bowlingTeamScore[0] ||
              dirtyPrevBowlingScore[1] != bowlingTeamScore[1] ||
              dirtyPrevBowlingFlashTicks != bowlingFlashTicks)) changed = TRUE;
+        if (miniGameType == MINIGAME_FLOODHOUSE &&
+            (dirtyPrevFloodSecond != (floodTicksRemaining / 50) ||
+             dirtyPrevFloodLooseRemaining != floodLooseRemaining ||
+             dirtyPrevFloodFlashTicks != floodFlashTicks)) changed = TRUE;
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -683,6 +690,9 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevBowlingScore[0] = bowlingTeamScore[0];
     dirtyPrevBowlingScore[1] = bowlingTeamScore[1];
     dirtyPrevBowlingFlashTicks = bowlingFlashTicks;
+    dirtyPrevFloodSecond = floodTicksRemaining / 50;
+    dirtyPrevFloodLooseRemaining = floodLooseRemaining;
+    dirtyPrevFloodFlashTicks = floodFlashTicks;
     for (i = 0; i < robotCount; i++) {
         dirtyPrevBattery[i] = robots[i].battery;
         dirtyPrevScore[i] = robots[i].score;
@@ -1106,6 +1116,40 @@ static void BlitTileTo(struct RastPort *rp, UBYTE tileType, WORD tx, WORD ty)
 }
 
 
+/* Flood House block state is its own height grid, not a map[][] tile type
+ * (a floor tile needs to hold 0-3, which a tile constant cannot), so it is
+ * baked into the room buffer here as an overlay on top of the plain floor
+ * tile UpdateRoomTile already drew, rather than through BlitTileTo. A cheap
+ * "fake stack" - each level a shallow bar stepped upward from the tile's
+ * bottom edge, with a lighter top-face strip - plus the current height as
+ * a digit, always anchored to the tile's top edge so it never depends on
+ * how tall the stack under it happens to be. */
+static void DrawFloodBlockTile(struct RastPort *rp, WORD tx, WORD ty)
+{
+    WORD dstX = MAP_X + tx * TILE_SIZE;
+    WORD dstY = MAP_Y + ty * TILE_SIZE;
+    UBYTE height = floodBlockHeight[ty][tx];
+    WORD blockH = 4;
+    WORD level;
+    char num[2];
+
+    if (height <= 0) return;
+    if (height > FLOODHOUSE_STACK_MAX) height = FLOODHOUSE_STACK_MAX;
+
+    for (level = 0; level < height; level++) {
+        WORD topY = dstY + TILE_SIZE - blockH - (level * blockH);
+        SetAPen(rp, 5);
+        RectFill(rp, dstX + 2, topY, dstX + TILE_SIZE - 3, topY + blockH - 1);
+        SetAPen(rp, 13);
+        RectFill(rp, dstX + 2, topY, dstX + TILE_SIZE - 3, topY);
+    }
+
+    num[0] = (char)('0' + height);
+    num[1] = '\0';
+    MiniText(rp, dstX + 6, dstY + 1, num, 14);
+}
+
+
 static BOOL IsWallTileAt(WORD tx, WORD ty)
 {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
@@ -1155,6 +1199,9 @@ static void UpdateRoomTile(WORD tx, WORD ty)
         }
     } else {
         BlitTileTo(&roomRP, map[ty][tx], tx, ty);
+    }
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE) {
+        DrawFloodBlockTile(&roomRP, tx, ty);
     }
     AddDirtyTile(tx, ty);
 }
@@ -2799,6 +2846,20 @@ static void DrawRobotBob(WORD id)
         RectFill(&renderRP, sx + 5, sy + 4, sx + 6, sy + 5);
         RectFill(&renderRP, sx + 10, sy + 4, sx + 11, sy + 5);
     }
+
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE && floodCarried[id] > 0) {
+        /* Kept strictly inside the sprite's own ROBOT_W x ROBOT_H footprint
+         * (unlike the stun marks above, which sit comfortably inside it
+         * too) so the existing per-robot dirty rect already covers erasing
+         * it - drawing even one pixel outside that box would leave a stray
+         * mark behind whenever the robot moves on. */
+        char carryNum[2];
+        SetAPen(&renderRP, 0);
+        RectFill(&renderRP, sx + 10, sy, sx + 15, sy + 5);
+        carryNum[0] = (char)('0' + floodCarried[id]);
+        carryNum[1] = '\0';
+        MiniText(&renderRP, sx + 11, sy, carryNum, 14);
+    }
 }
 
 
@@ -3744,6 +3805,11 @@ static void DrawMiniGameIntroScreen(void)
         MiniTextCentered(&renderRP, 96, "TEN PINS  90 SECONDS", 7, 2);
         MiniTextCentered(&renderRP, 112, "DRIVE INTO A PIN TO KNOCK IT DOWN", 13, 1);
         MiniTextCentered(&renderRP, 126, "MOST PINS DOWN WINS", 14, 1);
+    } else if (miniGameType == MINIGAME_FLOODHOUSE) {
+        MiniTextCentered(&renderRP, 66, "FLOOD HOUSE", 10, 3);
+        MiniTextCentered(&renderRP, 96, "30 SECONDS TO BUILD", 7, 2);
+        MiniTextCentered(&renderRP, 112, "WALL ALL 4 SIDES OF YOUR HOME", 13, 1);
+        MiniTextCentered(&renderRP, 126, "STEAL BLOCKS  STAY DRIEST", 14, 1);
     } else {
         MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
         MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
@@ -3771,7 +3837,8 @@ static void DrawMiniGameEndScreen(void)
                      miniGameType == MINIGAME_PUCK ? "ROBOPUCK RESULT" :
                      miniGameType == MINIGAME_BUMPER ? "BUMPER BOTS RESULT" :
                      miniGameType == MINIGAME_AIRHOCKEY ? "ROBOHOCKEY RESULT" :
-                     miniGameType == MINIGAME_BOWLING ? "ROBO BOWLING RESULT" : "ROBORACE RESULT",
+                     miniGameType == MINIGAME_BOWLING ? "ROBO BOWLING RESULT" :
+                     miniGameType == MINIGAME_FLOODHOUSE ? "FLOOD HOUSE RESULT" : "ROBORACE RESULT",
                      14, 3);
 
     if (miniGameWinner >= 0) {
@@ -3814,6 +3881,24 @@ static void DrawMiniGameEndScreen(void)
     }
 
     MiniTextCentered(&renderRP, 226, "SPACE FIRE NEXT ROUND", 13, 1);
+
+    /* A thin rising water line along the very bottom edge, well clear of
+     * the text above - the "copper effect" pitched for the flood moment,
+     * kept to a plain animated RectFill rather than an actual palette or
+     * copper-list effect, since this whole screen is already redrawn fresh
+     * every frame (see the full-screen clear at the top of this function)
+     * and a palette swap would need its own restore bookkeeping elsewhere
+     * to guarantee it never leaves the screen tinted. */
+    if (miniGameType == MINIGAME_FLOODHOUSE) {
+        WORD waterH;
+        if (floodPaletteTicks > 0) floodPaletteTicks--;
+        waterH = ((FLOODHOUSE_PALETTE_TICKS - floodPaletteTicks) * 10) / FLOODHOUSE_PALETTE_TICKS;
+        if (waterH > 10) waterH = 10;
+        if (waterH > 0) {
+            SetAPen(&renderRP, 11);
+            RectFill(&renderRP, 0, SCREEN_H - waterH, SCREEN_W - 1, SCREEN_H - 1);
+        }
+    }
 }
 
 
@@ -4018,6 +4103,36 @@ static void DrawBowlingHud(void)
 }
 
 
+static void DrawFloodHouseHud(void)
+{
+    WORD totalSeconds = (floodTicksRemaining + 49) / 50;
+    WORD minutes = totalSeconds / 60;
+    WORD seconds = totalSeconds % 60;
+    char b[64];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
+
+    snprintf(b, sizeof(b), "FLOOD HOUSE  BUILD YOUR WALLS  %d:%02d",
+             minutes, seconds);
+    MiniText(&renderRP, 4, 3, b, 14);
+
+    if (floodFlashTicks > 0 && floodLastEventRobot >= 0 && floodLastEventKind != FLOODHOUSE_EVENT_NONE) {
+        if (floodLastEventKind == FLOODHOUSE_EVENT_BUILT) {
+            snprintf(b, sizeof(b), "%s BUILT A WALL", RobotTag(floodLastEventRobot));
+        } else if (floodLastEventKind == FLOODHOUSE_EVENT_RAIDED) {
+            snprintf(b, sizeof(b), "%s RAIDED A RIVAL", RobotTag(floodLastEventRobot));
+        } else {
+            snprintf(b, sizeof(b), "%s GRABBED A BLOCK", RobotTag(floodLastEventRobot));
+        }
+        MiniTextCentered(&renderRP, 18, b, 13, 2);
+    } else {
+        MiniTextCentered(&renderRP, 18, "WALL YOUR HOME  DRIEST WINS", 7, 1);
+    }
+    DrawJoystickIcons();
+}
+
+
 static void DrawHud(void)
 {
     char b[160];
@@ -4032,6 +4147,7 @@ static void DrawHud(void)
         else if (miniGameType == MINIGAME_BUMPER) DrawBumperHud();
         else if (miniGameType == MINIGAME_AIRHOCKEY) DrawAirHockeyHud();
         else if (miniGameType == MINIGAME_BOWLING) DrawBowlingHud();
+        else if (miniGameType == MINIGAME_FLOODHOUSE) DrawFloodHouseHud();
         else DrawRaceHud();
         return;
     }

@@ -244,7 +244,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define MINIGAME_BOWLING         5
 
-#define MINIGAME_COUNT           5
+#define MINIGAME_FLOODHOUSE      6
+
+#define MINIGAME_COUNT           6
 
 #define MINIGAME_INTRO_TICKS     100
 
@@ -360,6 +362,44 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define BOWLING_PIN_BASE_Y          3
 
 #define BOWLING_FLASH_TICKS         40
+
+
+/* Flood House: everyone gets a fixed home tile and a 30-second build phase.
+ * Loose blocks are scattered on the floor; walking onto ANY block (loose,
+ * or sitting in a rival's fort) steals one level of it into your carry
+ * (max 2), and bumping a rival who is currently carrying also steals
+ * straight out of their carry slots. Fire places one carried block onto
+ * the tile you are facing, stacking up to 3 high. None of this touches
+ * map[][] - block state is its own per-tile height grid, since a floor
+ * tile needs to hold 0-3 and a tile type constant cannot - so a block
+ * never blocks a walk-through the way a wall or table would.
+ *
+ * When the timer runs out, survival is per-robot and structural: if every
+ * one of the 4 tiles orthogonally adjacent to YOUR home has a block on it
+ * (any height, 1 or more), the water can't reach your tile and you are
+ * "surrounded" - safe. Missing even one side floods you. Ranking and
+ * points reuse Bumper Bots' pattern (a per-robot rank score, top three get
+ * 3/2/1): surrounded robots always outrank flooded ones, tiebroken within
+ * each group by total blocks owned (carried + built on your own walls). */
+#define FLOODHOUSE_BUILD_TICKS       (30 * 50)
+
+#define FLOODHOUSE_CARRY_MAX         2
+
+#define FLOODHOUSE_STACK_MAX         3
+
+#define FLOODHOUSE_LOOSE_PER_ROBOT   3
+
+#define FLOODHOUSE_FLASH_TICKS       40
+
+#define FLOODHOUSE_PALETTE_TICKS     100
+
+#define FLOODHOUSE_EVENT_NONE        0
+
+#define FLOODHOUSE_EVENT_STOLE       1
+
+#define FLOODHOUSE_EVENT_BUILT       2
+
+#define FLOODHOUSE_EVENT_RAIDED      3
 
 
 /* Bumper Bots: a tiny floor "rug" island sits on the same TILE_WALL border
@@ -1314,6 +1354,24 @@ static WORD bowlingLastKnockedRobot = -1;
 
 static WORD bowlingFlashTicks = 0;
 
+static UBYTE floodBlockHeight[MAP_H][MAP_W];
+
+static WORD floodCarried[MAX_ROBOTS];
+
+static BOOL floodSurrounded[MAX_ROBOTS];
+
+static WORD floodTicksRemaining = 0;
+
+static WORD floodLooseRemaining = 0;
+
+static WORD floodFlashTicks = 0;
+
+static WORD floodLastEventRobot = -1;
+
+static WORD floodLastEventKind = FLOODHOUSE_EVENT_NONE;
+
+static WORD floodPaletteTicks = 0;
+
 static WORD bumperTicksRemaining = 0;
 
 static WORD bumperAliveCount = 0;
@@ -1524,6 +1582,7 @@ static WORD dirtyPrevRobotTurnDirection[MAX_ROBOTS];
 static UBYTE dirtyPrevRobotQuadActive[MAX_ROBOTS];
 static UBYTE dirtyPrevRobotTileUnder[MAX_ROBOTS];
 static WORD dirtyPrevRobotSpeedFlashTicks[MAX_ROBOTS];
+static WORD dirtyPrevRobotFloodCarried[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPx[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPy[MAX_ROBOTS];
 static BOOL dirtyPrevPlayerBoltActive[MAX_ROBOTS];
@@ -1572,6 +1631,9 @@ static WORD dirtyPrevBowlingSecond = -1;
 static WORD dirtyPrevBowlingPinsRemaining = -1;
 static WORD dirtyPrevBowlingScore[2] = {-1, -1};
 static WORD dirtyPrevBowlingFlashTicks = -1;
+static WORD dirtyPrevFloodSecond = -1;
+static WORD dirtyPrevFloodLooseRemaining = -1;
+static WORD dirtyPrevFloodFlashTicks = -1;
 static LONG dirtyPrevDirtStormPx = 0;
 static WORD dirtyPrevDirtStormTileY = 0;
 static BOOL dirtyPrevDirtStormValid = FALSE;
@@ -1607,6 +1669,13 @@ static const WORD raceStartY[MAX_ROBOTS] = {9, 10, 11, 9, 10, 11, 9, 10, 11, 10}
 static const WORD bumperStartX[MAX_ROBOTS] = {7, 9, 11, 7, 12, 7, 12, 7, 9, 11};
 
 static const WORD bumperStartY[MAX_ROBOTS] = {5, 5, 5, 6, 6, 7, 7, 8, 8, 8};
+
+
+/* Two rows of five home tiles, three columns apart - plenty of clearance
+ * for each home's own 4-tile perimeter fort to never overlap a neighbour's. */
+static const WORD floodHomeX[MAX_ROBOTS] = {3, 6, 9, 12, 15, 3, 6, 9, 12, 15};
+
+static const WORD floodHomeY[MAX_ROBOTS] = {4, 4, 4, 4, 4, 9, 9, 9, 9, 9};
 
 
 /* Clockwise gates around the central island.  Robots start just beyond the
@@ -1837,6 +1906,30 @@ static void ChooseBowlingAiMove(WORD id);
 static WORD BowlingTeamForRobot(WORD id);
 
 static BOOL TryKnockdownPin(WORD id, WORD tx, WORD ty);
+
+static void ScatterFloodBlocks(void);
+
+static void StartFloodHouse(void);
+
+static void StepFloodHouse(void);
+
+static void FinishFloodHouse(void);
+
+static void ChooseFloodAiMove(WORD id);
+
+static void FloodHandleRobotArrival(WORD id);
+
+static void TryFloodRaidRobot(WORD blockedId, WORD attackerId);
+
+static BOOL TryFloodBuild(WORD id);
+
+static WORD FloodHomeWallCount(WORD id);
+
+static WORD FloodBlocksOwned(WORD id);
+
+static LONG FloodRank(WORD id);
+
+static void ResolveFloodHouse(void);
 
 static void RestartCurrentMiniGame(void);
 
@@ -2186,6 +2279,7 @@ static void BlitTileTo(struct RastPort *rp, UBYTE tileType, WORD tx, WORD ty);
 static BOOL IsWallTileAt(WORD tx, WORD ty);
 static UBYTE GetWallRotation(WORD tx, WORD ty);
 static void BlitWallRotatedTo(struct RastPort *rp, WORD tx, WORD ty);
+static void DrawFloodBlockTile(struct RastPort *rp, WORD tx, WORD ty);
 static void UpdateRoomTile(WORD tx, WORD ty);
 static void BuildRoomBuffer(void);
 static void CopyRobotPixel(struct RastPort *srcRP, struct RastPort *dstRP, struct RastPort *maskRP,
@@ -2322,6 +2416,7 @@ static void DrawPuckHud(void);
 static void DrawAirHockeyHud(void);
 static void DrawBumperHud(void);
 static void DrawBowlingHud(void);
+static void DrawFloodHouseHud(void);
 static void DrawIntroTitleImage(void);
 static void DrawRoundStartOverlay(void);
 static void DrawPauseMenu(void);

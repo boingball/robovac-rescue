@@ -1064,6 +1064,11 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
             if (!TryRaceBumpRobot(blockedId, dx, dy)) return FALSE;
         } else if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER) {
             if (!BumperPushRobot(blockedId, dx, dy, BUMPER_BUMP_PUSH_TILES, id)) return FALSE;
+        } else if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE) {
+            /* Bumping a rival raids whatever they are currently carrying,
+             * but never lets the two robots swap tiles. */
+            TryFloodRaidRobot(blockedId, id);
+            return FALSE;
         } else if (gameState != GAME_BONUS_PLAYING ||
                    !TryPushStrandedRobot(blockedId, dx, dy)) {
             return FALSE;
@@ -1144,6 +1149,8 @@ static void FinishRobotTileMove(WORD id)
         if (miniGameType == MINIGAME_RACE) {
             if (raceBoostMoves[id] > 0) raceBoostMoves[id]--;
             RaceHandleRobotArrival(id);
+        } else if (miniGameType == MINIGAME_FLOODHOUSE) {
+            FloodHandleRobotArrival(id);
         }
         return;
     }
@@ -1769,6 +1776,7 @@ static void StepGame(void)
         else if (miniGameType == MINIGAME_BUMPER) StepBumperBots();
         else if (miniGameType == MINIGAME_AIRHOCKEY) StepAirHockey();
         else if (miniGameType == MINIGAME_BOWLING) StepRoboBowling();
+        else if (miniGameType == MINIGAME_FLOODHOUSE) StepFloodHouse();
         else StepRoboRace();
         return;
     }
@@ -2316,8 +2324,9 @@ static void FirePlayerBolt(WORD id)
     WORD dirX = 0, dirY = 0;
     BOOL bumperPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER);
     BOOL airHockeyPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY);
+    BOOL floodPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE);
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying && !airHockeyPlaying) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying && !airHockeyPlaying && !floodPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
 
@@ -2326,6 +2335,13 @@ static void FirePlayerBolt(WORD id)
      * through to the normal aim-and-fire logic below. */
     if (airHockeyPlaying) {
         TryAirHockeyBoost(id);
+        return;
+    }
+
+    /* Flood House's fire button places a carried block onto the tile the
+     * robot is currently facing, instead of firing a bolt. */
+    if (floodPlaying) {
+        TryFloodBuild(id);
         return;
     }
 
