@@ -407,36 +407,32 @@ static void ChooseAirHockeyAiMove(WORD id)
 }
 
 
+/* Each robot bowls its own private lane now (see StartRoboBowling), so the
+ * AI just needs to get back to its own launch tile if it isn't there
+ * already, then aim up the lane and fire - no more racing a shared rack. */
 static void ChooseBowlingAiMove(WORD id)
 {
     WORD dx = 0;
     WORD dy = 0;
-    WORD bestDist = 32767;
-    WORD bestIdx = -1;
-    WORD i;
 
     if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BOWLING) return;
     if (id < humanPlayers || id >= robotCount) return;
     if (robots[id].moving || robots[id].stunTicks > 0) return;
+    if (playerBolts[id].active) return;
 
-    for (i = 0; i < BOWLING_PIN_COUNT; i++) {
-        WORD dist;
-        if (map[bowlingPinY[i]][bowlingPinX[i]] != TILE_TABLE) continue;
-        dist = AbsW(bowlingPinX[i] - robots[id].tileX) + AbsW(bowlingPinY[i] - robots[id].tileY);
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestIdx = i;
+    if (robots[id].tileX != bowlingLaunchX[id] || robots[id].tileY != bowlingLaunchY[id]) {
+        if (AiFindPathStep(id, bowlingLaunchX[id], bowlingLaunchY[id], &dx, &dy, NULL) &&
+            (dx != 0 || dy != 0)) {
+            StartRobotMove(id, dx, dy);
         }
+        return;
     }
-    if (bestIdx < 0) return;
 
-    if (AiFindPathStep(id, bowlingPinX[bestIdx], bowlingPinY[bestIdx], &dx, &dy, NULL) &&
-        (dx != 0 || dy != 0) && StartRobotMove(id, dx, dy)) return;
-
-    if (robots[id].tileX < bowlingPinX[bestIdx]) StartRobotMove(id, 1, 0);
-    else if (robots[id].tileX > bowlingPinX[bestIdx]) StartRobotMove(id, -1, 0);
-    else if (robots[id].tileY < bowlingPinY[bestIdx]) StartRobotMove(id, 0, 1);
-    else if (robots[id].tileY > bowlingPinY[bestIdx]) StartRobotMove(id, 0, -1);
+    /* playerFacingX/Y are sized for human players only (StartRobotMove's own
+     * facing update is guarded the same way) - FireRobotBolt takes the
+     * direction directly, so an AI robot never needs to touch that array. */
+    SetRobotMoveSprite(id, SPR_UP);
+    FireRobotBolt(id, 0, -1, TRUE, TRUE);
 }
 
 

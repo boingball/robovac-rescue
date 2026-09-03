@@ -548,6 +548,25 @@ static void AddDirtyBossExplosionAt(WORD ticks)
                  ROBOT_W + (spread * 2) + 4, ROBOT_H + (spread * 2) + 4);
 }
 
+/* During a bumper shove, robots[id].px/py snap straight to the landing tile
+ * while the sprite itself eases there over several frames via
+ * bumperVisualPx/Py (see DrawRobotBob) - so anything anchored to the raw
+ * px/py, like the stun countdown digit above the head, would jump ahead to
+ * the destination square instead of riding along with the visible slide.
+ * Every EMP-visual screen-position lookup must go through this so the
+ * digit and its dirty-rect tracking never disagree with where the head
+ * actually is drawn. */
+static void EmpRobotVisualAnchor(WORD id, WORD *outSx, WORD *outSy)
+{
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER && bumperSliding[id]) {
+        *outSx = MAP_X + FP_TO_INT(bumperVisualPx[id]);
+        *outSy = MAP_Y + FP_TO_INT(bumperVisualPy[id]);
+    } else {
+        *outSx = MAP_X + FP_TO_INT(robots[id].px);
+        *outSy = MAP_Y + FP_TO_INT(robots[id].py);
+    }
+}
+
 static void AddDirtyEmpRobotVisualAt(WORD sx, WORD sy)
 {
     struct DirtyRect rect;
@@ -570,8 +589,9 @@ static void MarkDirtyEmpRobotVisuals(void)
 
     for (i = 0; i < robotCount; i++) {
         WORD state = EmpRobotVisualState(i);
-        WORD sx = MAP_X + FP_TO_INT(robots[i].px);
-        WORD sy = MAP_Y + FP_TO_INT(robots[i].py);
+        WORD sx;
+        WORD sy;
+        EmpRobotVisualAnchor(i, &sx, &sy);
 
         if (dirtyPrevEmpVisible[i]) {
             AddDirtyEmpRobotVisualAt(dirtyPrevEmpScreenX[i], dirtyPrevEmpScreenY[i]);
@@ -632,12 +652,14 @@ static void MarkDirtyHudIfChanged(void)
              dirtyPrevAirhockeyScore[0] != airhockeyTeamScore[0] ||
              dirtyPrevAirhockeyScore[1] != airhockeyTeamScore[1] ||
              dirtyPrevAirhockeyScoringTeam != airhockeyScoringTeam)) changed = TRUE;
-        if (miniGameType == MINIGAME_BOWLING &&
-            (dirtyPrevBowlingSecond != (bowlingTicksRemaining / 50) ||
-             dirtyPrevBowlingPinsRemaining != bowlingPinsRemaining ||
-             dirtyPrevBowlingScore[0] != bowlingTeamScore[0] ||
-             dirtyPrevBowlingScore[1] != bowlingTeamScore[1] ||
-             dirtyPrevBowlingFlashTicks != bowlingFlashTicks)) changed = TRUE;
+        if (miniGameType == MINIGAME_BOWLING) {
+            WORD bowlingScoreSum = 0;
+            WORD bsi;
+            for (bsi = 0; bsi < robotCount; bsi++) bowlingScoreSum += bowlingScore[bsi];
+            if (dirtyPrevBowlingSecond != (bowlingTicksRemaining / 50) ||
+                dirtyPrevBowlingScoreSum != bowlingScoreSum ||
+                dirtyPrevBowlingFlashTicks != bowlingFlashTicks) changed = TRUE;
+        }
         if (miniGameType == MINIGAME_FLOODHOUSE &&
             (dirtyPrevFloodSecond != (floodTicksRemaining / 50) ||
              dirtyPrevFloodLooseRemaining != floodLooseRemaining ||
@@ -686,9 +708,12 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevAirhockeyScore[1] = airhockeyTeamScore[1];
     dirtyPrevAirhockeyScoringTeam = airhockeyScoringTeam;
     dirtyPrevBowlingSecond = bowlingTicksRemaining / 50;
-    dirtyPrevBowlingPinsRemaining = bowlingPinsRemaining;
-    dirtyPrevBowlingScore[0] = bowlingTeamScore[0];
-    dirtyPrevBowlingScore[1] = bowlingTeamScore[1];
+    {
+        WORD bowlingScoreSum = 0;
+        WORD bsi;
+        for (bsi = 0; bsi < robotCount; bsi++) bowlingScoreSum += bowlingScore[bsi];
+        dirtyPrevBowlingScoreSum = bowlingScoreSum;
+    }
     dirtyPrevBowlingFlashTicks = bowlingFlashTicks;
     dirtyPrevFloodSecond = floodTicksRemaining / 50;
     dirtyPrevFloodLooseRemaining = floodLooseRemaining;
@@ -2793,16 +2818,17 @@ static void DrawRobotBob(WORD id)
      * the robot is drawn scaled up. */
     if (!bigHeadMode && !(robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
         if (gameState == GAME_MINIGAME_PLAYING &&
-            (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY || miniGameType == MINIGAME_BOWLING)) {
+            (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY)) {
             /* The seven hoover variants share one palette with no pen free
              * to safely recolour the cached sprite art itself (see the Dirt
              * Storm note below), so a team "skin" is a solid colour tile
              * behind the BOB instead - same pens DrawPuckHud already uses
              * for TEAM 1/TEAM 2, showing through the sprite's transparent
-             * mask as a coloured aura around each hoover. */
+             * mask as a coloured aura around each hoover. Bowling has no
+             * teams any more - every robot bowls its own lane - so it falls
+             * through to the plain shadow below like every non-team mode. */
             WORD team = (miniGameType == MINIGAME_PUCK) ? PuckTeamForRobot(id) :
-                        (miniGameType == MINIGAME_AIRHOCKEY) ? AirHockeyTeamForRobot(id) :
-                        BowlingTeamForRobot(id);
+                        AirHockeyTeamForRobot(id);
             SetAPen(&renderRP, (team == 0) ? 13 : 14);
             RectFill(&renderRP, sx, sy, sx + ROBOT_W - 1, sy + ROBOT_H - 1);
         } else {
@@ -2972,8 +2998,7 @@ static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect)
     if (!rect || id < 0 || id >= robotCount) return FALSE;
     if (EmpRobotVisualState(id) == 0) return FALSE;
 
-    sx = MAP_X + FP_TO_INT(robots[id].px);
-    sy = MAP_Y + FP_TO_INT(robots[id].py);
+    EmpRobotVisualAnchor(id, &sx, &sy);
     GetEmpRobotVisualRectFromScreen(sx, sy, rect);
     return rect->w > 0 && rect->h > 0;
 }
@@ -3802,8 +3827,8 @@ static void DrawMiniGameIntroScreen(void)
         MiniTextCentered(&renderRP, 126, "FIRST TO 5  OR LEAD AT TIME", 14, 1);
     } else if (miniGameType == MINIGAME_BOWLING) {
         MiniTextCentered(&renderRP, 66, "ROBO BOWLING", 10, 3);
-        MiniTextCentered(&renderRP, 96, "TEN PINS  90 SECONDS", 7, 2);
-        MiniTextCentered(&renderRP, 112, "DRIVE INTO A PIN TO KNOCK IT DOWN", 13, 1);
+        MiniTextCentered(&renderRP, 96, "YOUR OWN LANE  90 SECONDS", 7, 2);
+        MiniTextCentered(&renderRP, 112, "AIM AND FIRE TO KNOCK PINS DOWN", 13, 1);
         MiniTextCentered(&renderRP, 126, "MOST PINS DOWN WINS", 14, 1);
     } else if (miniGameType == MINIGAME_FLOODHOUSE) {
         MiniTextCentered(&renderRP, 66, "FLOOD HOUSE", 10, 3);
@@ -3853,18 +3878,13 @@ static void DrawMiniGameEndScreen(void)
                      AirHockeyTeamForRobot(miniGameWinner) + 1,
                      airhockeyTeamScore[AirHockeyTeamForRobot(miniGameWinner)],
                      airhockeyTeamScore[1 - AirHockeyTeamForRobot(miniGameWinner)]);
-        } else if (miniGameType == MINIGAME_BOWLING) {
-            snprintf(b, sizeof(b), "TEAM %d WINS  %d-%d",
-                     BowlingTeamForRobot(miniGameWinner) + 1,
-                     bowlingTeamScore[BowlingTeamForRobot(miniGameWinner)],
-                     bowlingTeamScore[1 - BowlingTeamForRobot(miniGameWinner)]);
         } else {
             snprintf(b, sizeof(b), "%s %s WINS", RobotControlLabel(miniGameWinner), RobotTag(miniGameWinner));
         }
         MiniTextCentered(&renderRP, 112, b, 10, 2);
     }
 
-    if (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY || miniGameType == MINIGAME_BOWLING) {
+    if (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY) {
         MiniTextCentered(&renderRP, 148, "WINNING TEAM +3", 14, 2);
         MiniTextCentered(&renderRP, 174, "OTHER TEAM +1", 7, 2);
     } else {
@@ -4084,18 +4104,28 @@ static void DrawBowlingHud(void)
     WORD totalSeconds = (bowlingTicksRemaining + 49) / 50;
     WORD minutes = totalSeconds / 60;
     WORD seconds = totalSeconds % 60;
-    char b[64];
+    char b[80];
+    char seg[16];
+    WORD i;
 
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
 
-    snprintf(b, sizeof(b), "ROBO BOWLING  TEAM1 %d-%d TEAM2  %d PINS  %d:%02d",
-             bowlingTeamScore[0], bowlingTeamScore[1], bowlingPinsRemaining, minutes, seconds);
+    /* Every robot bowls its own lane now, so the header lists each one's
+     * running total instead of a two-team score - built with strlen/strncat
+     * rather than trusting snprintf's return value, so it stays safe up to
+     * whatever robotCount this cross-compiler's libc gives us. */
+    snprintf(b, sizeof(b), "BOWLING  %d:%02d  ", minutes, seconds);
+    for (i = 0; i < robotCount; i++) {
+        if (strlen(b) + 10 >= sizeof(b)) break;
+        snprintf(seg, sizeof(seg), "%s:%d ", RobotTag(i), bowlingScore[i]);
+        strncat(b, seg, sizeof(b) - strlen(b) - 1);
+    }
     MiniText(&renderRP, 4, 3, b, 14);
 
     if (bowlingFlashTicks > 0 && bowlingLastKnockedRobot >= 0) {
-        snprintf(b, sizeof(b), "%s PIN DOWN! TEAM %d", RobotTag(bowlingLastKnockedRobot), bowlingLastKnockedTeam + 1);
-        MiniTextCentered(&renderRP, 18, b, bowlingLastKnockedTeam == 0 ? 13 : 14, 2);
+        snprintf(b, sizeof(b), "%s PIN DOWN!", RobotTag(bowlingLastKnockedRobot));
+        MiniTextCentered(&renderRP, 18, b, 14, 2);
     } else {
         MiniTextCentered(&renderRP, 18, "MOST PINS DOWN WINS", 7, 1);
     }
@@ -4114,7 +4144,7 @@ static void DrawFloodHouseHud(void)
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
 
     if (floodPauseTicks > 0) {
-        MiniText(&renderRP, 4, 3, "FLOOD HOUSE  THE WATER IS RISING", 14);
+        MiniText(&renderRP, 4, 3, "FLOOD HOUSE  THE FLOOR IS FLOODING", 14);
         MiniTextCentered(&renderRP, 18, "SURROUNDED HOMES STAY DRY", 11, 1);
         DrawJoystickIcons();
         return;
@@ -4587,22 +4617,29 @@ static void DrawGameplayDirtyRects(void)
 #endif
 
 
-/* The rising water during the live flood-moment pause (see floodPauseTicks
- * in StepFloodHouse) - a plain animated RectFill like the result screen's
- * water line, not an actual palette/copper effect, for the same reason:
- * this whole frame is already forced to a full present every pause tick
- * (see ForceGameplayFullPresent in StepFloodHouse), so there is no dirty
- * rect bookkeeping to get wrong by keeping it simple. */
+/* The floor flooding during the live flood-moment pause (see floodPauseTicks
+ * in StepFloodHouse) - a plain animated RectFill rather than an actual
+ * palette/copper effect, for the same reason as the result screen's water
+ * line: this whole frame is already forced to a full present every pause
+ * tick (see ForceGameplayFullPresent in StepFloodHouse), so there is no
+ * dirty rect bookkeeping to get wrong by keeping it simple.
+ *
+ * This is a top-down room, not a side-view stage, so the water needs to
+ * read as the floor itself changing colour underfoot - covering the whole
+ * map from the top down over a handful of frames - rather than a thin
+ * strip climbing up from the bottom of the screen over the whole pause,
+ * which just looked like a platformer's rising tide. */
 static void DrawFloodWaterOverlay(void)
 {
-    WORD mapBottom = MAP_Y + (MAP_H * TILE_SIZE);
-    WORD waterH = ((FLOODHOUSE_FLOOD_PAUSE_TICKS - floodPauseTicks) * 24) / FLOODHOUSE_FLOOD_PAUSE_TICKS;
+    WORD mapH = MAP_H * TILE_SIZE;
+    WORD elapsed = FLOODHOUSE_FLOOD_PAUSE_TICKS - floodPauseTicks;
+    WORD waterH = (elapsed * mapH) / FLOODHOUSE_FLOOD_RISE_TICKS;
 
-    if (waterH > 24) waterH = 24;
+    if (waterH > mapH) waterH = mapH;
     if (waterH <= 0) return;
 
     SetAPen(&renderRP, 11);
-    RectFill(&renderRP, MAP_X, mapBottom - waterH, MAP_X + (MAP_W * TILE_SIZE) - 1, mapBottom - 1);
+    RectFill(&renderRP, MAP_X, MAP_Y, MAP_X + (MAP_W * TILE_SIZE) - 1, MAP_Y + waterH - 1);
 }
 
 

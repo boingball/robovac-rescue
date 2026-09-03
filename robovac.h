@@ -347,21 +347,38 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define AIRHOCKEY_BOOST_STUN_TICKS     15
 
 
-/* Robo Bowling: a shared rack of ten "pin" tables (reusing TILE_TABLE) sits
- * in a classic 1-2-3-4 triangle. Team scoring like RoboPuck/RoboHockey, but
- * no half-line - anyone can go for any pin. Driving into a pin removes it
- * outright (map[y][x] = TILE_FLOOR, same trick Bumper Bots' abyss ring
- * uses - only the collision state changes) and credits the mover's team,
- * reusing StartRobotMove's existing TILE_TABLE branch instead of the normal
- * cleaning game's slide-it-one-tile TryPushTable. The round ends the moment
- * the rack is empty or the clock runs out. */
+/* Robo Bowling: every robot gets its own private lane running the length of
+ * the map, walled off from its neighbours, with its own rack of ten "pin"
+ * tables (reusing TILE_TABLE) at the far end. A shared rack in the middle of
+ * the room meant whoever was already closest got there first every time;
+ * separate lanes make it a fair, individual game like real bowling.
+ *
+ * Standing anywhere in your lane and firing (the same bolt used to bump
+ * rivals in Bumper Bots) launches a ball straight down the lane - see the
+ * MINIGAME_BOWLING branch in StepPlayerBolt, which checks a small spread
+ * around the bolt's path each tick so a well-aimed throw can clear more
+ * than one pin, and lets the bolt travel through knocked pins instead of
+ * stopping dead on the first one. Ranking and points reuse Bumper Bots'
+ * pattern (a per-robot score, top three get 3/2/1) instead of a two-team
+ * split, since each robot's total is now entirely its own.
+ *
+ * Each pin cluster is a compact 2-wide x 5-tall block (10 pins) rather than
+ * the old wide 7-column triangle, so BOWLING_LANE_WIDTH lanes side by side
+ * (pins plus a one-tile wall divider) fit across the room; see StartRoboBowling
+ * for how lanes are actually laid out for the current robotCount. */
 #define BOWLING_TIME_TICKS          (90 * 50)
 
 #define BOWLING_PIN_COUNT           10
 
-#define BOWLING_PIN_BASE_X          9
+#define BOWLING_PIN_COLS            2
 
-#define BOWLING_PIN_BASE_Y          3
+#define BOWLING_PIN_ROWS            5
+
+#define BOWLING_PIN_BASE_Y          2
+
+#define BOWLING_LANE_WIDTH          3
+
+#define BOWLING_LAUNCH_ROW          11
 
 #define BOWLING_FLASH_TICKS         40
 
@@ -389,13 +406,25 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define FLOODHOUSE_STACK_MAX         3
 
-#define FLOODHOUSE_LOOSE_PER_ROBOT   3
+/* A full house needs exactly 4 (one per side); 3 loose blocks per robot -
+ * less than a single robot needs to wall up alone, let alone with rivals
+ * free to steal - meant every robot ran dry with a permanent gap in its
+ * wall and nothing left anywhere on the floor to top up with. 6 leaves
+ * enough spare per robot, after the 4 a full house costs, for the steal
+ * mechanic to actually matter instead of just being a race to starvation. */
+#define FLOODHOUSE_LOOSE_PER_ROBOT   6
 
 #define FLOODHOUSE_FLASH_TICKS       40
 
 #define FLOODHOUSE_PALETTE_TICKS     100
 
 #define FLOODHOUSE_FLOOD_PAUSE_TICKS (3 * 50)
+
+/* How fast the floor-tint overlay covers the whole map once the flood
+ * hits (see DrawFloodWaterOverlay) - a handful of frames, not the whole
+ * pause, so it reads as the floor suddenly flooding rather than a tide
+ * slowly climbing into view. */
+#define FLOODHOUSE_FLOOD_RISE_TICKS  8
 
 #define FLOODHOUSE_EVENT_NONE        0
 
@@ -1342,17 +1371,32 @@ static WORD airhockeyBoostCooldown[MAX_ROBOTS];
 
 static WORD airhockeyBoostFlashTicks = 0;
 
-static WORD bowlingPinX[BOWLING_PIN_COUNT];
+/* Each robot bowls its own lane with its own private rack - bowlingPinX/Y
+ * are per-robot (row i = robot i's 10 pins), reset in place between frames
+ * rather than shared across the whole map. */
+static WORD bowlingPinX[MAX_ROBOTS][BOWLING_PIN_COUNT];
 
-static WORD bowlingPinY[BOWLING_PIN_COUNT];
+static WORD bowlingPinY[MAX_ROBOTS][BOWLING_PIN_COUNT];
 
-static WORD bowlingPinsRemaining = 0;
+static WORD bowlingPinsStanding[MAX_ROBOTS];
 
-static WORD bowlingTeamScore[2] = {0, 0};
+static WORD bowlingLaneBaseX[MAX_ROBOTS];
+
+static WORD bowlingLaunchX[MAX_ROBOTS];
+
+static WORD bowlingLaunchY[MAX_ROBOTS];
+
+/* 0 = about to throw the frame's first ball, 1 = first ball already thrown
+ * this frame and some pins are still standing, so the next throw is the
+ * frame's second ball (real bowling's "spare" attempt) before the lane
+ * resets fresh. */
+static WORD bowlingBallsThisFrame[MAX_ROBOTS];
+
+static BOOL bowlingBallInFlight[MAX_ROBOTS];
+
+static WORD bowlingScore[MAX_ROBOTS];
 
 static WORD bowlingTicksRemaining = 0;
-
-static WORD bowlingLastKnockedTeam = -1;
 
 static WORD bowlingLastKnockedRobot = -1;
 
@@ -1634,8 +1678,10 @@ static WORD dirtyPrevBumperSecond = -1;
 static WORD dirtyPrevBumperAlive = -1;
 static WORD dirtyPrevBumperFlashTicks = -1;
 static WORD dirtyPrevBowlingSecond = -1;
-static WORD dirtyPrevBowlingPinsRemaining = -1;
-static WORD dirtyPrevBowlingScore[2] = {-1, -1};
+/* A running total across every robot's score is enough to catch any change
+ * cheaply - scores only ever count up during a round, so the sum can never
+ * go stale without the HUD noticing. */
+static WORD dirtyPrevBowlingScoreSum = -1;
 static WORD dirtyPrevBowlingFlashTicks = -1;
 static WORD dirtyPrevFloodSecond = -1;
 static WORD dirtyPrevFloodLooseRemaining = -1;
@@ -1817,6 +1863,8 @@ static BOOL RobotLowBatteryWarningActive(WORD id);
 
 static WORD EmpRobotVisualState(WORD id);
 
+static void EmpRobotVisualAnchor(WORD id, WORD *outSx, WORD *outSy);
+
 static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect);
 
 static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect);
@@ -1917,7 +1965,9 @@ static void FinishRoboBowling(void);
 
 static void ChooseBowlingAiMove(WORD id);
 
-static WORD BowlingTeamForRobot(WORD id);
+static void ResetBowlingLane(WORD id);
+
+static void ResolveBowlingThrow(WORD id);
 
 static BOOL TryKnockdownPin(WORD id, WORD tx, WORD ty);
 

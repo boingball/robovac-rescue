@@ -947,7 +947,16 @@ static void BumperEliminateRobot(WORD id, WORD attackerId)
  * so a push reads as a shove rather than a teleport. */
 static BOOL BumperPushRobot(WORD blockedId, WORD dx, WORD dy, WORD tiles, WORD attackerId)
 {
-    WORD step;
+    /* Counts total tiles actually moved, for the post-push stun length below.
+     * The code right after this declaration already performs the first
+     * tile unconditionally, so a plain 1-tile shoulder bump (tiles == 1)
+     * never enters the "for (step = 1; step < tiles; ...)" loop below at
+     * all - step must start at 1 to reflect that already-applied first
+     * tile, or the stun length read after the loop is whatever was left on
+     * the stack. That was silently handing bumped robots a near-random
+     * (often zero) cooldown, so the last two survivors could ping-pong
+     * bumps into each other every tick with no recovery beat between them. */
+    WORD step = 1;
     WORD pushX;
     WORD pushY;
     LONG fromPx;
@@ -1384,21 +1393,20 @@ static void StepBumperBots(void)
 }
 
 
-static WORD BowlingTeamForRobot(WORD id)
-{
-    return id & 1;
-}
-
-
 static void StartRoboBowling(void)
 {
-    /* Classic ten-pin triangle: row 0 is the single lead pin, row 3 is the
-     * back row of four. Offsets are in tiles from BOWLING_PIN_BASE_X/Y. */
-    static const WORD pinRow[BOWLING_PIN_COUNT]    = {0, 1, 1, 2, 2, 2, 3, 3, 3, 3};
-    static const WORD pinOffset[BOWLING_PIN_COUNT] = {0, -1, 1, -2, 0, 2, -3, -1, 1, 3};
+    /* Each robot gets its own lane, walled off from its neighbours, with a
+     * compact 2-wide x 5-tall rack of ten pins at the far end - see the
+     * BOWLING_ comment block in robovac.h for why (a shared rack meant
+     * whoever was already closest got every pin first, every time). Lanes
+     * are spaced evenly across the room for however many robots are
+     * playing; the common case of up to four gets a full wall divider
+     * between every lane, the same "optimise for the common case, degrade
+     * gracefully at the edges" tradeoff RoboRace's spawn layout makes. */
     WORD x;
     WORD y;
     WORD i;
+    WORD laneSpacing;
 
     StopGameplaySamples();
     StopRoundStartSamples();
@@ -1409,20 +1417,67 @@ static void StartRoboBowling(void)
 
     for (y = 0; y < MAP_H; y++) {
         for (x = 0; x < MAP_W; x++) {
-            if (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) {
-                map[y][x] = TILE_WALL;
-            } else {
-                map[y][x] = TILE_FLOOR;
-            }
+            map[y][x] = (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) ? TILE_WALL : TILE_FLOOR;
         }
     }
 
-    for (i = 0; i < BOWLING_PIN_COUNT; i++) {
-        bowlingPinX[i] = BOWLING_PIN_BASE_X + pinOffset[i];
-        bowlingPinY[i] = BOWLING_PIN_BASE_Y + pinRow[i];
-        map[bowlingPinY[i]][bowlingPinX[i]] = TILE_TABLE;
+    laneSpacing = (MAP_W - 4) / (robotCount > 0 ? robotCount : 1);
+    if (laneSpacing < 2) laneSpacing = 2;
+    if (laneSpacing > BOWLING_LANE_WIDTH) laneSpacing = BOWLING_LANE_WIDTH;
+
+    for (i = 0; i < robotCount; i++) {
+        WORD baseX = 1 + i * laneSpacing;
+        WORD row;
+        WORD col;
+        WORD pin;
+
+        {
+            WORD maxBaseX = MAP_W - 1 - BOWLING_PIN_COLS;
+            if (baseX > maxBaseX) baseX = maxBaseX;
+            /* At the very edge of the room, that clamp alone could pull this
+             * lane back onto exactly the same columns as the previous one
+             * (two robots' whole racks, and spawn tiles, landing on top of
+             * each other) instead of just crowding closer - nudge forward
+             * one more column so lanes stay distinct, but re-clamp so the
+             * nudge itself can never push a pin past the right-hand wall. */
+            if (i > 0 && baseX <= bowlingLaneBaseX[i - 1]) {
+                baseX = bowlingLaneBaseX[i - 1] + 1;
+                if (baseX > maxBaseX) baseX = maxBaseX;
+            }
+        }
+        bowlingLaneBaseX[i] = baseX;
+
+        /* A one-tile wall divider between this lane and the last one, as
+         * long as there is actually a gap to put it in - with more robots
+         * than the room comfortably fits, lanes compress and dividers are
+         * skipped rather than overlapping a neighbour's pins. */
+        if (i > 0) {
+            WORD dividerX = baseX - 1;
+            WORD prevRightEdge = bowlingLaneBaseX[i - 1] + BOWLING_PIN_COLS - 1;
+            if (dividerX > prevRightEdge && dividerX > 0 && dividerX < MAP_W - 1) {
+                for (y = 1; y < MAP_H - 1; y++) map[y][dividerX] = TILE_WALL;
+            }
+        }
+
+        pin = 0;
+        for (row = 0; row < BOWLING_PIN_ROWS && pin < BOWLING_PIN_COUNT; row++) {
+            for (col = 0; col < BOWLING_PIN_COLS && pin < BOWLING_PIN_COUNT; col++) {
+                WORD px = baseX + col;
+                WORD py = BOWLING_PIN_BASE_Y + row;
+                bowlingPinX[i][pin] = px;
+                bowlingPinY[i][pin] = py;
+                map[py][px] = TILE_TABLE;
+                pin++;
+            }
+        }
+        bowlingPinsStanding[i] = BOWLING_PIN_COUNT;
+        bowlingBallsThisFrame[i] = 0;
+        bowlingBallInFlight[i] = FALSE;
+        bowlingScore[i] = 0;
+
+        bowlingLaunchX[i] = baseX;
+        bowlingLaunchY[i] = (BOWLING_LAUNCH_ROW < MAP_H - 1) ? BOWLING_LAUNCH_ROW : MAP_H - 2;
     }
-    bowlingPinsRemaining = BOWLING_PIN_COUNT;
 
     ClearDirtList();
     for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
@@ -1437,22 +1492,26 @@ static void StartRoboBowling(void)
     InitRobots();
     for (i = 0; i < robotCount; i++) {
         UBYTE variant = robots[i].spriteVariant;
-        WORD startX = 3 + ((i * 4) % 13);
 
-        SetRobotTile(i, startX, MAP_H - 3);
+        SetRobotTile(i, bowlingLaunchX[i], bowlingLaunchY[i]);
         robots[i].spriteVariant = variant;
         robots[i].battery = maxBattery;
         robots[i].powerType = POWER_NONE;
         robots[i].powerMovesLeft = 0;
         robots[i].stunTicks = 0;
+        SetRobotMoveSprite(i, SPR_UP);
+        /* playerFacingX/Y are sized for human players only - guard like
+         * StartRobotMove's own facing update does, since i ranges over every
+         * robot here, AI included. */
+        if (i < humanPlayers) {
+            playerFacingX[i] = 0;
+            playerFacingY[i] = -1;
+        }
         aiPrevTileX[i] = robots[i].tileX;
         aiPrevTileY[i] = robots[i].tileY;
     }
 
-    bowlingTeamScore[0] = 0;
-    bowlingTeamScore[1] = 0;
     bowlingTicksRemaining = BOWLING_TIME_TICKS;
-    bowlingLastKnockedTeam = -1;
     bowlingLastKnockedRobot = -1;
     bowlingFlashTicks = 0;
 
@@ -1469,43 +1528,87 @@ static void StartRoboBowling(void)
 
 static BOOL TryKnockdownPin(WORD id, WORD tx, WORD ty)
 {
-    WORD team;
-
     if (id < 0 || id >= robotCount) return FALSE;
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
     if (map[ty][tx] != TILE_TABLE) return FALSE;
 
     map[ty][tx] = TILE_FLOOR;
     UpdateRoomTile(tx, ty);
-    if (bowlingPinsRemaining > 0) bowlingPinsRemaining--;
-
-    team = BowlingTeamForRobot(id);
-    bowlingTeamScore[team]++;
-    bowlingLastKnockedTeam = team;
+    if (bowlingPinsStanding[id] > 0) bowlingPinsStanding[id]--;
+    bowlingScore[id]++;
     bowlingLastKnockedRobot = id;
     bowlingFlashTicks = BOWLING_FLASH_TICKS;
     MarkHudStatusTextDirty();
-
-    if (bowlingPinsRemaining <= 0) FinishRoboBowling();
     return TRUE;
+}
+
+
+/* Restores a robot's own rack to ten fresh standing pins, the way a real
+ * lane resets between frames. Called from ResolveBowlingThrow once the
+ * current frame is over. */
+static void ResetBowlingLane(WORD id)
+{
+    WORD pin;
+
+    if (id < 0 || id >= robotCount) return;
+    for (pin = 0; pin < BOWLING_PIN_COUNT; pin++) {
+        WORD px = bowlingPinX[id][pin];
+        WORD py = bowlingPinY[id][pin];
+        if (map[py][px] != TILE_TABLE) {
+            map[py][px] = TILE_TABLE;
+            UpdateRoomTile(px, py);
+        }
+    }
+    bowlingPinsStanding[id] = BOWLING_PIN_COUNT;
+}
+
+
+/* Called once a robot's ball has left play (see the bowlingBallInFlight
+ * edge-check in StepRoboBowling) to decide what happens next: a strike, or
+ * an already-thrown second ball, resets the lane for a fresh frame;
+ * otherwise the robot gets the frame's second throw at whatever pins are
+ * still standing - "another throw... like proper bowling". */
+static void ResolveBowlingThrow(WORD id)
+{
+    WORD ballNumber;
+
+    if (id < 0 || id >= robotCount) return;
+    ballNumber = bowlingBallsThisFrame[id] + 1;
+
+    if (bowlingPinsStanding[id] <= 0 || ballNumber >= 2) {
+        ResetBowlingLane(id);
+        bowlingBallsThisFrame[id] = 0;
+    } else {
+        bowlingBallsThisFrame[id] = ballNumber;
+    }
 }
 
 
 static void FinishRoboBowling(void)
 {
-    WORD winningTeam;
+    WORD order[MAX_ROBOTS];
     WORD i;
+    WORD pass;
+    static const WORD points[3] = {3, 2, 1};
 
     if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BOWLING) return;
-    winningTeam = (bowlingTeamScore[1] > bowlingTeamScore[0]) ? 1 : 0;
-    miniGameWinner = -1;
-    for (i = 0; i < robotCount; i++) {
-        WORD points = (BowlingTeamForRobot(i) == winningTeam) ? 3 : 1;
-        miniGamePoints[i] = points;
-        totalScores[i] += points;
-        if (miniGameWinner < 0 && BowlingTeamForRobot(i) == winningTeam) miniGameWinner = i;
+
+    for (i = 0; i < robotCount; i++) order[i] = i;
+    for (pass = 0; pass < robotCount - 1; pass++) {
+        for (i = 0; i < robotCount - 1 - pass; i++) {
+            if (bowlingScore[order[i + 1]] > bowlingScore[order[i]]) {
+                WORD t = order[i];
+                order[i] = order[i + 1];
+                order[i + 1] = t;
+            }
+        }
     }
-    if (miniGameWinner < 0) miniGameWinner = 0;
+
+    miniGameWinner = order[0];
+    for (i = 0; i < robotCount && i < 3; i++) {
+        miniGamePoints[order[i]] = points[i];
+        totalScores[order[i]] += points[i];
+    }
 
     ClearMovementKeys();
     StopGameplaySamples();
@@ -1556,7 +1659,7 @@ static void StepRoboBowling(void)
     if (bowlingFlashTicks > 0) bowlingFlashTicks--;
     if (bowlingTicksRemaining > 0) bowlingTicksRemaining--;
 
-    if (bowlingTicksRemaining <= 0 || bowlingPinsRemaining <= 0) {
+    if (bowlingTicksRemaining <= 0) {
         FinishRoboBowling();
         FinishGameplayDirtyRects();
         return;
@@ -1572,11 +1675,21 @@ static void StepRoboBowling(void)
         StepRobotMovement(i);
         if (robots[i].turnTicks > 0) robots[i].turnTicks--;
     }
-    /* A knocked-down pin can end the round mid-loop (the last one standing),
-     * so re-check gameState between robots rather than assuming every
-     * robot still has a round to move in. */
-    for (i = 0; i < humanPlayers && gameState == GAME_MINIGAME_PLAYING; i++) ChoosePlayerMove(i);
-    for (i = humanPlayers; i < robotCount && gameState == GAME_MINIGAME_PLAYING; i++) ChooseBowlingAiMove(i);
+
+    StepPlayerBolts();
+
+    /* A ball's flight ends inside StepPlayerBolt (hitting the wall at the
+     * lane's far end, or its ttl running out) with no single call site to
+     * hook a "throw is over" event into, so detect it here instead: whichever
+     * robots had a bolt in flight last tick but don't any more just had a
+     * throw resolve. */
+    for (i = 0; i < robotCount; i++) {
+        if (bowlingBallInFlight[i] && !playerBolts[i].active) ResolveBowlingThrow(i);
+        bowlingBallInFlight[i] = playerBolts[i].active;
+    }
+
+    for (i = 0; i < humanPlayers; i++) ChoosePlayerMove(i);
+    for (i = humanPlayers; i < robotCount; i++) ChooseBowlingAiMove(i);
 
     ServiceHooverMoveSample();
     FinishGameplayDirtyRects();
@@ -1741,7 +1854,13 @@ static BOOL TryFloodBuild(WORD id)
 
     tx = robots[id].tileX + dirX;
     ty = robots[id].tileY + dirY;
+    /* tx/ty in range only guards the array read below - the outer wall ring
+     * (x==0, y==0, x==MAP_W-1, y==MAP_H-1) is well inside those bounds, so
+     * without the floor check a robot facing the boundary could drop a
+     * block into the wall itself: it would still bake into the room buffer
+     * and read as a block floating outside the playable floor. */
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
+    if (map[ty][tx] != TILE_FLOOR) return FALSE;
     if (floodBlockHeight[ty][tx] >= FLOODHOUSE_STACK_MAX) return FALSE;
     if (RobotAtTile(tx, ty, id)) return FALSE;
 

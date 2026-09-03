@@ -281,13 +281,6 @@ static BOOL RobotCanPassTile(WORD id, WORD tx, WORD ty)
         map[ty][tx] == TILE_WALL && tx > 0 && ty > 0 && tx < MAP_W - 1 && ty < MAP_H - 1) {
         return TRUE;
     }
-    /* Robo Bowling's pin tables never actually block a move - walking into
-     * one just knocks it down (see StartRobotMove's TILE_TABLE branch) - so
-     * AiFindPathStep must be able to plan a route onto one, not just up to
-     * its edge. */
-    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING && map[ty][tx] == TILE_TABLE) {
-        return TRUE;
-    }
     return !IsBlocked(tx, ty);
 }
 
@@ -1046,11 +1039,16 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     ny = robots[id].tileY + dy;
 
     if (nx >= 0 && ny >= 0 && nx < MAP_W && ny < MAP_H && map[ny][nx] == TILE_TABLE) {
+        /* Bowling pins are only ever cleared by firing at them now (see the
+         * MINIGAME_BOWLING branch in StepPlayerBolt) - walking into one just
+         * blocks the move, the same as any other solid obstacle, rather than
+         * pushing it out of its tracked rack position (which ResetBowlingLane
+         * relies on staying fixed between frames) or knocking it down for
+         * free. */
         if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING) {
-            if (!TryKnockdownPin(id, nx, ny)) return FALSE;
-        } else if (!TryPushTable(id, nx, ny, dx, dy)) {
             return FALSE;
         }
+        if (!TryPushTable(id, nx, ny, dx, dy)) return FALSE;
     }
     if (!RobotCanPassTile(id, nx, ny)) return FALSE;
     if (RobotAtTile(nx, ny, id)) {
@@ -2296,8 +2294,9 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
 {
     struct Bolt *bolt;
     BOOL bumperPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER);
+    BOOL bowlingPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING);
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying && !bowlingPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= robotCount) return;
     if (robots[id].stunTicks > 0) return;
@@ -2317,7 +2316,10 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
     bolt->dirY = dirY;
     bolt->px = TO_FP(robots[id].tileX * TILE_SIZE);
     bolt->py = TO_FP(robots[id].tileY * TILE_SIZE);
-    bolt->ttl = (gameState == GAME_BONUS_PLAYING) ? 42 : 24;
+    /* A bowling ball needs to cross the whole length of the lane (up to
+     * MAP_H - 2 tiles) at the same 5px/tick speed every other bolt moves
+     * at, well beyond the normal 24-tick lifetime. */
+    bolt->ttl = (gameState == GAME_BONUS_PLAYING) ? 42 : bowlingPlaying ? 40 : 24;
     if (playSound) PlayBoltFireSample();
 }
 
@@ -2333,8 +2335,10 @@ static void FirePlayerBolt(WORD id)
     BOOL bumperPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER);
     BOOL airHockeyPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY);
     BOOL floodPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE);
+    BOOL bowlingPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING);
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying && !airHockeyPlaying && !floodPlaying) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING &&
+        !bumperPlaying && !airHockeyPlaying && !floodPlaying && !bowlingPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
 
@@ -2396,6 +2400,24 @@ static void StepPlayerBolt(WORD ownerId)
     bolt->py += bolt->dirY * (5 * FP_ONE);
     tx = FP_TO_INT(bolt->px) / TILE_SIZE;
     ty = FP_TO_INT(bolt->py) / TILE_SIZE;
+
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING) {
+        /* A real ball keeps travelling through pins instead of stopping dead
+         * on the first one, so knock down TILE_TABLE tiles along the way
+         * without deactivating the bolt - only the wall at the end of the
+         * lane (IsBlocked, below) or the ttl running out actually stops it.
+         * Checking a one-tile spread either side of the exact column (not
+         * just tx,ty itself) means a throw doesn't have to land pixel-perfect
+         * on a single-column pin to clear it, the way a real ball's width
+         * would clip a neighbouring pin too. */
+        WORD nx;
+        for (nx = tx - 1; nx <= tx + 1; nx++) {
+            if (nx < 0 || nx >= MAP_W || ty < 0 || ty >= MAP_H) continue;
+            if (map[ty][nx] == TILE_TABLE) TryKnockdownPin(ownerId, nx, ty);
+        }
+        if (IsBlocked(tx, ty)) bolt->active = FALSE;
+        return;
+    }
 
     if (IsBlocked(tx, ty)) { bolt->active = FALSE; return; }
 
