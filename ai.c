@@ -407,6 +407,39 @@ static void ChooseAirHockeyAiMove(WORD id)
 }
 
 
+static void ChooseBowlingAiMove(WORD id)
+{
+    WORD dx = 0;
+    WORD dy = 0;
+    WORD bestDist = 32767;
+    WORD bestIdx = -1;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BOWLING) return;
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0) return;
+
+    for (i = 0; i < BOWLING_PIN_COUNT; i++) {
+        WORD dist;
+        if (map[bowlingPinY[i]][bowlingPinX[i]] != TILE_TABLE) continue;
+        dist = AbsW(bowlingPinX[i] - robots[id].tileX) + AbsW(bowlingPinY[i] - robots[id].tileY);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = i;
+        }
+    }
+    if (bestIdx < 0) return;
+
+    if (AiFindPathStep(id, bowlingPinX[bestIdx], bowlingPinY[bestIdx], &dx, &dy, NULL) &&
+        (dx != 0 || dy != 0) && StartRobotMove(id, dx, dy)) return;
+
+    if (robots[id].tileX < bowlingPinX[bestIdx]) StartRobotMove(id, 1, 0);
+    else if (robots[id].tileX > bowlingPinX[bestIdx]) StartRobotMove(id, -1, 0);
+    else if (robots[id].tileY < bowlingPinY[bestIdx]) StartRobotMove(id, 0, 1);
+    else if (robots[id].tileY > bowlingPinY[bestIdx]) StartRobotMove(id, 0, -1);
+}
+
+
 static void ChooseBumperAiMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
@@ -592,6 +625,7 @@ static void ChooseAiMove(WORD id)
         else if (miniGameType == MINIGAME_PUCK) ChoosePuckAiMove(id);
         else if (miniGameType == MINIGAME_BUMPER) ChooseBumperAiMove(id);
         else if (miniGameType == MINIGAME_AIRHOCKEY) ChooseAirHockeyAiMove(id);
+        else if (miniGameType == MINIGAME_BOWLING) ChooseBowlingAiMove(id);
         return;
     }
 

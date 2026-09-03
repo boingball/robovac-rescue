@@ -1323,11 +1323,211 @@ static void StepBumperBots(void)
 }
 
 
+static WORD BowlingTeamForRobot(WORD id)
+{
+    return id & 1;
+}
+
+
+static void StartRoboBowling(void)
+{
+    /* Classic ten-pin triangle: row 0 is the single lead pin, row 3 is the
+     * back row of four. Offsets are in tiles from BOWLING_PIN_BASE_X/Y. */
+    static const WORD pinRow[BOWLING_PIN_COUNT]    = {0, 1, 1, 2, 2, 2, 3, 3, 3, 3};
+    static const WORD pinOffset[BOWLING_PIN_COUNT] = {0, -1, 1, -2, 0, 2, -3, -1, 1, 3};
+    WORD x;
+    WORD y;
+    WORD i;
+
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    StopEmpPaletteCycle();
+    StopNightMode();
+    ClearMovementKeys();
+    ClosePauseMenu();
+
+    for (y = 0; y < MAP_H; y++) {
+        for (x = 0; x < MAP_W; x++) {
+            if (x == 0 || y == 0 || x == MAP_W - 1 || y == MAP_H - 1) {
+                map[y][x] = TILE_WALL;
+            } else {
+                map[y][x] = TILE_FLOOR;
+            }
+        }
+    }
+
+    for (i = 0; i < BOWLING_PIN_COUNT; i++) {
+        bowlingPinX[i] = BOWLING_PIN_BASE_X + pinOffset[i];
+        bowlingPinY[i] = BOWLING_PIN_BASE_Y + pinRow[i];
+        map[bowlingPinY[i]][bowlingPinX[i]] = TILE_TABLE;
+    }
+    bowlingPinsRemaining = BOWLING_PIN_COUNT;
+
+    ClearDirtList();
+    for (i = 0; i < MAX_ROBOTS; i++) playerBolts[i].active = FALSE;
+    for (i = 0; i < MAX_BOSS_BOLTS; i++) bossBolts[i].active = FALSE;
+    dirtStormActive = FALSE;
+    empCountdownTicks = 0;
+    empCountdownOwner = -1;
+    lastPowerText[0] = '\0';
+    lastPowerTicks = 0;
+
+    gameState = GAME_MINIGAME_PLAYING;
+    InitRobots();
+    for (i = 0; i < robotCount; i++) {
+        UBYTE variant = robots[i].spriteVariant;
+        WORD startX = 3 + ((i * 4) % 13);
+
+        SetRobotTile(i, startX, MAP_H - 3);
+        robots[i].spriteVariant = variant;
+        robots[i].battery = maxBattery;
+        robots[i].powerType = POWER_NONE;
+        robots[i].powerMovesLeft = 0;
+        robots[i].stunTicks = 0;
+        aiPrevTileX[i] = robots[i].tileX;
+        aiPrevTileY[i] = robots[i].tileY;
+    }
+
+    bowlingTeamScore[0] = 0;
+    bowlingTeamScore[1] = 0;
+    bowlingTicksRemaining = BOWLING_TIME_TICKS;
+    bowlingLastKnockedTeam = -1;
+    bowlingLastKnockedRobot = -1;
+    bowlingFlashTicks = 0;
+
+    roundCountdownTicks = ROUND_COUNTDOWN_TOTAL_FRAMES;
+    roundGoTicks = 0;
+    roundGoSoundPlayed = FALSE;
+    ResetGameplaySpeedFrameCounter();
+    MarkHudStatusTextDirty();
+    BuildRoomBuffer();
+    ForceGameplayFullPresent();
+    StartRoundCountdownAudio();
+}
+
+
+static BOOL TryKnockdownPin(WORD id, WORD tx, WORD ty)
+{
+    WORD team;
+
+    if (id < 0 || id >= robotCount) return FALSE;
+    if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return FALSE;
+    if (map[ty][tx] != TILE_TABLE) return FALSE;
+
+    map[ty][tx] = TILE_FLOOR;
+    UpdateRoomTile(tx, ty);
+    if (bowlingPinsRemaining > 0) bowlingPinsRemaining--;
+
+    team = BowlingTeamForRobot(id);
+    bowlingTeamScore[team]++;
+    bowlingLastKnockedTeam = team;
+    bowlingLastKnockedRobot = id;
+    bowlingFlashTicks = BOWLING_FLASH_TICKS;
+    MarkHudStatusTextDirty();
+
+    if (bowlingPinsRemaining <= 0) FinishRoboBowling();
+    return TRUE;
+}
+
+
+static void FinishRoboBowling(void)
+{
+    WORD winningTeam;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BOWLING) return;
+    winningTeam = (bowlingTeamScore[1] > bowlingTeamScore[0]) ? 1 : 0;
+    miniGameWinner = -1;
+    for (i = 0; i < robotCount; i++) {
+        WORD points = (BowlingTeamForRobot(i) == winningTeam) ? 3 : 1;
+        miniGamePoints[i] = points;
+        totalScores[i] += points;
+        if (miniGameWinner < 0 && BowlingTeamForRobot(i) == winningTeam) miniGameWinner = i;
+    }
+    if (miniGameWinner < 0) miniGameWinner = 0;
+
+    ClearMovementKeys();
+    StopGameplaySamples();
+    StopRoundStartSamples();
+    gameState = GAME_MINIGAME_END;
+    ForceGameplayFullPresent();
+}
+
+
+static void StepRoboBowling(void)
+{
+    WORD i;
+    WORD countdownNumber;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BOWLING) return;
+
+    if (pauseMenuOpen) {
+        BeginGameplayDirtyRects();
+        ServiceHooverMoveSample();
+        ForceGameplayFullPresent();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    BeginGameplayDirtyRects();
+    StepRoundStartSamples();
+    if (roundCountdownTicks > 0) {
+        countdownNumber = ((roundCountdownTicks - 1) / ROUND_COUNTDOWN_STEP_FRAMES) + 1;
+        if (countdownNumber != roundCountdownLastSoundNumber) {
+            PlayCountdownSample();
+            roundCountdownLastSoundNumber = countdownNumber;
+        }
+        roundCountdownTicks--;
+        ForceGameplayFullPresent();
+        if (roundCountdownTicks > 0) {
+            FinishGameplayDirtyRects();
+            return;
+        }
+        roundGoTicks = ROUND_GO_FRAMES;
+        if (!roundGoSoundPlayed) {
+            PlayGoSample();
+            roundGoSoundPlayed = TRUE;
+        }
+        StartMainGameMusic();
+    }
+    if (roundGoTicks > 0) roundGoTicks--;
+
+    if (bowlingFlashTicks > 0) bowlingFlashTicks--;
+    if (bowlingTicksRemaining > 0) bowlingTicksRemaining--;
+
+    if (bowlingTicksRemaining <= 0 || bowlingPinsRemaining <= 0) {
+        FinishRoboBowling();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    if (!ShouldAdvanceGameplayFrame()) {
+        ServiceHooverMoveSample();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
+    for (i = 0; i < robotCount; i++) {
+        StepRobotMovement(i);
+        if (robots[i].turnTicks > 0) robots[i].turnTicks--;
+    }
+    /* A knocked-down pin can end the round mid-loop (the last one standing),
+     * so re-check gameState between robots rather than assuming every
+     * robot still has a round to move in. */
+    for (i = 0; i < humanPlayers && gameState == GAME_MINIGAME_PLAYING; i++) ChoosePlayerMove(i);
+    for (i = humanPlayers; i < robotCount && gameState == GAME_MINIGAME_PLAYING; i++) ChooseBowlingAiMove(i);
+
+    ServiceHooverMoveSample();
+    FinishGameplayDirtyRects();
+}
+
+
 static void RestartCurrentMiniGame(void)
 {
     if (miniGameType == MINIGAME_PUCK) StartRoboPuck();
     else if (miniGameType == MINIGAME_BUMPER) StartBumperBots();
     else if (miniGameType == MINIGAME_AIRHOCKEY) StartAirHockey();
+    else if (miniGameType == MINIGAME_BOWLING) StartRoboBowling();
     else StartRoboRace();
 }
 

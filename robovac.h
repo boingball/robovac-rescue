@@ -242,7 +242,9 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define MINIGAME_AIRHOCKEY       4
 
-#define MINIGAME_COUNT           4
+#define MINIGAME_BOWLING         5
+
+#define MINIGAME_COUNT           5
 
 #define MINIGAME_INTRO_TICKS     100
 
@@ -339,6 +341,25 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define AIRHOCKEY_BOOST_FLASH_TICKS    20
 
 #define AIRHOCKEY_BOOST_STUN_TICKS     15
+
+
+/* Robo Bowling: a shared rack of ten "pin" tables (reusing TILE_TABLE) sits
+ * in a classic 1-2-3-4 triangle. Team scoring like RoboPuck/RoboHockey, but
+ * no half-line - anyone can go for any pin. Driving into a pin removes it
+ * outright (map[y][x] = TILE_FLOOR, same trick Bumper Bots' abyss ring
+ * uses - only the collision state changes) and credits the mover's team,
+ * reusing StartRobotMove's existing TILE_TABLE branch instead of the normal
+ * cleaning game's slide-it-one-tile TryPushTable. The round ends the moment
+ * the rack is empty or the clock runs out. */
+#define BOWLING_TIME_TICKS          (90 * 50)
+
+#define BOWLING_PIN_COUNT           10
+
+#define BOWLING_PIN_BASE_X          9
+
+#define BOWLING_PIN_BASE_Y          3
+
+#define BOWLING_FLASH_TICKS         40
 
 
 /* Bumper Bots: a tiny floor "rug" island sits on the same TILE_WALL border
@@ -656,7 +677,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define BOLT_FIRE_SAMPLE_PATH "PROGDIR:samples/boltfire.8svx"
 
-#define GOAL_SAMPLE_PATH "PROGDIR:samples/goal.iff"
+#define GOAL_SAMPLE_PATH "PROGDIR:samples/goal.8svx"
 
 #define HOOVER_MOVE_SAMPLE_PATH "PROGDIR:samples/hoover-go-loop-low.8svx"
 
@@ -1265,6 +1286,22 @@ static WORD airhockeyBoostCooldown[MAX_ROBOTS];
 
 static WORD airhockeyBoostFlashTicks = 0;
 
+static WORD bowlingPinX[BOWLING_PIN_COUNT];
+
+static WORD bowlingPinY[BOWLING_PIN_COUNT];
+
+static WORD bowlingPinsRemaining = 0;
+
+static WORD bowlingTeamScore[2] = {0, 0};
+
+static WORD bowlingTicksRemaining = 0;
+
+static WORD bowlingLastKnockedTeam = -1;
+
+static WORD bowlingLastKnockedRobot = -1;
+
+static WORD bowlingFlashTicks = 0;
+
 static WORD bumperTicksRemaining = 0;
 
 static WORD bumperAliveCount = 0;
@@ -1519,6 +1556,10 @@ static WORD dirtyPrevAirhockeyScoringTeam = -2;
 static WORD dirtyPrevBumperSecond = -1;
 static WORD dirtyPrevBumperAlive = -1;
 static WORD dirtyPrevBumperFlashTicks = -1;
+static WORD dirtyPrevBowlingSecond = -1;
+static WORD dirtyPrevBowlingPinsRemaining = -1;
+static WORD dirtyPrevBowlingScore[2] = {-1, -1};
+static WORD dirtyPrevBowlingFlashTicks = -1;
 static LONG dirtyPrevDirtStormPx = 0;
 static WORD dirtyPrevDirtStormTileY = 0;
 static BOOL dirtyPrevDirtStormValid = FALSE;
@@ -1770,6 +1811,18 @@ static void FinishBumperBots(void);
 static void ChooseBumperAiMove(WORD id);
 
 static void StepBumperAiFire(void);
+
+static void StartRoboBowling(void);
+
+static void StepRoboBowling(void);
+
+static void FinishRoboBowling(void);
+
+static void ChooseBowlingAiMove(WORD id);
+
+static WORD BowlingTeamForRobot(WORD id);
+
+static BOOL TryKnockdownPin(WORD id, WORD tx, WORD ty);
 
 static void RestartCurrentMiniGame(void);
 
@@ -2253,6 +2306,7 @@ static void DrawRaceHud(void);
 static void DrawPuckHud(void);
 static void DrawAirHockeyHud(void);
 static void DrawBumperHud(void);
+static void DrawBowlingHud(void);
 static void DrawIntroTitleImage(void);
 static void DrawRoundStartOverlay(void);
 static void DrawPauseMenu(void);

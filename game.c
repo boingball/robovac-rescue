@@ -281,6 +281,13 @@ static BOOL RobotCanPassTile(WORD id, WORD tx, WORD ty)
         map[ty][tx] == TILE_WALL && tx > 0 && ty > 0 && tx < MAP_W - 1 && ty < MAP_H - 1) {
         return TRUE;
     }
+    /* Robo Bowling's pin tables never actually block a move - walking into
+     * one just knocks it down (see StartRobotMove's TILE_TABLE branch) - so
+     * AiFindPathStep must be able to plan a route onto one, not just up to
+     * its edge. */
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING && map[ty][tx] == TILE_TABLE) {
+        return TRUE;
+    }
     return !IsBlocked(tx, ty);
 }
 
@@ -1039,7 +1046,11 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     ny = robots[id].tileY + dy;
 
     if (nx >= 0 && ny >= 0 && nx < MAP_W && ny < MAP_H && map[ny][nx] == TILE_TABLE) {
-        if (!TryPushTable(id, nx, ny, dx, dy)) return FALSE;
+        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING) {
+            if (!TryKnockdownPin(id, nx, ny)) return FALSE;
+        } else if (!TryPushTable(id, nx, ny, dx, dy)) {
+            return FALSE;
+        }
     }
     if (!RobotCanPassTile(id, nx, ny)) return FALSE;
     if (RobotAtTile(nx, ny, id)) {
@@ -1744,6 +1755,7 @@ static void StepGame(void)
         if (miniGameType == MINIGAME_PUCK) StepRoboPuck();
         else if (miniGameType == MINIGAME_BUMPER) StepBumperBots();
         else if (miniGameType == MINIGAME_AIRHOCKEY) StepAirHockey();
+        else if (miniGameType == MINIGAME_BOWLING) StepRoboBowling();
         else StepRoboRace();
         return;
     }

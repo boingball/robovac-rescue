@@ -28,7 +28,7 @@ Detailed actions:
   - At the end of a round, continue to the next round with `Space`/`Enter`, joystick fire, or RMB.
   - At the end of a Robo Party mini-game, continue to the next cleaning round with `Space`/`Enter`, joystick fire, or RMB.
   - At the end of a match, return to the title screen with `Space`/`Enter`, joystick fire, or RMB.
-- Pause: `Q` pauses during a cleaning round, RoboRace, RoboPuck, RoboHockey, Bumper Bots, or bonus battle. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
+- Pause: `Q` pauses during a cleaning round, RoboRace, RoboPuck, RoboHockey, Bumper Bots, Robo Bowling, or bonus battle. The pause menu (Restart Level / Main Menu) is navigated with the arrow keys/joystick up-down and `Enter`/joystick fire/blue button; `Q` or `Esc` resumes (joystick has no resume shortcut - use the keyboard or select Main Menu).
 - `R`:
   - During a match: reset the current cleaning round, race, or bonus battle.
 - `1` / `2` / `3`: keyboard shortcut that skips the "how many rivals" prompt and jumps straight to the Easy / Normal / Hard difficulty prompt with that many AI rivals, from either the one-player title screen or the two-player AI prompt (where `0` is also available, and starts immediately with no AI).
@@ -67,7 +67,7 @@ Press `G` at any time during play to toggle every robot to double size, purely f
 ## Match Structure
 
 - A solo match (no AI rivals) is 5 rounds. Every robot on the field beyond a 2-robot match adds 2 more rounds: 2 robots (e.g. 2 players, or 1 player + 1 AI rival) play 6 rounds, 3 play 8, 4 play 10, and so on.
-- Robo Party interrupts the match after every cleaning round except the last, alternating cleaning round / party round the whole way through. RoboRace, RoboPuck, RoboHockey, and Bumper Bots rotate randomly, without an immediate repeat.
+- Robo Party interrupts the match after every cleaning round except the last, alternating cleaning round / party round the whole way through. RoboRace, RoboPuck, RoboHockey, Bumper Bots, and Robo Bowling rotate randomly, without an immediate repeat.
 - Each round picks a random room type.
 - Dirt cleaned is scored as points.
 - Hitting another robot with an energy bolt is worth 2 points. A bolted robot cannot be bolted again while stunned, and gets 2 seconds of bolt immunity after the stun ends so it can escape.
@@ -121,6 +121,16 @@ Bumper Bots is a free-for-all elimination game on a tiny floor "rug" surrounded 
 - The match lasts up to 1 minute, or ends the moment only one robot remains standing.
 - Knocking a rival off the rug earns the attacker 5 bonus points immediately, on top of the usual 3/2/1 placement points at the end.
 - The HUD flashes who KO'd whom (or "FELL OFF" for an unassisted tumble) each time a robot is eliminated.
+
+## Robo Party: Robo Bowling
+
+Robo Bowling is a team scramble for a shared rack of ten "pins":
+
+- A classic ten-pin triangle sits in the middle of an open arena, built from the same table furniture the normal cleaning game shoves around - only here driving into one knocks it flat instead of sliding it.
+- Odd and even robot slots form two teams, same as RoboPuck and RoboHockey, but there is no half-line - anyone can go for any pin, so the AI beelines for whichever one is closest.
+- Knocking down a pin scores for whichever robot hit it, immediately and permanently - pins do not reset mid-round.
+- The round ends the moment the rack is empty or the 90-second clock runs out; most pins down wins.
+- Every winning-team robot earns 3 match points and every other robot earns 1 point.
 
 The intro, active mini-game, and result screen use separate game states so more Robo Party games can be added without changing the normal cleaning-round flow.
 
@@ -182,7 +192,7 @@ Round starts and gameplay also look for optional uncompressed 8SVX samples:
 - `PROGDIR:samples/mainmusic-lo.8svx` starts as soon as GO appears and loops using the 8SVX repeat section until the level ends, using Paula channels 1 and 4.
 - `PROGDIR:samples/boltfire.8svx` plays once whenever a player fires an energy bolt, using Paula channel 3.
 - `PROGDIR:samples/hoover-go-loop-low.8svx` loops while at least one hoover is moving and stops when all hoovers are stationary, using Paula channel 2.
-- `PROGDIR:samples/goal.iff` plays once whenever a team scores in RoboPuck or RoboHockey, using Paula channel 3 (shares it with `boltfire.8svx`, since the two never trigger back to back). Any valid uncompressed IFF 8SVX sample works - the loader only checks the `FORM`/`8SVX` chunk headers, not the file extension.
+- `PROGDIR:samples/goal.8svx` plays once whenever a team scores in RoboPuck or RoboHockey, using Paula channel 3 (shares it with `boltfire.8svx`, since the two never trigger back to back).
 
 On startup, the game looks for a 32-colour ILBM title image at:
 

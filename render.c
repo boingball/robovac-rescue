@@ -629,6 +629,12 @@ static void MarkDirtyHudIfChanged(void)
              dirtyPrevAirhockeyScore[0] != airhockeyTeamScore[0] ||
              dirtyPrevAirhockeyScore[1] != airhockeyTeamScore[1] ||
              dirtyPrevAirhockeyScoringTeam != airhockeyScoringTeam)) changed = TRUE;
+        if (miniGameType == MINIGAME_BOWLING &&
+            (dirtyPrevBowlingSecond != (bowlingTicksRemaining / 50) ||
+             dirtyPrevBowlingPinsRemaining != bowlingPinsRemaining ||
+             dirtyPrevBowlingScore[0] != bowlingTeamScore[0] ||
+             dirtyPrevBowlingScore[1] != bowlingTeamScore[1] ||
+             dirtyPrevBowlingFlashTicks != bowlingFlashTicks)) changed = TRUE;
     }
 
     for (i = 0; i < robotCount; i++) {
@@ -672,6 +678,11 @@ static void MarkDirtyHudIfChanged(void)
     dirtyPrevAirhockeyScore[0] = airhockeyTeamScore[0];
     dirtyPrevAirhockeyScore[1] = airhockeyTeamScore[1];
     dirtyPrevAirhockeyScoringTeam = airhockeyScoringTeam;
+    dirtyPrevBowlingSecond = bowlingTicksRemaining / 50;
+    dirtyPrevBowlingPinsRemaining = bowlingPinsRemaining;
+    dirtyPrevBowlingScore[0] = bowlingTeamScore[0];
+    dirtyPrevBowlingScore[1] = bowlingTeamScore[1];
+    dirtyPrevBowlingFlashTicks = bowlingFlashTicks;
     for (i = 0; i < robotCount; i++) {
         dirtyPrevBattery[i] = robots[i].battery;
         dirtyPrevScore[i] = robots[i].score;
@@ -2735,14 +2746,16 @@ static void DrawRobotBob(WORD id)
      * the robot is drawn scaled up. */
     if (!bigHeadMode && !(robots[id].powerType == POWER_QUAD && robots[id].powerMovesLeft > 0)) {
         if (gameState == GAME_MINIGAME_PLAYING &&
-            (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY)) {
+            (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY || miniGameType == MINIGAME_BOWLING)) {
             /* The seven hoover variants share one palette with no pen free
              * to safely recolour the cached sprite art itself (see the Dirt
              * Storm note below), so a team "skin" is a solid colour tile
              * behind the BOB instead - same pens DrawPuckHud already uses
              * for TEAM 1/TEAM 2, showing through the sprite's transparent
              * mask as a coloured aura around each hoover. */
-            WORD team = (miniGameType == MINIGAME_PUCK) ? PuckTeamForRobot(id) : AirHockeyTeamForRobot(id);
+            WORD team = (miniGameType == MINIGAME_PUCK) ? PuckTeamForRobot(id) :
+                        (miniGameType == MINIGAME_AIRHOCKEY) ? AirHockeyTeamForRobot(id) :
+                        BowlingTeamForRobot(id);
             SetAPen(&renderRP, (team == 0) ? 13 : 14);
             RectFill(&renderRP, sx, sy, sx + ROBOT_W - 1, sy + ROBOT_H - 1);
         } else {
@@ -3726,6 +3739,11 @@ static void DrawMiniGameIntroScreen(void)
         MiniTextCentered(&renderRP, 96, "2 MINUTE MATCH", 7, 2);
         MiniTextCentered(&renderRP, 112, "STAY ON YOUR SIDE  FIRE = EMP BOOST", 13, 1);
         MiniTextCentered(&renderRP, 126, "FIRST TO 5  OR LEAD AT TIME", 14, 1);
+    } else if (miniGameType == MINIGAME_BOWLING) {
+        MiniTextCentered(&renderRP, 66, "ROBO BOWLING", 10, 3);
+        MiniTextCentered(&renderRP, 96, "TEN PINS  90 SECONDS", 7, 2);
+        MiniTextCentered(&renderRP, 112, "DRIVE INTO A PIN TO KNOCK IT DOWN", 13, 1);
+        MiniTextCentered(&renderRP, 126, "MOST PINS DOWN WINS", 14, 1);
     } else {
         MiniTextCentered(&renderRP, 66, "ROBORACE", 10, 3);
         MiniTextCentered(&renderRP, 96, "2 LAPS  HIT BOOST PADS", 7, 2);
@@ -3752,7 +3770,8 @@ static void DrawMiniGameEndScreen(void)
     MiniTextCentered(&renderRP, 12,
                      miniGameType == MINIGAME_PUCK ? "ROBOPUCK RESULT" :
                      miniGameType == MINIGAME_BUMPER ? "BUMPER BOTS RESULT" :
-                     miniGameType == MINIGAME_AIRHOCKEY ? "ROBOHOCKEY RESULT" : "ROBORACE RESULT",
+                     miniGameType == MINIGAME_AIRHOCKEY ? "ROBOHOCKEY RESULT" :
+                     miniGameType == MINIGAME_BOWLING ? "ROBO BOWLING RESULT" : "ROBORACE RESULT",
                      14, 3);
 
     if (miniGameWinner >= 0) {
@@ -3767,13 +3786,18 @@ static void DrawMiniGameEndScreen(void)
                      AirHockeyTeamForRobot(miniGameWinner) + 1,
                      airhockeyTeamScore[AirHockeyTeamForRobot(miniGameWinner)],
                      airhockeyTeamScore[1 - AirHockeyTeamForRobot(miniGameWinner)]);
+        } else if (miniGameType == MINIGAME_BOWLING) {
+            snprintf(b, sizeof(b), "TEAM %d WINS  %d-%d",
+                     BowlingTeamForRobot(miniGameWinner) + 1,
+                     bowlingTeamScore[BowlingTeamForRobot(miniGameWinner)],
+                     bowlingTeamScore[1 - BowlingTeamForRobot(miniGameWinner)]);
         } else {
             snprintf(b, sizeof(b), "%s %s WINS", RobotControlLabel(miniGameWinner), RobotTag(miniGameWinner));
         }
         MiniTextCentered(&renderRP, 112, b, 10, 2);
     }
 
-    if (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY) {
+    if (miniGameType == MINIGAME_PUCK || miniGameType == MINIGAME_AIRHOCKEY || miniGameType == MINIGAME_BOWLING) {
         MiniTextCentered(&renderRP, 148, "WINNING TEAM +3", 14, 2);
         MiniTextCentered(&renderRP, 174, "OTHER TEAM +1", 7, 2);
     } else {
@@ -3970,6 +3994,30 @@ static void DrawBumperHud(void)
 }
 
 
+static void DrawBowlingHud(void)
+{
+    WORD totalSeconds = (bowlingTicksRemaining + 49) / 50;
+    WORD minutes = totalSeconds / 60;
+    WORD seconds = totalSeconds % 60;
+    char b[64];
+
+    SetAPen(&renderRP, 0);
+    RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
+
+    snprintf(b, sizeof(b), "ROBO BOWLING  TEAM1 %d-%d TEAM2  %d PINS  %d:%02d",
+             bowlingTeamScore[0], bowlingTeamScore[1], bowlingPinsRemaining, minutes, seconds);
+    MiniText(&renderRP, 4, 3, b, 14);
+
+    if (bowlingFlashTicks > 0 && bowlingLastKnockedRobot >= 0) {
+        snprintf(b, sizeof(b), "%s PIN DOWN! TEAM %d", RobotTag(bowlingLastKnockedRobot), bowlingLastKnockedTeam + 1);
+        MiniTextCentered(&renderRP, 18, b, bowlingLastKnockedTeam == 0 ? 13 : 14, 2);
+    } else {
+        MiniTextCentered(&renderRP, 18, "MOST PINS DOWN WINS", 7, 1);
+    }
+    DrawJoystickIcons();
+}
+
+
 static void DrawHud(void)
 {
     char b[160];
@@ -3983,6 +4031,7 @@ static void DrawHud(void)
         if (miniGameType == MINIGAME_PUCK) DrawPuckHud();
         else if (miniGameType == MINIGAME_BUMPER) DrawBumperHud();
         else if (miniGameType == MINIGAME_AIRHOCKEY) DrawAirHockeyHud();
+        else if (miniGameType == MINIGAME_BOWLING) DrawBowlingHud();
         else DrawRaceHud();
         return;
     }
