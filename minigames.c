@@ -5,6 +5,13 @@ static WORD ChooseNextMiniGame(void)
 {
     WORD choice;
 
+    /* Party Mode plays every type exactly once, in the shuffled order
+     * StartPartyMode already built, rather than the normal random pick. */
+    if (partyModeActive) {
+        if (partyModeQueueIndex >= MINIGAME_COUNT) partyModeQueueIndex = 0;
+        return partyModeQueue[partyModeQueueIndex++];
+    }
+
     if (MINIGAME_COUNT <= 1) return MINIGAME_RACE;
     do {
         choice = 1 + (WORD)RandRange(MINIGAME_COUNT);

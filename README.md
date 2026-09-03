@@ -34,11 +34,16 @@ Detailed actions:
 - `1` / `2` / `3`: keyboard shortcut that skips the "how many rivals" prompt and jumps straight to the Easy / Normal / Hard difficulty prompt with that many AI rivals, from either the one-player title screen or the two-player AI prompt (where `0` is also available, and starts immediately with no AI).
 - AI difficulty: Easy AI does not fire back, Normal AI fires only at close range, and Hard AI fires from longer range.
 - `D`: hidden Hoover Mode: four AI hoovers clean the room using fresh random hoover variants and headings. They keep straight cleaning lines where possible, then use dirt/open-space/recent-path look-ahead to turn around walls, tables, and other hoovers. Any input returns to the title screen.
+- `P`: Party Mode, from the title screen - see below.
 - `Esc`: quit
 
 ## Demo / Attract Mode
 
 Leave the title screen idle for 30 seconds to start the normal attract demo: 4 AI robots (Easy difficulty, so they don't shoot each other) clean a random room on their own, looping into a fresh room whenever one finishes instead of showing the normal round/match-end screens. Press `D` for the separate Hoover Mode, which randomises the four hoovers and their headings, uses intelligent straight-line cleaning patterns, and also loops through rooms. Any keypress, joystick input, or mouse click immediately drops back to the title screen.
+
+## Party Mode
+
+Press `P` on the title screen to skip straight into a match of nothing but Robo Party mini-games - no menus, no cleaning rounds. It plays every mini-game (RoboRace, RoboPuck, RoboHockey, Bumper Bots, Robo Bowling) exactly once, in a shuffled order, solo plus three AI rivals on Normal difficulty, then ends on the normal match-end leaderboard (and offers the bonus round too, if anyone's total qualifies). A fast way to try or show off every party game in one sitting without playing a full match around them.
 
 ## Robot Super Powers
 

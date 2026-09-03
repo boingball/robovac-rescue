@@ -1292,6 +1292,28 @@ static WORD MatchRoundCount(void)
 }
 
 
+/* Shared by the normal cleaning-round match end (CheckEndState) and Party
+ * Mode's all-minigame match end (ActivateSpaceOrFireAction) - whichever
+ * path got here, the final winner and bonus-round eligibility are worked
+ * out from totalScores[] the same way. */
+static void FinalizeMatchEnd(void)
+{
+    WORD i;
+
+    finalWinner = 0;
+    for (i = 1; i < robotCount; i++) {
+        if (totalScores[i] > totalScores[finalWinner]) {
+            finalWinner = i;
+        }
+    }
+    bonusAvailable = FALSE;
+    for (i = 0; i < robotCount; i++) {
+        if (totalScores[i] > BONUS_SCORE_THRESHOLD) bonusAvailable = TRUE;
+    }
+    gameState = GAME_MATCH_END;
+}
+
+
 static void CheckEndState(void)
 {
     WORD i;
@@ -1327,17 +1349,7 @@ static void CheckEndState(void)
     }
 
     if (roundIndex >= MatchRoundCount() - 1) {
-        finalWinner = 0;
-        for (i = 1; i < robotCount; i++) {
-            if (totalScores[i] > totalScores[finalWinner]) {
-                finalWinner = i;
-            }
-        }
-        bonusAvailable = FALSE;
-        for (i = 0; i < robotCount; i++) {
-            if (totalScores[i] > BONUS_SCORE_THRESHOLD) bonusAvailable = TRUE;
-        }
-        gameState = GAME_MATCH_END;
+        FinalizeMatchEnd();
     } else {
         gameState = GAME_ROUND_END;
     }
@@ -1681,6 +1693,7 @@ static void EnterTitleScreen(void)
     humanPlayers = 1;
     demoModeActive = FALSE;
     hooverModeActive = FALSE;
+    partyModeActive = FALSE;
     demoJoyPrimed = FALSE;
     titleIdleTicks = 0;
     titleSelectPlayer = 0;
@@ -2078,6 +2091,7 @@ static void StartMatch(WORD players, WORD rivals)
 {
     WORD i;
     StopMenuMusic();
+    partyModeActive = FALSE;
     humanPlayers = players;
     if (humanPlayers < 1) humanPlayers = 1;
     if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
@@ -2099,6 +2113,32 @@ static void StartMatch(WORD players, WORD rivals)
     aiDifficultyMenuOpen = FALSE;
     ResetAllJoystickConfirmHolds();
     ResetLevel();
+}
+
+
+/* Party Mode: skips cleaning rounds entirely and plays every Robo Party
+ * mini-game exactly once, in a shuffled order, ending on the normal
+ * match-end leaderboard (and bonus round, if anyone qualifies) - a fast,
+ * one-key way to see (or show off) every party game without playing a full
+ * match around them. Solo plus three AI rivals, Normal difficulty, no menu
+ * in the way. */
+static void StartPartyMode(void)
+{
+    WORD i;
+
+    for (i = 0; i < MINIGAME_COUNT; i++) partyModeQueue[i] = i + 1;
+    for (i = MINIGAME_COUNT - 1; i > 0; i--) {
+        WORD j = (WORD)RandRange(i + 1);
+        WORD tmp = partyModeQueue[i];
+        partyModeQueue[i] = partyModeQueue[j];
+        partyModeQueue[j] = tmp;
+    }
+    partyModeQueueIndex = 0;
+
+    aiDifficulty = 1;
+    StartMatch(1, 3);
+    partyModeActive = TRUE;
+    StartMiniGameIntro();
 }
 
 

@@ -598,6 +598,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_4       0x04
 
 #define RAW_O       0x18
+#define RAW_P       0x19
 
 #define RAW_B       0x35
 
@@ -1096,6 +1097,17 @@ static UWORD *audioSilenceWord = NULL;
 static BOOL demoModeActive = FALSE;
 
 static BOOL demoJoyPrimed = FALSE;
+
+/* Party Mode: a one-key shortcut from the title screen (P) straight into a
+ * match of nothing but Robo Party rounds - every mini-game exactly once, in
+ * a shuffled order, then the usual match-end leaderboard. Built for fast
+ * testing/showing off the party games without playing full cleaning rounds
+ * in between. */
+static BOOL partyModeActive = FALSE;
+
+static WORD partyModeQueue[MINIGAME_COUNT];
+
+static WORD partyModeQueueIndex = 0;
 
 static BOOL demoPrevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 
@@ -1766,6 +1778,8 @@ static void StartDemoMode(void);
 
 static void StartHooverMode(void);
 
+static void StartPartyMode(void);
+
 static WORD MatchRoundCount(void);
 
 static void StartMiniGameIntro(void);
@@ -2263,6 +2277,7 @@ static void ChooseAiMove(WORD id);
 static void ChoosePlayerMove(WORD id);
 static BOOL AnyRobotCanMove(void);
 static WORD MatchRoundCount(void);
+static void FinalizeMatchEnd(void);
 static void CheckEndState(void);
 static void ResetBonusBoss(void);
 static void BossStunRobot(WORD id, const char *label);
