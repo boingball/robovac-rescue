@@ -4,6 +4,12 @@ CFLAGS=-s -Os
 TARGET=robovac
 SRC=robovac.c
 
+# robovac.c pulls the other modules in with #include (see robovac.c and
+# robovac.h) so the compiler is only ever invoked on robovac.c itself, but
+# every file below still needs to be listed here so `make` rebuilds when
+# any of them change.
+SOURCES=robovac.c robovac.h game.c ai.c render.c audio.c minigames.c network.c
+
 RELEASE_ROOT ?= release
 RELEASE_NAME ?= RoboVac-Rescue
 RELEASE_DIR := $(RELEASE_ROOT)/$(RELEASE_NAME)
@@ -12,7 +18,7 @@ RELEASE_DIR := $(RELEASE_ROOT)/$(RELEASE_NAME)
 
 all: $(TARGET)
 
-$(TARGET):
+$(TARGET): $(SOURCES)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
 release: $(TARGET)
