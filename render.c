@@ -4113,6 +4113,13 @@ static void DrawFloodHouseHud(void)
     SetAPen(&renderRP, 0);
     RectFill(&renderRP, 0, 0, SCREEN_W - 1, HUD_H - 1);
 
+    if (floodPauseTicks > 0) {
+        MiniText(&renderRP, 4, 3, "FLOOD HOUSE  THE WATER IS RISING", 14);
+        MiniTextCentered(&renderRP, 18, "SURROUNDED HOMES STAY DRY", 11, 1);
+        DrawJoystickIcons();
+        return;
+    }
+
     snprintf(b, sizeof(b), "FLOOD HOUSE  BUILD YOUR WALLS  %d:%02d",
              minutes, seconds);
     MiniText(&renderRP, 4, 3, b, 14);
@@ -4580,6 +4587,25 @@ static void DrawGameplayDirtyRects(void)
 #endif
 
 
+/* The rising water during the live flood-moment pause (see floodPauseTicks
+ * in StepFloodHouse) - a plain animated RectFill like the result screen's
+ * water line, not an actual palette/copper effect, for the same reason:
+ * this whole frame is already forced to a full present every pause tick
+ * (see ForceGameplayFullPresent in StepFloodHouse), so there is no dirty
+ * rect bookkeeping to get wrong by keeping it simple. */
+static void DrawFloodWaterOverlay(void)
+{
+    WORD mapBottom = MAP_Y + (MAP_H * TILE_SIZE);
+    WORD waterH = ((FLOODHOUSE_FLOOD_PAUSE_TICKS - floodPauseTicks) * 24) / FLOODHOUSE_FLOOD_PAUSE_TICKS;
+
+    if (waterH > 24) waterH = 24;
+    if (waterH <= 0) return;
+
+    SetAPen(&renderRP, 11);
+    RectFill(&renderRP, MAP_X, mapBottom - waterH, MAP_X + (MAP_W * TILE_SIZE) - 1, mapBottom - 1);
+}
+
+
 static void DrawFrame(void)
 {
     WORD i;
@@ -4679,6 +4705,10 @@ static void DrawFrame(void)
     DrawDirtStorm();
     DrawRoundStartOverlay();
     DrawEmpRobotVisuals();
+
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE && floodPauseTicks > 0) {
+        DrawFloodWaterOverlay();
+    }
 
     if (pauseMenuOpen) {
         DrawPauseMenu();

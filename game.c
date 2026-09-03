@@ -1206,7 +1206,15 @@ static void StepRobotMovement(WORD id)
         LONG stepSpeed;
         if (gameState == GAME_MINIGAME_PLAYING) {
             if (miniGameType == MINIGAME_RACE) {
-                stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
+                /* An oil slick tile (see StartRoboRace) slows the move onto
+                 * it down instead of blocking it, same as boost pads speed
+                 * a move up - both read the destination tile the robot is
+                 * already committed to entering. */
+                if (map[robots[id].targetY][robots[id].targetX] == TILE_OBSTACLE) {
+                    stepSpeed = RACE_SLICK_SPEED;
+                } else {
+                    stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
+                }
             } else {
                 /* Puck and Bumper Bots share the same snappier step speed. */
                 stepSpeed = PUCK_ROBOT_MOVE_SPEED;

@@ -262,6 +262,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define RACE_BOOST_SPEED         (5 * FP_ONE)
 
+#define RACE_SLICK_SPEED         (1 * FP_ONE)
+
 #define RACE_BOOST_MOVES         8
 
 #define RACE_BUMP_STUN_TICKS     6
@@ -392,6 +394,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define FLOODHOUSE_FLASH_TICKS       40
 
 #define FLOODHOUSE_PALETTE_TICKS     100
+
+#define FLOODHOUSE_FLOOD_PAUSE_TICKS (3 * 50)
 
 #define FLOODHOUSE_EVENT_NONE        0
 
@@ -1362,6 +1366,8 @@ static BOOL floodSurrounded[MAX_ROBOTS];
 
 static WORD floodTicksRemaining = 0;
 
+static WORD floodPauseTicks = 0;
+
 static WORD floodLooseRemaining = 0;
 
 static WORD floodFlashTicks = 0;
@@ -1659,9 +1665,14 @@ static const WORD robotDockXTwoPlayer[MAX_ROBOTS]  = {1, 18, 18, 1, 17, 1, 1, 18
 
 static const WORD robotDockYTwoPlayer[MAX_ROBOTS]  = {1, 11, 1, 11, 11, 11, 11, 11, 11, 11};
 
-static const WORD raceStartX[MAX_ROBOTS] = {5, 5, 5, 6, 6, 6, 7, 7, 7, 8};
+/* The first four (the common case: solo plus up to three AI rivals) share
+ * one column, so all four start with equal forward progress toward the
+ * first gate - a 3-per-column-then-spill-over layout put the 4th racer in
+ * a new column at the SAME row as the 1st, one tile further along the
+ * track than everyone else, which read as starting in front of them. */
+static const WORD raceStartX[MAX_ROBOTS] = {5, 5, 5, 5, 6, 6, 6, 7, 7, 7};
 
-static const WORD raceStartY[MAX_ROBOTS] = {9, 10, 11, 9, 10, 11, 9, 10, 11, 10};
+static const WORD raceStartY[MAX_ROBOTS] = {9, 10, 11, 12, 9, 10, 11, 9, 10, 11};
 
 
 /* Spread around the rug with a one-tile buffer from the abyss edge, so
@@ -1679,9 +1690,12 @@ static const WORD floodHomeY[MAX_ROBOTS] = {4, 4, 4, 4, 4, 9, 9, 9, 9, 9};
 
 
 /* Clockwise gates around the central island.  Robots start just beyond the
- * start/finish gate and must visit 1, 2, 3, then 0 to complete a lap. */
+ * start/finish gate and must visit 1, 2, 3, then 0 to complete a lap.
+ * Gate 0 is pulled back off row 12 - one tile shy of the bottom wall - so
+ * it reads as a gate on the open floor rather than tucked into the corner
+ * pocket down there. */
 static const struct RaceCheckpoint raceCheckpoints[RACE_CHECKPOINT_COUNT] = {
-    {4, 4, 9, 12, 4, 10},
+    {4, 4, 8, 11, 4, 9},
     {15, 18, 8, 8, 16, 8},
     {14, 14, 1, 3, 14, 2},
     {1, 4, 4, 4, 3, 4}
@@ -2417,6 +2431,7 @@ static void DrawAirHockeyHud(void);
 static void DrawBumperHud(void);
 static void DrawBowlingHud(void);
 static void DrawFloodHouseHud(void);
+static void DrawFloodWaterOverlay(void);
 static void DrawIntroTitleImage(void);
 static void DrawRoundStartOverlay(void);
 static void DrawPauseMenu(void);

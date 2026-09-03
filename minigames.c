@@ -79,6 +79,16 @@ static void StartRoboRace(void)
     map[2][2] = TILE_DOCK;
     map[10][2] = TILE_DOCK;
 
+    /* One oil slick per leg of the loop, reusing the otherwise-unused
+     * TILE_OBSTACLE art. Driving onto one (see the RACE_SLICK_SPEED check
+     * in StepRobotMovement) slows that move down instead of blocking it,
+     * same spirit as dirt in the normal cleaning game being something to
+     * drive through rather than around. */
+    map[2][9] = TILE_OBSTACLE;
+    map[6][16] = TILE_OBSTACLE;
+    map[11][12] = TILE_OBSTACLE;
+    map[6][2] = TILE_OBSTACLE;
+
     ClearDirtList();
     { WORD bi; for (bi = 0; bi < MAX_ROBOTS; bi++) playerBolts[bi].active = FALSE; }
     { WORD bi; for (bi = 0; bi < MAX_BOSS_BOLTS; bi++) bossBolts[bi].active = FALSE; }
@@ -432,25 +442,40 @@ static void StepAirHockeyPhysics(void)
             WORD robotCenterY;
 
             if (!RectsOverlap(x, y, AIRHOCKEY_W, AIRHOCKEY_H, rx, ry, ROBOT_W, ROBOT_H)) continue;
-            switch (robots[i].spriteIndex) {
-                case SPR_LEFT:  dirX = -1; break;
-                case SPR_RIGHT: dirX = 1; break;
-                case SPR_UP:    dirY = -1; break;
-                case SPR_DOWN:  dirY = 1; break;
-                default: dirY = (AirHockeyTeamForRobot(i) == 0) ? 1 : -1; break;
-            }
 
             puckCenterX = x + AIRHOCKEY_W / 2;
             puckCenterY = y + AIRHOCKEY_H / 2;
             robotCenterX = rx + ROBOT_W / 2;
             robotCenterY = ry + ROBOT_H / 2;
+
+            switch (robots[i].spriteIndex) {
+                case SPR_LEFT:  dirX = -1; break;
+                case SPR_RIGHT: dirX = 1; break;
+                case SPR_UP:    dirY = -1; break;
+                case SPR_DOWN:  dirY = 1; break;
+                default:
+                    /* A robot that is not actively facing a direction (idle,
+                     * or parked as a "shield") must still send the puck away
+                     * from where it actually is, not toward a fixed team
+                     * direction that might point straight into a wall a
+                     * stationary defender is backed up against. */
+                    if (AbsW(puckCenterX - robotCenterX) >= AbsW(puckCenterY - robotCenterY)) {
+                        dirX = (puckCenterX < robotCenterX) ? -1 : 1;
+                    } else {
+                        dirY = (puckCenterY < robotCenterY) ? -1 : 1;
+                    }
+                    break;
+            }
+
             airhockeyPuckVx = dirX * AIRHOCKEY_KICK_SPEED;
             airhockeyPuckVy = dirY * AIRHOCKEY_KICK_SPEED;
             if (dirX != 0) airhockeyPuckVy += (puckCenterY - robotCenterY) * (FP_ONE / 3);
             if (dirY != 0) airhockeyPuckVx += (puckCenterX - robotCenterX) * (FP_ONE / 3);
             LimitAirHockeyVelocity();
-            airhockeyPuckPx += dirX * TO_FP(3);
-            airhockeyPuckPy += dirY * TO_FP(3);
+            /* Clear the robot's whole hitbox, not just a few pixels - see
+             * the identical fix and reasoning in StepPuckPhysics. */
+            airhockeyPuckPx += dirX * TO_FP(ROBOT_W);
+            airhockeyPuckPy += dirY * TO_FP(ROBOT_H);
             airhockeyHitCooldownTicks = AIRHOCKEY_HIT_COOLDOWN_TICKS;
             airhockeyLastTouch = i;
             break;
@@ -940,6 +965,14 @@ static BOOL BumperPushRobot(WORD blockedId, WORD dx, WORD dy, WORD tiles, WORD a
     pushY = robots[blockedId].tileY + dy;
 
     if (!BumperTileInArena(pushX, pushY)) {
+        /* Relocate into the abyss tile itself before eliminating, so the
+         * fall/tumble animation (which draws at robots[id].px/py) plays
+         * where the robot actually landed, off the rug - not back on the
+         * last valid tile it was shoved from. */
+        robots[blockedId].tileX = pushX;
+        robots[blockedId].tileY = pushY;
+        robots[blockedId].px = TO_FP(pushX * TILE_SIZE);
+        robots[blockedId].py = TO_FP(pushY * TILE_SIZE);
         BumperEliminateRobot(blockedId, attackerId);
         return TRUE;
     }
@@ -965,6 +998,10 @@ static BOOL BumperPushRobot(WORD blockedId, WORD dx, WORD dy, WORD tiles, WORD a
         WORD ny = robots[blockedId].tileY + dy;
 
         if (!BumperTileInArena(nx, ny)) {
+            robots[blockedId].tileX = nx;
+            robots[blockedId].tileY = ny;
+            robots[blockedId].px = TO_FP(nx * TILE_SIZE);
+            robots[blockedId].py = TO_FP(ny * TILE_SIZE);
             BumperEliminateRobot(blockedId, attackerId);
             return TRUE;
         }
@@ -1091,25 +1128,42 @@ static void StepPuckPhysics(void)
             WORD robotCenterY;
 
             if (!RectsOverlap(x, y, PUCK_W, PUCK_H, rx, ry, ROBOT_W, ROBOT_H)) continue;
-            switch (robots[i].spriteIndex) {
-                case SPR_LEFT:  dirX = -1; break;
-                case SPR_RIGHT: dirX = 1; break;
-                case SPR_UP:    dirY = -1; break;
-                case SPR_DOWN:  dirY = 1; break;
-                default: dirX = (PuckTeamForRobot(i) == 0) ? 1 : -1; break;
-            }
 
             puckCenterX = x + PUCK_W / 2;
             puckCenterY = y + PUCK_H / 2;
             robotCenterX = rx + ROBOT_W / 2;
             robotCenterY = ry + ROBOT_H / 2;
+
+            switch (robots[i].spriteIndex) {
+                case SPR_LEFT:  dirX = -1; break;
+                case SPR_RIGHT: dirX = 1; break;
+                case SPR_UP:    dirY = -1; break;
+                case SPR_DOWN:  dirY = 1; break;
+                default:
+                    /* A robot that is not actively facing a direction (idle,
+                     * or just parked as a "shield") must still send the puck
+                     * away from where it actually is, not toward a fixed
+                     * team direction that might point straight into a wall
+                     * a stationary defender is backed up against. */
+                    if (AbsW(puckCenterX - robotCenterX) >= AbsW(puckCenterY - robotCenterY)) {
+                        dirX = (puckCenterX < robotCenterX) ? -1 : 1;
+                    } else {
+                        dirY = (puckCenterY < robotCenterY) ? -1 : 1;
+                    }
+                    break;
+            }
+
             puckVx = dirX * PUCK_KICK_SPEED;
             puckVy = dirY * PUCK_KICK_SPEED;
             if (dirX != 0) puckVy += (puckCenterY - robotCenterY) * (FP_ONE / 3);
             if (dirY != 0) puckVx += (puckCenterX - robotCenterX) * (FP_ONE / 3);
             LimitPuckVelocity();
-            puckPx += dirX * TO_FP(3);
-            puckPy += dirY * TO_FP(3);
+            /* Clear the robot's whole hitbox, not just a few pixels - a
+             * small nudge can still leave the puck overlapping, and an
+             * instant wall bounce would drop it right back for a repeat
+             * hit, which is how a robot could "shield" the puck in place. */
+            puckPx += dirX * TO_FP(ROBOT_W);
+            puckPy += dirY * TO_FP(ROBOT_H);
             puckHitCooldownTicks = PUCK_HIT_COOLDOWN_TICKS;
             puckLastTouch = i;
             break;
@@ -1611,6 +1665,7 @@ static void StartFloodHouse(void)
     ScatterFloodBlocks();
 
     floodTicksRemaining = FLOODHOUSE_BUILD_TICKS;
+    floodPauseTicks = 0;
     floodFlashTicks = 0;
     floodLastEventRobot = -1;
     floodLastEventKind = FLOODHOUSE_EVENT_NONE;
@@ -1746,15 +1801,22 @@ static LONG FloodRank(WORD id)
 }
 
 
+/* The water reaching the floor is a visible moment, not an instant cut to
+ * the result screen: every unprotected robot gets the same stun-warning
+ * flash a bolt hit already uses (robots[id].stunTicks, drawn generically in
+ * DrawRobotBob) for the length of the pause, and gameplay freezes for that
+ * stretch (see the floodPauseTicks branch in StepFloodHouse) before
+ * FinishFloodHouse actually ends the round. */
 static void ResolveFloodHouse(void)
 {
     WORD i;
 
     for (i = 0; i < robotCount; i++) {
         floodSurrounded[i] = (FloodHomeWallCount(i) >= 4) ? TRUE : FALSE;
+        if (!floodSurrounded[i]) robots[i].stunTicks = FLOODHOUSE_FLOOD_PAUSE_TICKS;
     }
+    floodPauseTicks = FLOODHOUSE_FLOOD_PAUSE_TICKS;
     floodPaletteTicks = FLOODHOUSE_PALETTE_TICKS;
-    FinishFloodHouse();
 }
 
 
@@ -1831,6 +1893,19 @@ static void StepFloodHouse(void)
     if (roundGoTicks > 0) roundGoTicks--;
 
     if (floodFlashTicks > 0) floodFlashTicks--;
+
+    /* The flood itself is a held moment, not an instant cut to results:
+     * once the clock runs out, gameplay freezes here for
+     * FLOODHOUSE_FLOOD_PAUSE_TICKS while unprotected robots flash, and only
+     * then does the round actually end. */
+    if (floodPauseTicks > 0) {
+        floodPauseTicks--;
+        ForceGameplayFullPresent();
+        if (floodPauseTicks <= 0) FinishFloodHouse();
+        FinishGameplayDirtyRects();
+        return;
+    }
+
     if (floodTicksRemaining > 0) floodTicksRemaining--;
 
     if (floodTicksRemaining <= 0) {

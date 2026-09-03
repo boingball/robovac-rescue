@@ -449,6 +449,40 @@ static void ChooseFloodAiMove(WORD id)
     if (id < humanPlayers || id >= robotCount) return;
     if (robots[id].moving || robots[id].stunTicks > 0) return;
 
+    /* Top up to a full carry before heading home to build - otherwise a
+     * robot that picks up one block immediately turns for home and never
+     * grabs a second one lying nearby, shuttling back and forth instead of
+     * making full trips. */
+    if (floodCarried[id] < FLOODHOUSE_CARRY_MAX) {
+        WORD bestX = -1;
+        WORD bestY = -1;
+        WORD bestDist = 32767;
+        WORD tx;
+        WORD ty;
+
+        for (ty = 1; ty < MAP_H - 1; ty++) {
+            for (tx = 1; tx < MAP_W - 1; tx++) {
+                WORD dist;
+                if (floodBlockHeight[ty][tx] <= 0) continue;
+                dist = AbsW(tx - robots[id].tileX) + AbsW(ty - robots[id].tileY);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestX = tx;
+                    bestY = ty;
+                }
+            }
+        }
+
+        if (bestX >= 0) {
+            if (AiFindPathStep(id, bestX, bestY, &dx, &dy, NULL) && (dx != 0 || dy != 0)) {
+                StartRobotMove(id, dx, dy);
+                return;
+            }
+            /* No path to a block right now (boxed in, say) - fall through
+             * and make progress on the fort instead of standing idle. */
+        }
+    }
+
     if (floodCarried[id] > 0) {
         static const WORD wallDx[4] = {1, 0, -1, 0};
         static const WORD wallDy[4] = {0, 1, 0, -1};
@@ -456,8 +490,9 @@ static void ChooseFloodAiMove(WORD id)
         WORD bestDist = 32767;
         WORD i;
 
-        /* Carrying at least one block: head for whichever of the home's
-         * four wall tiles is nearest and not already maxed out. */
+        /* Carrying at least one block and nothing closer to top up with:
+         * head for whichever of the home's four wall tiles is nearest and
+         * not already maxed out. */
         for (i = 0; i < 4; i++) {
             WORD tx = floodHomeX[id] + wallDx[i];
             WORD ty = floodHomeY[id] + wallDy[i];
@@ -491,40 +526,8 @@ static void ChooseFloodAiMove(WORD id)
             }
 
             if (AiFindPathStep(id, targetX, targetY, &dx, &dy, NULL) && (dx != 0 || dy != 0)) {
-                WORD nx = robots[id].tileX + dx;
-                WORD ny = robots[id].tileY + dy;
-                if (nx == targetX && ny == targetY) return;
                 StartRobotMove(id, dx, dy);
             }
-            return;
-        }
-    }
-
-    /* Not carrying (or the home is already fully built): go grab the
-     * nearest block still lying around, loose or in anyone's wall. */
-    {
-        WORD bestX = -1;
-        WORD bestY = -1;
-        WORD bestDist = 32767;
-        WORD tx;
-        WORD ty;
-
-        for (ty = 1; ty < MAP_H - 1; ty++) {
-            for (tx = 1; tx < MAP_W - 1; tx++) {
-                WORD dist;
-                if (floodBlockHeight[ty][tx] <= 0) continue;
-                dist = AbsW(tx - robots[id].tileX) + AbsW(ty - robots[id].tileY);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestX = tx;
-                    bestY = ty;
-                }
-            }
-        }
-
-        if (bestX >= 0 && AiFindPathStep(id, bestX, bestY, &dx, &dy, NULL) &&
-            (dx != 0 || dy != 0)) {
-            StartRobotMove(id, dx, dy);
         }
     }
 }
