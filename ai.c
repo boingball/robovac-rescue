@@ -407,6 +407,155 @@ static void ChooseAirHockeyAiMove(WORD id)
 }
 
 
+/* Each robot bowls its own private lane now (see StartRoboBowling), so the
+ * AI just needs to get back to its own launch tile if it isn't there
+ * already, then aim up the lane and fire - no more racing a shared rack. */
+static void ChooseBowlingAiMove(WORD id)
+{
+    WORD dx = 0;
+    WORD dy = 0;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_BOWLING) return;
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0) return;
+    if (playerBolts[id].active) return;
+
+    if (robots[id].tileX != bowlingLaunchX[id] || robots[id].tileY != bowlingLaunchY[id]) {
+        if (AiFindPathStep(id, bowlingLaunchX[id], bowlingLaunchY[id], &dx, &dy, NULL) &&
+            (dx != 0 || dy != 0)) {
+            StartRobotMove(id, dx, dy);
+        }
+        return;
+    }
+
+    /* playerFacingX/Y are sized for human players only (StartRobotMove's own
+     * facing update is guarded the same way) - FireRobotBolt takes the
+     * direction directly, so an AI robot never needs to touch that array. */
+    SetRobotMoveSprite(id, SPR_UP);
+    FireRobotBolt(id, 0, -1, TRUE, TRUE);
+}
+
+
+static void ChooseFloodAiMove(WORD id)
+{
+    WORD dx = 0;
+    WORD dy = 0;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_FLOODHOUSE) return;
+    if (id < humanPlayers || id >= robotCount) return;
+    if (robots[id].moving || robots[id].stunTicks > 0) return;
+
+    /* Top up to a full carry before heading home to build - otherwise a
+     * robot that picks up one block immediately turns for home and never
+     * grabs a second one lying nearby, shuttling back and forth instead of
+     * making full trips. */
+    if (floodCarried[id] < FLOODHOUSE_CARRY_MAX) {
+        WORD bestX = -1;
+        WORD bestY = -1;
+        WORD bestDist = 32767;
+        WORD tx;
+        WORD ty;
+
+        for (ty = 1; ty < MAP_H - 1; ty++) {
+            for (tx = 1; tx < MAP_W - 1; tx++) {
+                WORD dist;
+                if (floodBlockHeight[ty][tx] <= 0) continue;
+                dist = AbsW(tx - robots[id].tileX) + AbsW(ty - robots[id].tileY);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestX = tx;
+                    bestY = ty;
+                }
+            }
+        }
+
+        if (bestX >= 0) {
+            if (AiFindPathStep(id, bestX, bestY, &dx, &dy, NULL) && (dx != 0 || dy != 0)) {
+                StartRobotMove(id, dx, dy);
+                return;
+            }
+            /* No path to a block right now (boxed in, say) - fall through
+             * and make progress on the fort instead of standing idle. */
+        }
+    }
+
+    if (floodCarried[id] > 0) {
+        static const WORD wallDx[4] = {1, 0, -1, 0};
+        static const WORD wallDy[4] = {0, 1, 0, -1};
+        WORD bestSide = -1;
+        WORD bestDist = 32767;
+        WORD i;
+
+        /* Carrying at least one block and nothing closer to top up with:
+         * head for whichever of the home's four wall tiles is nearest and
+         * not already maxed out. */
+        for (i = 0; i < 4; i++) {
+            WORD tx = floodHomeX[id] + wallDx[i];
+            WORD ty = floodHomeY[id] + wallDy[i];
+            WORD dist;
+            if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+            if (floodBlockHeight[ty][tx] >= FLOODHOUSE_STACK_MAX) continue;
+            dist = AbsW(tx - robots[id].tileX) + AbsW(ty - robots[id].tileY);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestSide = i;
+            }
+        }
+
+        if (bestSide >= 0) {
+            WORD targetX = floodHomeX[id] + wallDx[bestSide];
+            WORD targetY = floodHomeY[id] + wallDy[bestSide];
+
+            if (bestDist == 1) {
+                /* Already standing next to the wall tile: face it and
+                 * build rather than stepping onto it, which would steal
+                 * the very block being carried there instead of adding
+                 * to it. */
+                WORD faceDx = targetX - robots[id].tileX;
+                WORD faceDy = targetY - robots[id].tileY;
+                if (faceDx < 0) SetRobotMoveSprite(id, SPR_LEFT);
+                else if (faceDx > 0) SetRobotMoveSprite(id, SPR_RIGHT);
+                else if (faceDy < 0) SetRobotMoveSprite(id, SPR_UP);
+                else if (faceDy > 0) SetRobotMoveSprite(id, SPR_DOWN);
+                TryFloodBuild(id);
+                return;
+            }
+
+            if (AiFindPathStep(id, targetX, targetY, &dx, &dy, NULL) && (dx != 0 || dy != 0)) {
+                StartRobotMove(id, dx, dy);
+            }
+        }
+    }
+}
+
+
+/* Pictionary's AI guessers never move and never look at the canvas - once
+ * enough of it is painted (see TryPictionaryPaint), each eligible AI rolls
+ * a small per-tick chance to "guess" correctly, which reads as thinking it
+ * over rather than an instant, all-knowing answer. Called once per tick
+ * from StepPictionary, not through the per-robot AI move dispatcher, since
+ * there is no movement involved. */
+static void StepPictionaryAiGuesses(void)
+{
+    WORD totalDrawable;
+    WORD coveragePct;
+    WORD i;
+
+    if (gameState != GAME_MINIGAME_PLAYING || miniGameType != MINIGAME_PICTIONARY) return;
+
+    totalDrawable = (MAP_W - 2) * (MAP_H - 2);
+    coveragePct = (totalDrawable > 0) ? (pictionaryPaintedCount * 100) / totalDrawable : 0;
+    if (coveragePct < PICTIONARY_AI_MIN_COVERAGE_PCT) return;
+
+    for (i = humanPlayers; i < robotCount; i++) {
+        if (i == pictionaryDrawer) continue;
+        if (pictionaryGuessed[i]) continue;
+        if (RandRange(PICTIONARY_AI_GUESS_CHANCE) != 0) continue;
+        TryPictionaryGuess(i);
+    }
+}
+
+
 static void ChooseBumperAiMove(WORD id)
 {
     static const WORD dirX[4] = {1, 0, -1, 0};
@@ -592,6 +741,8 @@ static void ChooseAiMove(WORD id)
         else if (miniGameType == MINIGAME_PUCK) ChoosePuckAiMove(id);
         else if (miniGameType == MINIGAME_BUMPER) ChooseBumperAiMove(id);
         else if (miniGameType == MINIGAME_AIRHOCKEY) ChooseAirHockeyAiMove(id);
+        else if (miniGameType == MINIGAME_BOWLING) ChooseBowlingAiMove(id);
+        else if (miniGameType == MINIGAME_FLOODHOUSE) ChooseFloodAiMove(id);
         return;
     }
 
@@ -867,6 +1018,7 @@ static void StepMainGameAiFire(void)
     for (tries = 0; tries < robotCount; tries++) {
         WORD id = nextAiShooter;
         WORD target = -1;
+        WORD stormTx = -1;
         WORD bestDist = fireRange + 1;
         WORD j;
 
@@ -886,9 +1038,28 @@ static void StepMainGameAiFire(void)
             if (dist <= 0 || dist > fireRange || dist >= bestDist) continue;
             if (!ClearBoltLane(robots[id].tileX, robots[id].tileY, robots[j].tileX, robots[j].tileY)) continue;
             target = j;
+            stormTx = -1;
             bestDist = dist;
         }
 
+        /* The runaway broken hoover carries a bonus for whoever stops it -
+         * let AI take the same shot a human already can, whenever it
+         * happens to be lined up on the storm's row. */
+        if (dirtStormActive && robots[id].tileY == dirtStormTileY) {
+            WORD candidateTx = FP_TO_INT(dirtStormPx) / TILE_SIZE;
+            WORD dist = AbsW(candidateTx - robots[id].tileX);
+            if (dist > 0 && dist <= fireRange && dist < bestDist &&
+                ClearBoltLane(robots[id].tileX, robots[id].tileY, candidateTx, dirtStormTileY)) {
+                target = -1;
+                stormTx = candidateTx;
+                bestDist = dist;
+            }
+        }
+
+        if (stormTx >= 0) {
+            FireRobotBolt(id, (stormTx < robots[id].tileX) ? -1 : 1, 0, TRUE, TRUE);
+            return;
+        }
         if (target >= 0) {
             WORD dirX = 0;
             WORD dirY = 0;

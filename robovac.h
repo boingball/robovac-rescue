@@ -242,7 +242,13 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define MINIGAME_AIRHOCKEY       4
 
-#define MINIGAME_COUNT           4
+#define MINIGAME_BOWLING         5
+
+#define MINIGAME_FLOODHOUSE      6
+
+#define MINIGAME_PICTIONARY      7
+
+#define MINIGAME_COUNT           7
 
 #define MINIGAME_INTRO_TICKS     100
 
@@ -257,6 +263,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RACE_MOVE_SPEED          (3 * FP_ONE)
 
 #define RACE_BOOST_SPEED         (5 * FP_ONE)
+
+#define RACE_SLICK_SPEED         (1 * FP_ONE)
 
 #define RACE_BOOST_MOVES         8
 
@@ -339,6 +347,136 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define AIRHOCKEY_BOOST_FLASH_TICKS    20
 
 #define AIRHOCKEY_BOOST_STUN_TICKS     15
+
+
+/* Robo Bowling: every robot gets its own private lane running the length of
+ * the map, walled off from its neighbours, with its own rack of ten "pin"
+ * tables (reusing TILE_TABLE) at the far end. A shared rack in the middle of
+ * the room meant whoever was already closest got there first every time;
+ * separate lanes make it a fair, individual game like real bowling.
+ *
+ * Standing anywhere in your lane and firing (the same bolt used to bump
+ * rivals in Bumper Bots) launches a ball straight down the lane - see the
+ * MINIGAME_BOWLING branch in StepPlayerBolt, which checks a small spread
+ * around the bolt's path each tick so a well-aimed throw can clear more
+ * than one pin, and lets the bolt travel through knocked pins instead of
+ * stopping dead on the first one. Ranking and points reuse Bumper Bots'
+ * pattern (a per-robot score, top three get 3/2/1) instead of a two-team
+ * split, since each robot's total is now entirely its own.
+ *
+ * Each pin cluster is a compact 2-wide x 5-tall block (10 pins) rather than
+ * the old wide 7-column triangle, so BOWLING_LANE_WIDTH lanes side by side
+ * (pins plus a one-tile wall divider) fit across the room; see StartRoboBowling
+ * for how lanes are actually laid out for the current robotCount. */
+#define BOWLING_TIME_TICKS          (90 * 50)
+
+#define BOWLING_PIN_COUNT           10
+
+#define BOWLING_PIN_COLS            2
+
+#define BOWLING_PIN_ROWS            5
+
+#define BOWLING_PIN_BASE_Y          2
+
+#define BOWLING_LANE_WIDTH          3
+
+#define BOWLING_LAUNCH_ROW          11
+
+#define BOWLING_FLASH_TICKS         40
+
+
+/* Flood House: everyone gets a fixed home tile and a 30-second build phase.
+ * Loose blocks are scattered on the floor; walking onto ANY block (loose,
+ * or sitting in a rival's fort) steals one level of it into your carry
+ * (max 2), and bumping a rival who is currently carrying also steals
+ * straight out of their carry slots. Fire places one carried block onto
+ * the tile you are facing, stacking up to 3 high. None of this touches
+ * map[][] - block state is its own per-tile height grid, since a floor
+ * tile needs to hold 0-3 and a tile type constant cannot - so a block
+ * never blocks a walk-through the way a wall or table would.
+ *
+ * When the timer runs out, survival is per-robot and structural: if every
+ * one of the 4 tiles orthogonally adjacent to YOUR home has a block on it
+ * (any height, 1 or more), the water can't reach your tile and you are
+ * "surrounded" - safe. Missing even one side floods you. Ranking and
+ * points reuse Bumper Bots' pattern (a per-robot rank score, top three get
+ * 3/2/1): surrounded robots always outrank flooded ones, tiebroken within
+ * each group by total blocks owned (carried + built on your own walls). */
+#define FLOODHOUSE_BUILD_TICKS       (30 * 50)
+
+#define FLOODHOUSE_CARRY_MAX         2
+
+#define FLOODHOUSE_STACK_MAX         3
+
+/* A full house needs exactly 4 (one per side); 3 loose blocks per robot -
+ * less than a single robot needs to wall up alone, let alone with rivals
+ * free to steal - meant every robot ran dry with a permanent gap in its
+ * wall and nothing left anywhere on the floor to top up with. 6 leaves
+ * enough spare per robot, after the 4 a full house costs, for the steal
+ * mechanic to actually matter instead of just being a race to starvation. */
+#define FLOODHOUSE_LOOSE_PER_ROBOT   6
+
+#define FLOODHOUSE_FLASH_TICKS       40
+
+#define FLOODHOUSE_PALETTE_TICKS     100
+
+#define FLOODHOUSE_FLOOD_PAUSE_TICKS (3 * 50)
+
+/* How fast the floor-tint overlay covers the whole map once the flood
+ * hits (see DrawFloodWaterOverlay) - a handful of frames, not the whole
+ * pause, so it reads as the floor suddenly flooding rather than a tide
+ * slowly climbing into view. */
+#define FLOODHOUSE_FLOOD_RISE_TICKS  8
+
+#define FLOODHOUSE_EVENT_NONE        0
+
+#define FLOODHOUSE_EVENT_STOLE       1
+
+#define FLOODHOUSE_EVENT_BUILT       2
+
+#define FLOODHOUSE_EVENT_RAIDED      3
+
+
+/* Pictionary: one human player at a time gets a secret word and a blank
+ * floor to draw on - only human players ever draw (there's no meaningful
+ * way for the AI to draw anything, so it only ever guesses), and every
+ * other robot (remaining humans and every AI rival) is a guesser during
+ * that turn. Drawing is deliberately toggle-based rather than true
+ * press-and-hold: this codebase has no existing "is fire currently held"
+ * state for either input method (see TryPictionaryToggle's comment), and
+ * every other action in the game is already a single press, so pressing
+ * fire once starts painting the tile under the drawer as they move over
+ * it, and pressing it again lifts the pen - functionally the same "push
+ * down to draw, let go to stop" request without inventing new held-input
+ * plumbing untestable on real hardware.
+ *
+ * A human guesser presses fire to claim a correct guess outright (the
+ * local honesty a shared-screen party game already runs on - there is no
+ * way to keep the word private from other people in the room anyway). An
+ * AI guesser never looks at the canvas - once enough of it is painted it
+ * starts rolling a per-tick chance to "guess", which reads as thinking it
+ * over rather than an instant answer. Turns rotate through every human
+ * player once; scoring reuses Bumper/Bowling's per-robot rank pattern
+ * (top three get 3/2/1) built from points earned guessing plus a bonus for
+ * the drawer whenever at least one guess lands. */
+#define PICTIONARY_TURN_TICKS         (25 * 50)
+
+#define PICTIONARY_WORD_COUNT         10
+
+#define PICTIONARY_GUESS_POINTS       3
+
+#define PICTIONARY_DRAW_BONUS_POINTS  2
+
+/* AI guessers only start rolling once at least this fraction (percent) of
+ * the drawable floor has been painted - guessing at an almost-blank canvas
+ * would read as the AI cheating rather than "thinking it over". */
+#define PICTIONARY_AI_MIN_COVERAGE_PCT 12
+
+/* Average ~2.4 seconds of "thinking" (at 50 ticks/sec) once an AI guesser
+ * becomes eligible, rather than guessing the instant it can. */
+#define PICTIONARY_AI_GUESS_CHANCE    120
+
+#define PICTIONARY_FLASH_TICKS        60
 
 
 /* Bumper Bots: a tiny floor "rug" island sits on the same TILE_WALL border
@@ -577,6 +715,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define RAW_4       0x04
 
 #define RAW_O       0x18
+#define RAW_P       0x19
 
 #define RAW_B       0x35
 
@@ -656,6 +795,8 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 
 #define BOLT_FIRE_SAMPLE_PATH "PROGDIR:samples/boltfire.8svx"
 
+#define GOAL_SAMPLE_PATH "PROGDIR:samples/goal.8svx"
+
 #define HOOVER_MOVE_SAMPLE_PATH "PROGDIR:samples/hoover-go-loop-low.8svx"
 
 /*
@@ -683,6 +824,7 @@ static const char __attribute__((used)) min_stack[] = "$STACK:65536";
 #define GO_AUDIO_CHANNEL 2
 
 #define BOLT_FIRE_AUDIO_CHANNEL 2
+#define GOAL_AUDIO_CHANNEL 2
 
 #define PAULA_CLOCK_HZ 3546895UL
 
@@ -1017,6 +1159,8 @@ static struct OneShotSample mainMusicSample;
 
 static struct OneShotSample boltFireSample;
 
+static struct OneShotSample goalSample;
+
 static struct OneShotSample hooverMoveSample;
 
 
@@ -1070,6 +1214,17 @@ static UWORD *audioSilenceWord = NULL;
 static BOOL demoModeActive = FALSE;
 
 static BOOL demoJoyPrimed = FALSE;
+
+/* Party Mode: a one-key shortcut from the title screen (P) straight into a
+ * match of nothing but Robo Party rounds - every mini-game exactly once, in
+ * a shuffled order, then the usual match-end leaderboard. Built for fast
+ * testing/showing off the party games without playing full cleaning rounds
+ * in between. */
+static BOOL partyModeActive = FALSE;
+
+static WORD partyModeQueue[MINIGAME_COUNT];
+
+static WORD partyModeQueueIndex = 0;
 
 static BOOL demoPrevLeft[MAX_HUMAN_PLAYERS] = {FALSE, FALSE};
 
@@ -1125,7 +1280,8 @@ enum AudioOwner {
     AUDIO_OWNER_ROUND_VOICE,
     AUDIO_OWNER_MAIN_MUSIC,
     AUDIO_OWNER_HOOVER_LOOP,
-    AUDIO_OWNER_BOLT_FIRE
+    AUDIO_OWNER_BOLT_FIRE,
+    AUDIO_OWNER_GOAL
 };
 
 
@@ -1258,6 +1414,85 @@ static WORD airhockeyScoringRobot = -1;
 static WORD airhockeyBoostCooldown[MAX_ROBOTS];
 
 static WORD airhockeyBoostFlashTicks = 0;
+
+/* Each robot bowls its own lane with its own private rack - bowlingPinX/Y
+ * are per-robot (row i = robot i's 10 pins), reset in place between frames
+ * rather than shared across the whole map. */
+static WORD bowlingPinX[MAX_ROBOTS][BOWLING_PIN_COUNT];
+
+static WORD bowlingPinY[MAX_ROBOTS][BOWLING_PIN_COUNT];
+
+static WORD bowlingPinsStanding[MAX_ROBOTS];
+
+static WORD bowlingLaneBaseX[MAX_ROBOTS];
+
+static WORD bowlingLaunchX[MAX_ROBOTS];
+
+static WORD bowlingLaunchY[MAX_ROBOTS];
+
+/* 0 = about to throw the frame's first ball, 1 = first ball already thrown
+ * this frame and some pins are still standing, so the next throw is the
+ * frame's second ball (real bowling's "spare" attempt) before the lane
+ * resets fresh. */
+static WORD bowlingBallsThisFrame[MAX_ROBOTS];
+
+static BOOL bowlingBallInFlight[MAX_ROBOTS];
+
+static WORD bowlingScore[MAX_ROBOTS];
+
+static WORD bowlingTicksRemaining = 0;
+
+static WORD bowlingLastKnockedRobot = -1;
+
+static WORD bowlingFlashTicks = 0;
+
+static UBYTE floodBlockHeight[MAP_H][MAP_W];
+
+static WORD floodCarried[MAX_ROBOTS];
+
+static BOOL floodSurrounded[MAX_ROBOTS];
+
+static WORD floodTicksRemaining = 0;
+
+static WORD floodPauseTicks = 0;
+
+static WORD floodLooseRemaining = 0;
+
+static WORD floodFlashTicks = 0;
+
+static WORD floodLastEventRobot = -1;
+
+static WORD floodLastEventKind = FLOODHOUSE_EVENT_NONE;
+
+static WORD floodPaletteTicks = 0;
+
+/* Which floor tiles the current drawer has painted - reset each turn, baked
+ * into the room buffer as an overlay the same way floodBlockHeight is (see
+ * DrawPictionaryPaintTile), since a tile constant can't hold "painted or
+ * not" alongside its normal floor/wall type. */
+static UBYTE pictionaryPainted[MAP_H][MAP_W];
+
+static WORD pictionaryPaintedCount = 0;
+
+static WORD pictionaryWordIndex = 0;
+
+static WORD pictionaryDrawer = -1;
+
+/* Index into the ordered list of human players taking a turn as drawer this
+ * round - not a robot id, since only humanPlayers-many turns ever happen. */
+static WORD pictionaryTurnIndex = 0;
+
+static WORD pictionaryTurnTicks = 0;
+
+static BOOL pictionaryPenDown[MAX_ROBOTS];
+
+static BOOL pictionaryGuessed[MAX_ROBOTS];
+
+static WORD pictionaryScore[MAX_ROBOTS];
+
+static WORD pictionaryLastGuesser = -1;
+
+static WORD pictionaryFlashTicks = 0;
 
 static WORD bumperTicksRemaining = 0;
 
@@ -1469,6 +1704,7 @@ static WORD dirtyPrevRobotTurnDirection[MAX_ROBOTS];
 static UBYTE dirtyPrevRobotQuadActive[MAX_ROBOTS];
 static UBYTE dirtyPrevRobotTileUnder[MAX_ROBOTS];
 static WORD dirtyPrevRobotSpeedFlashTicks[MAX_ROBOTS];
+static WORD dirtyPrevRobotFloodCarried[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPx[MAX_ROBOTS];
 static LONG dirtyPrevPlayerBoltPy[MAX_ROBOTS];
 static BOOL dirtyPrevPlayerBoltActive[MAX_ROBOTS];
@@ -1513,6 +1749,19 @@ static WORD dirtyPrevAirhockeyScoringTeam = -2;
 static WORD dirtyPrevBumperSecond = -1;
 static WORD dirtyPrevBumperAlive = -1;
 static WORD dirtyPrevBumperFlashTicks = -1;
+static WORD dirtyPrevBowlingSecond = -1;
+/* A running total across every robot's score is enough to catch any change
+ * cheaply - scores only ever count up during a round, so the sum can never
+ * go stale without the HUD noticing. */
+static WORD dirtyPrevBowlingScoreSum = -1;
+static WORD dirtyPrevBowlingFlashTicks = -1;
+static WORD dirtyPrevFloodSecond = -1;
+static WORD dirtyPrevFloodLooseRemaining = -1;
+static WORD dirtyPrevFloodFlashTicks = -1;
+static WORD dirtyPrevPictionarySecond = -1;
+static WORD dirtyPrevPictionaryScoreSum = -1;
+static WORD dirtyPrevPictionaryDrawer = -1;
+static WORD dirtyPrevPictionaryFlashTicks = -1;
 static LONG dirtyPrevDirtStormPx = 0;
 static WORD dirtyPrevDirtStormTileY = 0;
 static BOOL dirtyPrevDirtStormValid = FALSE;
@@ -1538,9 +1787,14 @@ static const WORD robotDockXTwoPlayer[MAX_ROBOTS]  = {1, 18, 18, 1, 17, 1, 1, 18
 
 static const WORD robotDockYTwoPlayer[MAX_ROBOTS]  = {1, 11, 1, 11, 11, 11, 11, 11, 11, 11};
 
-static const WORD raceStartX[MAX_ROBOTS] = {5, 5, 5, 6, 6, 6, 7, 7, 7, 8};
+/* The first four (the common case: solo plus up to three AI rivals) share
+ * one column, so all four start with equal forward progress toward the
+ * first gate - a 3-per-column-then-spill-over layout put the 4th racer in
+ * a new column at the SAME row as the 1st, one tile further along the
+ * track than everyone else, which read as starting in front of them. */
+static const WORD raceStartX[MAX_ROBOTS] = {5, 5, 5, 5, 6, 6, 6, 7, 7, 7};
 
-static const WORD raceStartY[MAX_ROBOTS] = {9, 10, 11, 9, 10, 11, 9, 10, 11, 10};
+static const WORD raceStartY[MAX_ROBOTS] = {9, 10, 11, 12, 9, 10, 11, 9, 10, 11};
 
 
 /* Spread around the rug with a one-tile buffer from the abyss edge, so
@@ -1550,10 +1804,20 @@ static const WORD bumperStartX[MAX_ROBOTS] = {7, 9, 11, 7, 12, 7, 12, 7, 9, 11};
 static const WORD bumperStartY[MAX_ROBOTS] = {5, 5, 5, 6, 6, 7, 7, 8, 8, 8};
 
 
+/* Two rows of five home tiles, three columns apart - plenty of clearance
+ * for each home's own 4-tile perimeter fort to never overlap a neighbour's. */
+static const WORD floodHomeX[MAX_ROBOTS] = {3, 6, 9, 12, 15, 3, 6, 9, 12, 15};
+
+static const WORD floodHomeY[MAX_ROBOTS] = {4, 4, 4, 4, 4, 9, 9, 9, 9, 9};
+
+
 /* Clockwise gates around the central island.  Robots start just beyond the
- * start/finish gate and must visit 1, 2, 3, then 0 to complete a lap. */
+ * start/finish gate and must visit 1, 2, 3, then 0 to complete a lap.
+ * Gate 0 is pulled back off row 12 - one tile shy of the bottom wall - so
+ * it reads as a gate on the open floor rather than tucked into the corner
+ * pocket down there. */
 static const struct RaceCheckpoint raceCheckpoints[RACE_CHECKPOINT_COUNT] = {
-    {4, 4, 9, 12, 4, 10},
+    {4, 4, 8, 11, 4, 9},
     {15, 18, 8, 8, 16, 8},
     {14, 14, 1, 3, 14, 2},
     {1, 4, 4, 4, 3, 4}
@@ -1601,6 +1865,12 @@ enum BoltSpriteFrame {
 
 static const char *roomNames[5] = {
     "Living Room", "Dining Room", "Kitchen", "Bathroom", "Bedroom"
+};
+
+
+static const char *pictionaryWords[PICTIONARY_WORD_COUNT] = {
+    "HOUSE", "ROBOT", "STAR", "TREE", "FISH",
+    "SUN", "HEART", "CAR", "BOAT", "CUP"
 };
 
 
@@ -1675,6 +1945,8 @@ static BOOL RobotLowBatteryWarningActive(WORD id);
 
 static WORD EmpRobotVisualState(WORD id);
 
+static void EmpRobotVisualAnchor(WORD id, WORD *outSx, WORD *outSy);
+
 static void GetEmpRobotVisualRectFromScreen(WORD sx, WORD sy, struct DirtyRect *rect);
 
 static BOOL GetEmpRobotVisualRect(WORD id, struct DirtyRect *rect);
@@ -1718,6 +1990,8 @@ static void StartMatch(WORD players, WORD rivals);
 static void StartDemoMode(void);
 
 static void StartHooverMode(void);
+
+static void StartPartyMode(void);
 
 static WORD MatchRoundCount(void);
 
@@ -1764,6 +2038,64 @@ static void FinishBumperBots(void);
 static void ChooseBumperAiMove(WORD id);
 
 static void StepBumperAiFire(void);
+
+static void StartRoboBowling(void);
+
+static void StepRoboBowling(void);
+
+static void FinishRoboBowling(void);
+
+static void ChooseBowlingAiMove(WORD id);
+
+static void ResetBowlingLane(WORD id);
+
+static void ResolveBowlingThrow(WORD id);
+
+static BOOL TryKnockdownPin(WORD id, WORD tx, WORD ty);
+
+static void ScatterFloodBlocks(void);
+
+static void StartFloodHouse(void);
+
+static void StepFloodHouse(void);
+
+static void FinishFloodHouse(void);
+
+static void ChooseFloodAiMove(WORD id);
+
+static void FloodHandleRobotArrival(WORD id);
+
+static void TryFloodRaidRobot(WORD blockedId, WORD attackerId);
+
+static BOOL TryFloodBuild(WORD id);
+
+static WORD FloodHomeWallCount(WORD id);
+
+static void ClearPictionaryCanvas(void);
+
+static BOOL StartPictionaryTurn(void);
+
+static void StartPictionary(void);
+
+static void StepPictionary(void);
+
+static void FinishPictionary(void);
+
+static void AdvancePictionaryTurn(void);
+
+static void TryPictionaryPaint(WORD id);
+
+static void TryPictionaryToggle(WORD id);
+
+static void TryPictionaryGuess(WORD id);
+
+static void StepPictionaryAiGuesses(void);
+
+static WORD FloodBlocksOwned(WORD id);
+
+static LONG FloodRank(WORD id);
+
+static void ResolveFloodHouse(void);
 
 static void RestartCurrentMiniGame(void);
 
@@ -1885,6 +2217,7 @@ static void StopGameplaySamples(void);
 static void ServiceHooverMoveSample(void);
 
 static void PlayBoltFireSample(void);
+static void PlayGoalSample(void);
 
 static UWORD AudioDmaBit(WORD channel);
 
@@ -2112,6 +2445,9 @@ static void BlitTileTo(struct RastPort *rp, UBYTE tileType, WORD tx, WORD ty);
 static BOOL IsWallTileAt(WORD tx, WORD ty);
 static UBYTE GetWallRotation(WORD tx, WORD ty);
 static void BlitWallRotatedTo(struct RastPort *rp, WORD tx, WORD ty);
+static void DrawFloodBlockTile(struct RastPort *rp, WORD tx, WORD ty);
+
+static void DrawPictionaryPaintTile(struct RastPort *rp, WORD tx, WORD ty);
 static void UpdateRoomTile(WORD tx, WORD ty);
 static void BuildRoomBuffer(void);
 static void CopyRobotPixel(struct RastPort *srcRP, struct RastPort *dstRP, struct RastPort *maskRP,
@@ -2155,7 +2491,7 @@ static BOOL InitRobotBobs(void);
 static void PlotRobotPixel(WORD x, WORD y, UBYTE pen);
 static void DrawRobotBobScaled2Cpu(WORD srcX, WORD sx, WORD sy);
 static void DrawRobotBobScaled2(WORD srcX, WORD sx, WORD sy);
-static void DrawRobotBobTurn45(WORD srcX, WORD sx, WORD sy, WORD turnDirection);
+static void DrawRobotBobRotated(WORD srcX, WORD sx, WORD sy, WORD angleStep);
 static void BuildSpeedTrailBar(struct RastPort *maskRP, WORD x, WORD y,
                                WORD w, WORD h, UBYTE pen);
 static void DrawSpeedMotionBlur(WORD id, WORD sx, WORD sy);
@@ -2203,6 +2539,7 @@ static void ChooseAiMove(WORD id);
 static void ChoosePlayerMove(WORD id);
 static BOOL AnyRobotCanMove(void);
 static WORD MatchRoundCount(void);
+static void FinalizeMatchEnd(void);
 static void CheckEndState(void);
 static void ResetBonusBoss(void);
 static void BossStunRobot(WORD id, const char *label);
@@ -2246,6 +2583,10 @@ static void DrawRaceHud(void);
 static void DrawPuckHud(void);
 static void DrawAirHockeyHud(void);
 static void DrawBumperHud(void);
+static void DrawBowlingHud(void);
+static void DrawFloodHouseHud(void);
+static void DrawFloodWaterOverlay(void);
+static void DrawPictionaryHud(void);
 static void DrawIntroTitleImage(void);
 static void DrawRoundStartOverlay(void);
 static void DrawPauseMenu(void);

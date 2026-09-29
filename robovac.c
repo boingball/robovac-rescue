@@ -111,7 +111,17 @@ static BOOL ActivateSpaceOrFireAction(void)
         return TRUE;
     }
     if (gameState == GAME_MINIGAME_INTRO) { RestartCurrentMiniGame(); return TRUE; }
-    if (gameState == GAME_MINIGAME_END) { roundIndex++; MarkHudStatusTextDirty(); ResetLevel(); return TRUE; }
+    if (gameState == GAME_MINIGAME_END) {
+        roundIndex++;
+        MarkHudStatusTextDirty();
+        if (partyModeActive) {
+            if (partyModeQueueIndex >= MINIGAME_COUNT) FinalizeMatchEnd();
+            else StartMiniGameIntro();
+        } else {
+            ResetLevel();
+        }
+        return TRUE;
+    }
     if (gameState == GAME_MATCH_END && bonusAvailable) { StartBonusRound(); return TRUE; }
     if (gameState == GAME_BONUS_END || gameState == GAME_MATCH_END) { EnterTitleScreen(); return TRUE; }
     if (gameState == GAME_TITLE && titleTwoPlayerArmed && !titlePlayer2Locked) { TitleLockPlayer2(); return TRUE; }
@@ -191,6 +201,7 @@ static void HandleRawKey(UWORD rawCode)
          * pulls the rug out from under whatever the player was choosing
          * and can leave that menu's cached overlay stuck on screen. */
         if (code == RAW_D && !aiDifficultyMenuOpen && !aiSelectMenuOpen) { StartHooverMode(); return; }
+        if (code == RAW_P && !aiDifficultyMenuOpen && !aiSelectMenuOpen) { StartPartyMode(); return; }
         if (code == RAW_0 && titleTwoPlayerArmed && titlePlayer2Locked) { OpenAiSelectMenu(0); return; }
         if (code == RAW_1) { StartWithRivals(1); return; }
         if (code == RAW_2) { StartWithRivals(2); return; }

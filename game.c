@@ -984,10 +984,14 @@ static void ResetLevel(void)
 }
 
 
+/* Every cleaning round is followed by a Robo Party interlude, except the
+ * match's last round (which ends the match instead - see the GAME_MATCH_END
+ * branch in CheckEndState). A longer match, with more robots and so a
+ * higher MatchRoundCount(), simply gets more of both. */
 static BOOL ShouldStartMiniGameAfterRound(WORD completedRound)
 {
     if (completedRound >= MatchRoundCount() - 1) return FALSE;
-    return (completedRound == 1 || completedRound == 3) ? TRUE : FALSE;
+    return TRUE;
 }
 
 
@@ -1035,6 +1039,15 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
     ny = robots[id].tileY + dy;
 
     if (nx >= 0 && ny >= 0 && nx < MAP_W && ny < MAP_H && map[ny][nx] == TILE_TABLE) {
+        /* Bowling pins are only ever cleared by firing at them now (see the
+         * MINIGAME_BOWLING branch in StepPlayerBolt) - walking into one just
+         * blocks the move, the same as any other solid obstacle, rather than
+         * pushing it out of its tracked rack position (which ResetBowlingLane
+         * relies on staying fixed between frames) or knocking it down for
+         * free. */
+        if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING) {
+            return FALSE;
+        }
         if (!TryPushTable(id, nx, ny, dx, dy)) return FALSE;
     }
     if (!RobotCanPassTile(id, nx, ny)) return FALSE;
@@ -1049,6 +1062,11 @@ static BOOL StartRobotMove(WORD id, WORD dx, WORD dy)
             if (!TryRaceBumpRobot(blockedId, dx, dy)) return FALSE;
         } else if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER) {
             if (!BumperPushRobot(blockedId, dx, dy, BUMPER_BUMP_PUSH_TILES, id)) return FALSE;
+        } else if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE) {
+            /* Bumping a rival raids whatever they are currently carrying,
+             * but never lets the two robots swap tiles. */
+            TryFloodRaidRobot(blockedId, id);
+            return FALSE;
         } else if (gameState != GAME_BONUS_PLAYING ||
                    !TryPushStrandedRobot(blockedId, dx, dy)) {
             return FALSE;
@@ -1129,6 +1147,10 @@ static void FinishRobotTileMove(WORD id)
         if (miniGameType == MINIGAME_RACE) {
             if (raceBoostMoves[id] > 0) raceBoostMoves[id]--;
             RaceHandleRobotArrival(id);
+        } else if (miniGameType == MINIGAME_FLOODHOUSE) {
+            FloodHandleRobotArrival(id);
+        } else if (miniGameType == MINIGAME_PICTIONARY) {
+            TryPictionaryPaint(id);
         }
         return;
     }
@@ -1184,7 +1206,15 @@ static void StepRobotMovement(WORD id)
         LONG stepSpeed;
         if (gameState == GAME_MINIGAME_PLAYING) {
             if (miniGameType == MINIGAME_RACE) {
-                stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
+                /* An oil slick tile (see StartRoboRace) slows the move onto
+                 * it down instead of blocking it, same as boost pads speed
+                 * a move up - both read the destination tile the robot is
+                 * already committed to entering. */
+                if (map[robots[id].targetY][robots[id].targetX] == TILE_OBSTACLE) {
+                    stepSpeed = RACE_SLICK_SPEED;
+                } else {
+                    stepSpeed = (raceBoostMoves[id] > 0) ? RACE_BOOST_SPEED : RACE_MOVE_SPEED;
+                }
             } else {
                 /* Puck and Bumper Bots share the same snappier step speed. */
                 stepSpeed = PUCK_ROBOT_MOVE_SPEED;
@@ -1277,6 +1307,28 @@ static WORD MatchRoundCount(void)
 }
 
 
+/* Shared by the normal cleaning-round match end (CheckEndState) and Party
+ * Mode's all-minigame match end (ActivateSpaceOrFireAction) - whichever
+ * path got here, the final winner and bonus-round eligibility are worked
+ * out from totalScores[] the same way. */
+static void FinalizeMatchEnd(void)
+{
+    WORD i;
+
+    finalWinner = 0;
+    for (i = 1; i < robotCount; i++) {
+        if (totalScores[i] > totalScores[finalWinner]) {
+            finalWinner = i;
+        }
+    }
+    bonusAvailable = FALSE;
+    for (i = 0; i < robotCount; i++) {
+        if (totalScores[i] > BONUS_SCORE_THRESHOLD) bonusAvailable = TRUE;
+    }
+    gameState = GAME_MATCH_END;
+}
+
+
 static void CheckEndState(void)
 {
     WORD i;
@@ -1312,17 +1364,7 @@ static void CheckEndState(void)
     }
 
     if (roundIndex >= MatchRoundCount() - 1) {
-        finalWinner = 0;
-        for (i = 1; i < robotCount; i++) {
-            if (totalScores[i] > totalScores[finalWinner]) {
-                finalWinner = i;
-            }
-        }
-        bonusAvailable = FALSE;
-        for (i = 0; i < robotCount; i++) {
-            if (totalScores[i] > BONUS_SCORE_THRESHOLD) bonusAvailable = TRUE;
-        }
-        gameState = GAME_MATCH_END;
+        FinalizeMatchEnd();
     } else {
         gameState = GAME_ROUND_END;
     }
@@ -1666,6 +1708,7 @@ static void EnterTitleScreen(void)
     humanPlayers = 1;
     demoModeActive = FALSE;
     hooverModeActive = FALSE;
+    partyModeActive = FALSE;
     demoJoyPrimed = FALSE;
     titleIdleTicks = 0;
     titleSelectPlayer = 0;
@@ -1740,6 +1783,9 @@ static void StepGame(void)
         if (miniGameType == MINIGAME_PUCK) StepRoboPuck();
         else if (miniGameType == MINIGAME_BUMPER) StepBumperBots();
         else if (miniGameType == MINIGAME_AIRHOCKEY) StepAirHockey();
+        else if (miniGameType == MINIGAME_BOWLING) StepRoboBowling();
+        else if (miniGameType == MINIGAME_FLOODHOUSE) StepFloodHouse();
+        else if (miniGameType == MINIGAME_PICTIONARY) StepPictionary();
         else StepRoboRace();
         return;
     }
@@ -2062,6 +2108,7 @@ static void StartMatch(WORD players, WORD rivals)
 {
     WORD i;
     StopMenuMusic();
+    partyModeActive = FALSE;
     humanPlayers = players;
     if (humanPlayers < 1) humanPlayers = 1;
     if (humanPlayers > MAX_HUMAN_PLAYERS) humanPlayers = MAX_HUMAN_PLAYERS;
@@ -2083,6 +2130,32 @@ static void StartMatch(WORD players, WORD rivals)
     aiDifficultyMenuOpen = FALSE;
     ResetAllJoystickConfirmHolds();
     ResetLevel();
+}
+
+
+/* Party Mode: skips cleaning rounds entirely and plays every Robo Party
+ * mini-game exactly once, in a shuffled order, ending on the normal
+ * match-end leaderboard (and bonus round, if anyone qualifies) - a fast,
+ * one-key way to see (or show off) every party game without playing a full
+ * match around them. Solo plus three AI rivals, Normal difficulty, no menu
+ * in the way. */
+static void StartPartyMode(void)
+{
+    WORD i;
+
+    for (i = 0; i < MINIGAME_COUNT; i++) partyModeQueue[i] = i + 1;
+    for (i = MINIGAME_COUNT - 1; i > 0; i--) {
+        WORD j = (WORD)RandRange(i + 1);
+        WORD tmp = partyModeQueue[i];
+        partyModeQueue[i] = partyModeQueue[j];
+        partyModeQueue[j] = tmp;
+    }
+    partyModeQueueIndex = 0;
+
+    aiDifficulty = 1;
+    StartMatch(1, 3);
+    partyModeActive = TRUE;
+    StartMiniGameIntro();
 }
 
 
@@ -2224,8 +2297,9 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
 {
     struct Bolt *bolt;
     BOOL bumperPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER);
+    BOOL bowlingPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING);
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying && !bowlingPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= robotCount) return;
     if (robots[id].stunTicks > 0) return;
@@ -2245,7 +2319,10 @@ static void FireRobotBolt(WORD id, WORD dirX, WORD dirY, BOOL useBattery, BOOL p
     bolt->dirY = dirY;
     bolt->px = TO_FP(robots[id].tileX * TILE_SIZE);
     bolt->py = TO_FP(robots[id].tileY * TILE_SIZE);
-    bolt->ttl = (gameState == GAME_BONUS_PLAYING) ? 42 : 24;
+    /* A bowling ball needs to cross the whole length of the lane (up to
+     * MAP_H - 2 tiles) at the same 5px/tick speed every other bolt moves
+     * at, well beyond the normal 24-tick lifetime. */
+    bolt->ttl = (gameState == GAME_BONUS_PLAYING) ? 42 : bowlingPlaying ? 40 : 24;
     if (playSound) PlayBoltFireSample();
 }
 
@@ -2260,8 +2337,12 @@ static void FirePlayerBolt(WORD id)
     WORD dirX = 0, dirY = 0;
     BOOL bumperPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BUMPER);
     BOOL airHockeyPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_AIRHOCKEY);
+    BOOL floodPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_FLOODHOUSE);
+    BOOL bowlingPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING);
+    BOOL pictionaryPlaying = (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_PICTIONARY);
 
-    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING && !bumperPlaying && !airHockeyPlaying) return;
+    if (gameState != GAME_PLAYING && gameState != GAME_BONUS_PLAYING &&
+        !bumperPlaying && !airHockeyPlaying && !floodPlaying && !bowlingPlaying && !pictionaryPlaying) return;
     if (RoundStartLocked()) return;
     if (id < 0 || id >= humanPlayers || id >= MAX_HUMAN_PLAYERS) return;
 
@@ -2270,6 +2351,22 @@ static void FirePlayerBolt(WORD id)
      * through to the normal aim-and-fire logic below. */
     if (airHockeyPlaying) {
         TryAirHockeyBoost(id);
+        return;
+    }
+
+    /* Flood House's fire button places a carried block onto the tile the
+     * robot is currently facing, instead of firing a bolt. */
+    if (floodPlaying) {
+        TryFloodBuild(id);
+        return;
+    }
+
+    /* Pictionary's fire button means two different things depending on who
+     * presses it: the current drawer toggles their pen, everyone else is
+     * claiming a correct guess. */
+    if (pictionaryPlaying) {
+        if (id == pictionaryDrawer) TryPictionaryToggle(id);
+        else TryPictionaryGuess(id);
         return;
     }
 
@@ -2316,6 +2413,24 @@ static void StepPlayerBolt(WORD ownerId)
     bolt->py += bolt->dirY * (5 * FP_ONE);
     tx = FP_TO_INT(bolt->px) / TILE_SIZE;
     ty = FP_TO_INT(bolt->py) / TILE_SIZE;
+
+    if (gameState == GAME_MINIGAME_PLAYING && miniGameType == MINIGAME_BOWLING) {
+        /* A real ball keeps travelling through pins instead of stopping dead
+         * on the first one, so knock down TILE_TABLE tiles along the way
+         * without deactivating the bolt - only the wall at the end of the
+         * lane (IsBlocked, below) or the ttl running out actually stops it.
+         * Checking a one-tile spread either side of the exact column (not
+         * just tx,ty itself) means a throw doesn't have to land pixel-perfect
+         * on a single-column pin to clear it, the way a real ball's width
+         * would clip a neighbouring pin too. */
+        WORD nx;
+        for (nx = tx - 1; nx <= tx + 1; nx++) {
+            if (nx < 0 || nx >= MAP_W || ty < 0 || ty >= MAP_H) continue;
+            if (map[ty][nx] == TILE_TABLE) TryKnockdownPin(ownerId, nx, ty);
+        }
+        if (IsBlocked(tx, ty)) bolt->active = FALSE;
+        return;
+    }
 
     if (IsBlocked(tx, ty)) { bolt->active = FALSE; return; }
 
