@@ -16,7 +16,7 @@ Each joystick stays disabled until its fire button is pressed; then `J1`/`J2` ap
 
 Detailed actions:
 
-- Player 1: arrow keys move; `B` shoots a bolt. On the title carousel, joystick 1 fire selects/focuses Player 1 instead of starting the match.
+- Player 1: arrow keys move; `B` or `Space` shoots a bolt. On the title carousel, joystick 1 fire selects/focuses Player 1 instead of starting the match.
 - Player 2: `Z` left, `X` down, `C` right, `S` up; `V` shoots a bolt.
 - Title carousel:
   - By default this is a one-player game and Left/Right arrows choose Player 1's hoover.

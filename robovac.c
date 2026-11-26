@@ -224,6 +224,10 @@ static void HandleRawKey(UWORD rawCode)
 
     if (!keyUpEvent && (code == RAW_SPACE || code == RAW_RETURN)) {
         if (ActivateSpaceOrFireAction()) return;
+        /* Nothing to confirm: Space is player 1's fire, as the joystick's
+         * button is (B still fires too). FirePlayerBolt ignores it outside
+         * play and the mini-games that use the bolt. */
+        if (code == RAW_SPACE) { FirePlayerBolt(0); return; }
     }
 
     switch (code) {

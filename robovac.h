@@ -35,7 +35,7 @@
  *   to the compiler - see the Makefile.)
  *
  * Controls:
- *   Arrow keys / B - move player 1 robot / fire bolts
+ *   Arrow keys / B or Space - move player 1 robot / fire bolts
  *   Z/X/C/S / V   - move player 2 robot / fire bolts
  *   Joysticks     - disabled until that joystick fire is pressed (J1/J2 shown)
  *                 Title menu also enables J1/J2 from fire so the carousel can be used
